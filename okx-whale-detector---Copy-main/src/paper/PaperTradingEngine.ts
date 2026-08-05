@@ -42,6 +42,8 @@ export interface PaperOrderResult {
   readonly normalizedContracts: number;
   readonly normalizedLimitPrice: number | null;
   readonly filledContracts: number;
+  readonly contractValue: number;
+  readonly maximumLeverage: number;
   readonly averagePrice: number | null;
   readonly fee: number;
   readonly slippageBps: number | null;
@@ -55,6 +57,7 @@ export interface PaperPosition {
   readonly instrumentId: string;
   readonly direction: 'LONG' | 'SHORT';
   readonly contracts: number;
+  readonly contractValue: number;
   readonly averageEntryPrice: number;
   readonly leverage: number;
   readonly openedAt: number;
@@ -68,6 +71,7 @@ export interface PaperClosedTrade {
   readonly openedAt: number;
   readonly closedAt: number;
   readonly contracts: number;
+  readonly contractValue: number;
   readonly entryPrice: number;
   readonly exitPrice: number;
   readonly grossPnl: number;
@@ -184,6 +188,21 @@ const isMarketableLimit = (input: {
     : bestBid !== undefined && input.limitPrice <= bestBid;
 };
 
+const toUnderlyingBook = (
+  book: ExecutionOrderBook,
+  contractValue: number,
+): ExecutionOrderBook => ({
+  observedAt: book.observedAt,
+  bids: book.bids.map((level) => ({
+    price: level.price,
+    quantity: level.quantity * contractValue,
+  })),
+  asks: book.asks.map((level) => ({
+    price: level.price,
+    quantity: level.quantity * contractValue,
+  })),
+});
+
 const dayKey = (timestamp: number): string =>
   new Date(timestamp).toISOString().slice(0, 10);
 
@@ -214,9 +233,16 @@ export class PaperTradingEngine {
     if (this.orderTimes.has(input.intent.orderId)) {
       throw new Error(`duplicate orderId ${input.intent.orderId}`);
     }
+
+    const baseResult = {
+      orderId: input.intent.orderId,
+      contractValue: input.specification.contractValue,
+      maximumLeverage: input.specification.maximumLeverage,
+      liveExecutionAllowed: false as const,
+    };
     if (input.intent.instrumentId !== input.specification.instrumentId) {
       return this.recordOrder(input.intent, {
-        orderId: input.intent.orderId,
+        ...baseResult,
         status: 'REJECTED',
         normalizedContracts: 0,
         normalizedLimitPrice: null,
@@ -227,7 +253,6 @@ export class PaperTradingEngine {
         attempts: 1,
         simulatedLatencyMs: 0,
         rejectionReasons: ['INSTRUMENT_SPECIFICATION_MISMATCH'],
-        liveExecutionAllowed: false,
       });
     }
 
@@ -268,7 +293,7 @@ export class PaperTradingEngine {
     }
     if (validationReasons.length > 0) {
       return this.recordOrder(input.intent, {
-        orderId: input.intent.orderId,
+        ...baseResult,
         status: 'REJECTED',
         normalizedContracts,
         normalizedLimitPrice,
@@ -279,7 +304,6 @@ export class PaperTradingEngine {
         attempts: 1,
         simulatedLatencyMs: 0,
         rejectionReasons: validationReasons,
-        liveExecutionAllowed: false,
       });
     }
 
@@ -291,7 +315,7 @@ export class PaperTradingEngine {
     const attempts = Math.min(maximumAttempts, transientFailures + 1);
     if (transientFailures >= maximumAttempts) {
       return this.recordOrder(input.intent, {
-        orderId: input.intent.orderId,
+        ...baseResult,
         status: 'RETRY_EXHAUSTED',
         normalizedContracts,
         normalizedLimitPrice,
@@ -304,14 +328,13 @@ export class PaperTradingEngine {
           this.policy.execution.latencyMs +
           this.policy.retryDelayMs * this.policy.maximumRetries,
         rejectionReasons: ['TRANSIENT_API_FAILURES_EXHAUSTED'],
-        liveExecutionAllowed: false,
       });
     }
 
     const fill = simulateMarketOrder({
       side: input.intent.side,
-      quantity: normalizedContracts,
-      book: input.book,
+      quantity: normalizedContracts * input.specification.contractValue,
+      book: toUnderlyingBook(input.book, input.specification.contractValue),
       policy: {
         ...this.policy.execution,
         latencyMs:
@@ -320,11 +343,11 @@ export class PaperTradingEngine {
       },
     });
     return this.recordOrder(input.intent, {
-      orderId: input.intent.orderId,
+      ...baseResult,
       status: fill.status,
       normalizedContracts,
       normalizedLimitPrice,
-      filledContracts: fill.filledQuantity,
+      filledContracts: fill.filledQuantity / input.specification.contractValue,
       averagePrice: fill.averagePrice,
       fee: fill.fee,
       slippageBps: fill.slippageBps,
@@ -333,7 +356,6 @@ export class PaperTradingEngine {
         this.policy.execution.latencyMs +
         this.policy.retryDelayMs * transientFailures,
       rejectionReasons: fill.rejectionReasons,
-      liveExecutionAllowed: false,
     });
   }
 
@@ -353,6 +375,9 @@ export class PaperTradingEngine {
       throw new Error('Only filled paper orders can open positions');
     }
     requirePositive(input.leverage, 'leverage');
+    if (input.leverage > input.order.maximumLeverage) {
+      throw new Error('leverage exceeds contract maximum');
+    }
     requireTimestamp(input.openedAt, 'openedAt');
     if (this.positions.has(input.instrumentId)) {
       throw new Error(`position already exists for ${input.instrumentId}`);
@@ -361,6 +386,7 @@ export class PaperTradingEngine {
       instrumentId: input.instrumentId,
       direction: input.direction,
       contracts: input.order.filledContracts,
+      contractValue: input.order.contractValue,
       averageEntryPrice: input.order.averagePrice,
       leverage: input.leverage,
       openedAt: input.openedAt,
@@ -382,7 +408,7 @@ export class PaperTradingEngine {
       throw new Error('fundingRatePercent must be finite');
     }
     const notional =
-      position.averageEntryPrice * position.contracts;
+      position.averageEntryPrice * position.contracts * position.contractValue;
     const fundingPnl =
       notional *
       (input.fundingRatePercent / 100) *
@@ -414,12 +440,16 @@ export class PaperTradingEngine {
     ) {
       throw new Error('A filled closing order is required');
     }
+    if (input.order.contractValue !== position.contractValue) {
+      throw new Error('closing order contract value does not match position');
+    }
     const contracts = Math.min(position.contracts, input.order.filledContracts);
-    const grossPnlPerContract =
+    const grossPnlPerUnderlyingUnit =
       position.direction === 'LONG'
         ? input.order.averagePrice - position.averageEntryPrice
         : position.averageEntryPrice - input.order.averagePrice;
-    const grossPnl = grossPnlPerContract * contracts;
+    const grossPnl =
+      grossPnlPerUnderlyingUnit * contracts * position.contractValue;
     const fees = input.entryFee + input.order.fee;
     const trade: PaperClosedTrade = {
       tradeId: `${input.instrumentId}:${position.openedAt}:${input.closedAt}`,
@@ -428,6 +458,7 @@ export class PaperTradingEngine {
       openedAt: position.openedAt,
       closedAt: input.closedAt,
       contracts,
+      contractValue: position.contractValue,
       entryPrice: position.averageEntryPrice,
       exitPrice: input.order.averagePrice,
       grossPnl,
