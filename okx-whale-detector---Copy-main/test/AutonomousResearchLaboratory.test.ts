@@ -106,20 +106,22 @@ const fixtures = () => {
   };
 };
 
+const cycleInput = (fixture: ReturnType<typeof fixtures>) => ({
+  cycleId: 'cycle-1',
+  datasetFingerprint: fixture.datasetFingerprint,
+  codeCommit: fixture.codeCommit,
+  configurationHash: fixture.configurationHash,
+  createdAt: 100,
+  hypothesisReport: fixture.hypothesisReport,
+  featureReport: fixture.featureReport,
+  candidateReports: [fixture.candidateReport],
+  backtestPlan: fixture.backtestPlan,
+});
+
 describe('autonomous research laboratory', () => {
   it('builds a deterministic schedulable DAG without promotion authority', () => {
     const fixture = fixtures();
-    const input = {
-      cycleId: 'cycle-1',
-      datasetFingerprint: fixture.datasetFingerprint,
-      codeCommit: fixture.codeCommit,
-      configurationHash: fixture.configurationHash,
-      createdAt: 100,
-      hypothesisReport: fixture.hypothesisReport,
-      featureReport: fixture.featureReport,
-      candidateReports: [fixture.candidateReport],
-      backtestPlan: fixture.backtestPlan,
-    };
+    const input = cycleInput(fixture);
     const first = buildAutonomousResearchCycle(input);
     const second = buildAutonomousResearchCycle(input);
 
@@ -131,18 +133,51 @@ describe('autonomous research laboratory', () => {
     expect(() => new ExperimentScheduler(first.taskSpecs)).not.toThrow();
   });
 
+  it('changes cycle identity when scheduling policy changes', () => {
+    const fixture = fixtures();
+    const baseline = buildAutonomousResearchCycle(cycleInput(fixture));
+    const changedPolicy = buildAutonomousResearchCycle({
+      ...cycleInput(fixture),
+      policy: {
+        defaultLeaseDurationMs: 30 * 60_000,
+        backtestResourceUnits: 8,
+      },
+    });
+
+    expect(changedPolicy.status).toBe('READY_TO_SCHEDULE');
+    expect(changedPolicy.cycleFingerprint).not.toBe(baseline.cycleFingerprint);
+    expect(changedPolicy.taskSpecs).not.toEqual(baseline.taskSpecs);
+  });
+
+  it('binds readiness and blockers into the cycle fingerprint', () => {
+    const fixture = fixtures();
+    const ready = buildAutonomousResearchCycle(cycleInput(fixture));
+    const blockedHypotheses = {
+      ...fixture.hypothesisReport,
+      readyCount: 0,
+      blockedCount: fixture.hypothesisReport.generatedCount,
+      hypotheses: fixture.hypothesisReport.hypotheses.map((hypothesis) => ({
+        ...hypothesis,
+        status: 'BLOCKED' as const,
+        blockingReasons: ['MISSING_DATA_CAPABILITY:CANDLES'],
+      })),
+    };
+    const blocked = buildAutonomousResearchCycle({
+      ...cycleInput(fixture),
+      hypothesisReport: blockedHypotheses,
+    });
+
+    expect(blocked.status).toBe('BLOCKED');
+    expect(blocked.taskSpecs).toEqual([]);
+    expect(blocked.blockingReasons).toContain('NO_READY_HYPOTHESES');
+    expect(blocked.cycleFingerprint).not.toBe(ready.cycleFingerprint);
+  });
+
   it('blocks dataset fingerprint mismatches', () => {
     const fixture = fixtures();
     const cycle = buildAutonomousResearchCycle({
-      cycleId: 'cycle-1',
+      ...cycleInput(fixture),
       datasetFingerprint: 'different-dataset',
-      codeCommit: fixture.codeCommit,
-      configurationHash: fixture.configurationHash,
-      createdAt: 100,
-      hypothesisReport: fixture.hypothesisReport,
-      featureReport: fixture.featureReport,
-      candidateReports: [fixture.candidateReport],
-      backtestPlan: fixture.backtestPlan,
     });
 
     expect(cycle.status).toBe('BLOCKED');
@@ -154,17 +189,7 @@ describe('autonomous research laboratory', () => {
 
   it('reports evidence acquisition gaps and deterministic next actions', () => {
     const fixture = fixtures();
-    const cycle = buildAutonomousResearchCycle({
-      cycleId: 'cycle-1',
-      datasetFingerprint: fixture.datasetFingerprint,
-      codeCommit: fixture.codeCommit,
-      configurationHash: fixture.configurationHash,
-      createdAt: 100,
-      hypothesisReport: fixture.hypothesisReport,
-      featureReport: fixture.featureReport,
-      candidateReports: [fixture.candidateReport],
-      backtestPlan: fixture.backtestPlan,
-    });
+    const cycle = buildAutonomousResearchCycle(cycleInput(fixture));
     const scheduler = new ExperimentScheduler(cycle.taskSpecs).snapshot(100);
     const report = buildContinuousResearchReport({
       cycle,
