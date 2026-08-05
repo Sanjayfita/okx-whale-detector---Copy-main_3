@@ -9,13 +9,13 @@ The detector emits **heuristic research signals**. They are not a guarantee of f
 Current status:
 
 - Market scope: OKX `SWAP` and `FUTURES` only.
-- Research-platform engineering: implemented through shadow trading and reviewed as the maintained foundation.
+- Research-platform engineering: maintained as the permanent foundation and hardened for point-in-time empirical research.
 - Strategy profitability: **not validated**.
 - Strategy release: **BLOCKED** because corrected real-market discovery, frozen holdout, prolonged paper, shadow, and paired-baseline evidence are absent.
 - Paper and shadow research: available only after their prerequisite data and validation gates.
 - Testnet/live order execution: **disabled**.
 
-Merging the research platform into `main` means the software passed its engineering gate. It does not promote a strategy or prove positive expectancy.
+Passing the engineering gate means the software can support controlled experiments. It does not promote a strategy or prove positive expectancy.
 
 ## Installation and supported commands
 
@@ -78,11 +78,11 @@ Do not mix old spot observations with a new derivatives evaluation. Existing spo
 - `src/clients/okx` — OKX REST and WebSocket adapters.
 - `src/core` — market-state, order-book, and detector orchestration.
 - `src/types` — shared TypeScript contracts.
-- `src/data` — canonical records, integrity validation, historical recovery, and supervised continuous collection.
+- `src/data` — canonical records, point-in-time availability, integrity validation, historical recovery, and supervised continuous collection.
 - `src/storage` and `db/migrations` — PostgreSQL persistence contracts and normalized research/audit schemas.
-- `src/features` and `src/orderflow` — timestamp-bounded features and support-aware advanced order flow.
+- `src/features` and `src/orderflow` — receipt-time-bounded features, block-aware importance, and support-aware advanced order flow.
 - `src/regime` and `src/timeframe` — explainable market classification and top-down timeframe context.
-- `src/strategy` and `src/research` — strategy laboratory, AI research governance, feature selection, purged optimization, robustness, Monte Carlo, and comparison.
+- `src/strategy` and `src/research` — strategy laboratory, bounded candidate generation, experiment manifests, feature selection, purged optimization, significance testing, robustness, Monte Carlo, comparison, and consolidated audit reporting.
 - `src/portfolio` and `src/risk` — Kelly/risk-parity allocation, correlation-complete portfolio controls, and point-in-time event filtering.
 - `src/explainability` — structured machine-readable and human-readable trade explanations.
 - `src/backtest`, `src/paper`, and `src/shadow` — depth-aware execution, paper execution, and live-data shadow evaluation.
@@ -91,22 +91,39 @@ Do not mix old spot observations with a new derivatives evaluation. Existing spo
 - `src/tools` — operational and research command-line tools.
 - `test` — unit, integration, chronology, research, database, and regression tests.
 
+## Empirical research controls
+
+Every historical feature input is selected using both exchange observation time and local receipt time. Each source has a bounded lookback and freshness policy, and feature output records how many observations were excluded as future, unavailable at the decision time, or outside the window.
+
+Strategy and feature search is organized into frozen hypothesis families. Candidate-generation reports record the full search-space size, effective hypothesis count, constraints rejected, and deterministic fingerprints before optimization begins.
+
+Paired feature and strategy evidence uses independent episodes, bootstrap confidence intervals, sign-randomization tests, standardized effects, and Holm-Bonferroni familywise correction. Strategy comparison requires a shared frozen opportunity universe and represents no-trade outcomes as zero rather than silently omitting them.
+
+`ResearchExperimentManifest` binds data fingerprints, commit, configuration, candidate family, split diagnostics, source-quality evidence, freeze chronology, and holdout-access count. Migration 005 persists those manifests, candidates, source assessments, and corrected significance results atomically.
+
+`ResearchAuditReport` consolidates data exclusions, split leakage, hypothesis burden, feature evidence, paired significance, robustness, Monte Carlo tail risk, and release blockers into one diagnostic report. It never authorizes strategy promotion or live execution.
+
 ## Research workflow
 
 ```text
 Continuous collection
   -> integrity and immutable persistence
+  -> point-in-time source selection using observed and received timestamps
   -> explainable regime detection
-  -> reproducible AI-assisted research priors
-  -> feature importance and paired ablation
+  -> reproducible research priors
+  -> bounded candidate-family generation and hypothesis count
+  -> block-aware feature importance
+  -> paired feature ablation with familywise correction
   -> multi-timeframe strategy context
   -> event-risk filtering
   -> trade explanation
   -> portfolio risk gateway
   -> depth-aware backtest
-  -> purged walk-forward and Bayesian-style optimization
-  -> frozen untouched holdout
-  -> execution-aware Monte Carlo
+  -> episode-safe purged walk-forward optimization
+  -> complete-universe paired strategy comparison
+  -> regime and cost robustness
+  -> systemic execution Monte Carlo and expected-shortfall review
+  -> frozen untouched holdout accessed exactly once
   -> paper trading
   -> shadow trading
   -> empirical strategy-release gate
@@ -128,10 +145,13 @@ Regular continuous sources must also reach their declared complete-source waterm
 
 Any non-zero simulated market fill remains a real partial position. Entry fees, unfilled quantity, residual exit exposure, and missed opportunities are retained in backtest, paper, and shadow evidence.
 
+Execution Monte Carlo combines systemic and idiosyncratic fee, funding, slippage, and latency shocks. Favorable funding receipts are haircutted under stress, favorable trades can be missed more often, and reports include expected shortfall and drawdown-threshold probability.
+
 Portfolio exposure is netted by instrument before gross exposure, net exposure, leverage, group limits, and historical VaR are evaluated. Missing scenario returns and missing required pair correlations fail closed instead of being interpreted as zero risk. Risk-reducing hedges may reduce an already saturated portfolio, but no strategy may bypass the portfolio gateway.
 
 ## Research platform documentation
 
+- [Empirical research hardening audit](docs/empirical-research-hardening.md)
 - [Final foundation technical review](docs/final-foundation-technical-review.md)
 - [Phase 5 complete quantitative research platform](docs/phase5-complete-quantitative-research-platform.md)
 - [Phase 4 trading edge and release assessment](docs/phase4-trading-edge-release-assessment.md)
@@ -143,17 +163,20 @@ Portfolio exposure is netted by instrument before gross exposure, net exposure, 
 A strategy must pass all of the following on a corrected immutable derivatives dataset:
 
 1. Dataset integrity, chronology, sequence, duplicate, corruption, watermark, and gap checks.
-2. Independent-episode analysis.
-3. Explainable regime and multi-timeframe evaluation across multiple instruments.
-4. Fold-level feature importance and paired ablation with redundancy removal.
-5. Purged walk-forward optimization using discovery data only.
-6. Stable parameter-neighborhood checks.
-7. Observation-specific fee, spread, slippage, latency, funding, depth, missed-fill, partial-fill, and residual-exposure stress across required market regimes.
-8. Correlation-complete portfolio scenarios and execution-aware Monte Carlo with acceptable drawdown and ruin distributions.
-9. A frozen one-time evaluation on an untouched final holdout.
-10. Prolonged realistic live-market paper execution and reconciliation.
-11. Prolonged live-data shadow trading with unfilled-quantity, missed-opportunity, and paper-comparison reports.
-12. Statistically significant paired improvement over the original whale baseline.
-13. Green database migrations, tests, lint, type checking, production build, and GitHub Actions.
+2. Point-in-time source availability using both observation and receipt timestamps.
+3. Independent-episode analysis with zero discovery/test/holdout episode overlap.
+4. Explainable regime and multi-timeframe evaluation across multiple instruments.
+5. A bounded and fingerprinted candidate family with the full hypothesis count recorded.
+6. Block-aware fold-level feature importance and paired ablation with Holm-corrected significance and redundancy removal.
+7. Purged walk-forward optimization using discovery data only.
+8. A shared frozen opportunity universe that includes no-trade outcomes for every compared strategy.
+9. Stable parameter-neighborhood checks.
+10. Observation-specific fee, spread, slippage, latency, funding, depth, missed-fill, partial-fill, and residual-exposure stress across required regimes.
+11. Correlation-complete portfolio scenarios and systemic execution Monte Carlo with acceptable expected shortfall, drawdown, and ruin distributions.
+12. A frozen one-time evaluation on an untouched final holdout.
+13. Prolonged realistic live-market paper execution and reconciliation.
+14. Prolonged live-data shadow trading with unfilled-quantity, missed-opportunity, and paper-comparison reports.
+15. Statistically significant paired improvement over the original whale baseline after familywise correction.
+16. Green database migrations, tests, lint, type checking, production build, and GitHub Actions.
 
 A strategy must not be promoted merely because it has a higher in-sample win rate, a better leaderboard score, an AI ranking, an optimizer result, or a small number of large winning trades.
