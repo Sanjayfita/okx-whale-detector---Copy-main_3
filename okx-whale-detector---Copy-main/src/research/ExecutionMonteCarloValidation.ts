@@ -16,34 +16,46 @@ export interface ExecutionMonteCarloPolicy {
   readonly ruinEquityFraction: number;
   readonly feeMultiplierRange: readonly [number, number];
   readonly fundingMultiplierRange: readonly [number, number];
+  readonly positiveFundingReceiptHaircutRange: readonly [number, number];
   readonly slippageMultiplierRange: readonly [number, number];
   readonly latencyMultiplierRange: readonly [number, number];
+  readonly systemicShockWeight: number;
   readonly latencyImpactBpsPerSecond: number;
   readonly missedFillProbability: number;
+  readonly favorableTradeMissedFillMultiplier: number;
   readonly partialFillFractionRange: readonly [number, number];
   readonly confidenceLevel: number;
+  readonly tailConfidenceLevel: number;
+  readonly maximumDrawdownThresholdFraction: number;
+  readonly minimumIndependentEpisodes: number;
 }
 
 export const DEFAULT_EXECUTION_MONTE_CARLO_POLICY: ExecutionMonteCarloPolicy = {
-  iterations: 5_000,
+  iterations: 10_000,
   seed: 42,
   initialEquity: 10_000,
-  ruinEquityFraction: 0.5,
+  ruinEquityFraction: 0.25,
   feeMultiplierRange: [1, 1.5],
   fundingMultiplierRange: [1, 2],
-  slippageMultiplierRange: [1, 2],
-  latencyMultiplierRange: [1, 2],
-  latencyImpactBpsPerSecond: 0.25,
+  positiveFundingReceiptHaircutRange: [0, 0.75],
+  slippageMultiplierRange: [1, 3],
+  latencyMultiplierRange: [1, 3],
+  systemicShockWeight: 0.7,
+  latencyImpactBpsPerSecond: 1,
   missedFillProbability: 0.05,
-  partialFillFractionRange: [0.5, 1],
+  favorableTradeMissedFillMultiplier: 2,
+  partialFillFractionRange: [0.25, 1],
   confidenceLevel: 0.95,
+  tailConfidenceLevel: 0.95,
+  maximumDrawdownThresholdFraction: 0.2,
+  minimumIndependentEpisodes: 30,
 };
 
-export interface DistributionSummary {
+export interface MonteCarloDistribution {
+  readonly minimum: number;
   readonly p05: number;
   readonly p50: number;
   readonly p95: number;
-  readonly minimum: number;
   readonly maximum: number;
   readonly mean: number;
 }
@@ -52,74 +64,33 @@ export interface ExecutionMonteCarloReport {
   readonly iterations: number;
   readonly tradeCount: number;
   readonly independentEpisodeCount: number;
-  readonly endingEquity: DistributionSummary;
-  readonly netReturnFraction: DistributionSummary;
-  readonly maximumDrawdownFraction: DistributionSummary;
+  readonly endingEquity: MonteCarloDistribution;
+  readonly netReturnFraction: MonteCarloDistribution;
+  readonly maximumDrawdownFraction: MonteCarloDistribution;
   readonly expectedReturnConfidenceInterval: Readonly<{
     lower: number;
     upper: number;
     level: number;
   }>;
+  readonly expectedShortfallReturnFraction: number;
+  readonly tailConfidenceLevel: number;
   readonly probabilityOfRuin: number;
   readonly probabilityOfPositiveReturn: number;
+  readonly probabilityDrawdownExceedsThreshold: number;
+  readonly maximumDrawdownThresholdFraction: number;
   readonly averageMissedFills: number;
+  readonly averageFavorableMissedFills: number;
+  readonly averageUnfavorableMissedFills: number;
   readonly averagePartialFills: number;
+  readonly averageFillFraction: number;
+  readonly averageSystemicCostMultiplier: number;
   readonly liveExecutionAllowed: false;
 }
 
-const requireRange = (
-  range: readonly [number, number],
-  name: string,
-  minimum = 0,
-): void => {
-  if (
-    !Number.isFinite(range[0]) ||
-    !Number.isFinite(range[1]) ||
-    range[0] < minimum ||
-    range[1] < range[0]
-  ) {
-    throw new Error(`${name} is invalid`);
-  }
-};
-
-const validatePolicy = (policy: ExecutionMonteCarloPolicy): void => {
-  if (!Number.isSafeInteger(policy.iterations) || policy.iterations < 100) {
-    throw new Error('iterations must be a safe integer >= 100');
-  }
-  if (!Number.isSafeInteger(policy.seed)) {
-    throw new Error('seed must be a safe integer');
-  }
-  if (!Number.isFinite(policy.initialEquity) || policy.initialEquity <= 0) {
-    throw new Error('initialEquity must be positive');
-  }
-  if (
-    policy.ruinEquityFraction <= 0 ||
-    policy.ruinEquityFraction >= 1 ||
-    policy.missedFillProbability < 0 ||
-    policy.missedFillProbability > 1 ||
-    policy.confidenceLevel <= 0.5 ||
-    policy.confidenceLevel >= 1
-  ) {
-    throw new Error('Monte Carlo fractions are invalid');
-  }
-  requireRange(policy.feeMultiplierRange, 'feeMultiplierRange');
-  requireRange(policy.fundingMultiplierRange, 'fundingMultiplierRange');
-  requireRange(policy.slippageMultiplierRange, 'slippageMultiplierRange');
-  requireRange(policy.latencyMultiplierRange, 'latencyMultiplierRange');
-  requireRange(
-    policy.partialFillFractionRange,
-    'partialFillFractionRange',
-  );
-  if (policy.partialFillFractionRange[1] > 1) {
-    throw new Error('partialFillFractionRange must not exceed 1');
-  }
-  if (
-    !Number.isFinite(policy.latencyImpactBpsPerSecond) ||
-    policy.latencyImpactBpsPerSecond < 0
-  ) {
-    throw new Error('latencyImpactBpsPerSecond must be non-negative');
-  }
-};
+interface Episode {
+  readonly episodeId: string;
+  readonly trades: readonly MonteCarloTrade[];
+}
 
 const createRandom = (seed: number): (() => number) => {
   let state = seed >>> 0;
@@ -135,28 +106,111 @@ const createRandom = (seed: number): (() => number) => {
 };
 
 const sampleRange = (
-  random: () => number,
   range: readonly [number, number],
-): number => range[0] + random() * (range[1] - range[0]);
+  random: () => number,
+): number => range[0] + (range[1] - range[0]) * random();
 
-const shuffled = <T>(values: readonly T[], random: () => number): T[] => {
-  const output = values.slice();
-  for (let index = output.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(random() * (index + 1));
-    const current = output[index];
-    const swap = output[swapIndex];
-    if (current !== undefined && swap !== undefined) {
-      output[index] = swap;
-      output[swapIndex] = current;
-    }
+const validateRange = (
+  range: readonly [number, number],
+  name: string,
+  minimum: number,
+): void => {
+  if (
+    !Number.isFinite(range[0]) ||
+    !Number.isFinite(range[1]) ||
+    range[0] < minimum ||
+    range[1] < range[0]
+  ) {
+    throw new Error(`${name} is invalid`);
   }
-  return output;
+};
+
+const validatePolicy = (policy: ExecutionMonteCarloPolicy): void => {
+  if (
+    !Number.isSafeInteger(policy.iterations) ||
+    policy.iterations <= 0 ||
+    !Number.isSafeInteger(policy.seed) ||
+    !Number.isSafeInteger(policy.minimumIndependentEpisodes) ||
+    policy.minimumIndependentEpisodes <= 0
+  ) {
+    throw new Error('invalid Monte Carlo integer policy');
+  }
+  if (
+    !Number.isFinite(policy.initialEquity) ||
+    policy.initialEquity <= 0 ||
+    policy.ruinEquityFraction <= 0 ||
+    policy.ruinEquityFraction >= 1 ||
+    policy.systemicShockWeight < 0 ||
+    policy.systemicShockWeight > 1 ||
+    policy.missedFillProbability < 0 ||
+    policy.missedFillProbability > 1 ||
+    policy.favorableTradeMissedFillMultiplier < 1 ||
+    policy.confidenceLevel <= 0.5 ||
+    policy.confidenceLevel >= 1 ||
+    policy.tailConfidenceLevel <= 0.5 ||
+    policy.tailConfidenceLevel >= 1 ||
+    policy.maximumDrawdownThresholdFraction <= 0 ||
+    policy.maximumDrawdownThresholdFraction >= 1 ||
+    policy.latencyImpactBpsPerSecond < 0
+  ) {
+    throw new Error('invalid Monte Carlo threshold policy');
+  }
+  validateRange(policy.feeMultiplierRange, 'feeMultiplierRange', 0);
+  validateRange(policy.fundingMultiplierRange, 'fundingMultiplierRange', 0);
+  validateRange(
+    policy.positiveFundingReceiptHaircutRange,
+    'positiveFundingReceiptHaircutRange',
+    0,
+  );
+  if (policy.positiveFundingReceiptHaircutRange[1] > 1) {
+    throw new Error('positive funding receipt haircut cannot exceed one');
+  }
+  validateRange(policy.slippageMultiplierRange, 'slippageMultiplierRange', 0);
+  validateRange(policy.latencyMultiplierRange, 'latencyMultiplierRange', 0);
+  validateRange(policy.partialFillFractionRange, 'partialFillFractionRange', 0);
+  if (policy.partialFillFractionRange[1] > 1) {
+    throw new Error('partial fill fraction cannot exceed one');
+  }
+};
+
+const groupEpisodes = (trades: readonly MonteCarloTrade[]): readonly Episode[] => {
+  const tradeIds = new Set<string>();
+  const byEpisode = new Map<string, MonteCarloTrade[]>();
+  for (const trade of trades) {
+    if (trade.tradeId.trim().length === 0 || trade.episodeId.trim().length === 0) {
+      throw new Error('tradeId and episodeId must not be empty');
+    }
+    if (tradeIds.has(trade.tradeId)) {
+      throw new Error(`duplicate Monte Carlo trade ${trade.tradeId}`);
+    }
+    tradeIds.add(trade.tradeId);
+    for (const [name, value] of Object.entries(trade)) {
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new Error(`non-finite Monte Carlo ${name}`);
+      }
+    }
+    if (
+      trade.feeCost < 0 ||
+      trade.slippageCost < 0 ||
+      trade.notional <= 0 ||
+      trade.latencyMs < 0
+    ) {
+      throw new Error(`invalid Monte Carlo trade ${trade.tradeId}`);
+    }
+    byEpisode.set(trade.episodeId, [
+      ...(byEpisode.get(trade.episodeId) ?? []),
+      trade,
+    ]);
+  }
+  return [...byEpisode.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([episodeId, episodeTrades]) => ({
+      episodeId,
+      trades: episodeTrades,
+    }));
 };
 
 const quantile = (values: readonly number[], probability: number): number => {
-  if (values.length === 0) {
-    return 0;
-  }
   const sorted = values.slice().sort((left, right) => left - right);
   const position = (sorted.length - 1) * probability;
   const lowerIndex = Math.floor(position);
@@ -166,152 +220,192 @@ const quantile = (values: readonly number[], probability: number): number => {
   return lower + (upper - lower) * (position - lowerIndex);
 };
 
-const summarize = (values: readonly number[]): DistributionSummary => ({
+const distribution = (values: readonly number[]): MonteCarloDistribution => ({
+  minimum: Math.min(...values),
   p05: quantile(values, 0.05),
   p50: quantile(values, 0.5),
   p95: quantile(values, 0.95),
-  minimum: Math.min(...values),
   maximum: Math.max(...values),
   mean: values.reduce((sum, value) => sum + value, 0) / values.length,
 });
 
-const validateTrade = (trade: MonteCarloTrade): void => {
-  if (trade.tradeId.trim().length === 0 || trade.episodeId.trim().length === 0) {
-    throw new Error('tradeId and episodeId must not be empty');
-  }
-  for (const [name, value] of Object.entries(trade)) {
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      throw new Error(`${name} must be finite`);
-    }
-  }
-  if (
-    trade.feeCost < 0 ||
-    trade.slippageCost < 0 ||
-    trade.notional < 0 ||
-    trade.latencyMs < 0
-  ) {
-    throw new Error(`invalid non-negative trade values for ${trade.tradeId}`);
-  }
-};
+const combinedMultiplier = (input: {
+  readonly systemic: number;
+  readonly idiosyncratic: number;
+  readonly systemicWeight: number;
+}): number =>
+  input.systemic * input.systemicWeight +
+  input.idiosyncratic * (1 - input.systemicWeight);
 
 export const runExecutionMonteCarlo = (input: {
   readonly trades: readonly MonteCarloTrade[];
-  readonly policy?: ExecutionMonteCarloPolicy;
+  readonly policy?: Partial<ExecutionMonteCarloPolicy>;
 }): ExecutionMonteCarloReport => {
-  const policy = input.policy ?? DEFAULT_EXECUTION_MONTE_CARLO_POLICY;
+  const policy: ExecutionMonteCarloPolicy = {
+    ...DEFAULT_EXECUTION_MONTE_CARLO_POLICY,
+    ...input.policy,
+  };
   validatePolicy(policy);
-  if (input.trades.length === 0) {
-    throw new Error('Monte Carlo validation requires trades');
+  const episodes = groupEpisodes(input.trades);
+  if (episodes.length < policy.minimumIndependentEpisodes) {
+    throw new Error(
+      `Monte Carlo requires at least ${policy.minimumIndependentEpisodes} independent episodes`,
+    );
   }
-  for (const trade of input.trades) {
-    validateTrade(trade);
-  }
-  const byEpisode = new Map<string, MonteCarloTrade[]>();
-  for (const trade of input.trades) {
-    byEpisode.set(trade.episodeId, [...(byEpisode.get(trade.episodeId) ?? []), trade]);
-  }
-  const episodes = [...byEpisode.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([, trades]) => trades);
   const random = createRandom(policy.seed);
   const endingEquities: number[] = [];
   const returns: number[] = [];
   const drawdowns: number[] = [];
   let ruinCount = 0;
-  let positiveCount = 0;
-  let totalMissedFills = 0;
-  let totalPartialFills = 0;
+  let positiveReturnCount = 0;
+  let drawdownThresholdCount = 0;
+  let totalMissed = 0;
+  let totalFavorableMissed = 0;
+  let totalUnfavorableMissed = 0;
+  let totalPartial = 0;
+  let totalFillFraction = 0;
+  let attemptedFillCount = 0;
+  let totalSystemicMultiplier = 0;
 
   for (let iteration = 0; iteration < policy.iterations; iteration += 1) {
-    const sampledEpisodes = Array.from({ length: episodes.length }, () => {
+    let equity = policy.initialEquity;
+    let peak = equity;
+    let maximumDrawdown = 0;
+    const systemicFee = sampleRange(policy.feeMultiplierRange, random);
+    const systemicFunding = sampleRange(policy.fundingMultiplierRange, random);
+    const systemicSlippage = sampleRange(
+      policy.slippageMultiplierRange,
+      random,
+    );
+    const systemicLatency = sampleRange(policy.latencyMultiplierRange, random);
+    totalSystemicMultiplier +=
+      (systemicFee + systemicFunding + systemicSlippage + systemicLatency) / 4;
+
+    for (let sampleIndex = 0; sampleIndex < episodes.length; sampleIndex += 1) {
       const episode = episodes[Math.floor(random() * episodes.length)];
       if (episode === undefined) {
-        throw new Error('failed to sample Monte Carlo episode');
-      }
-      return episode;
-    });
-    const path = shuffled(sampledEpisodes, random).flat();
-    let equity = policy.initialEquity;
-    let peakEquity = equity;
-    let maximumDrawdown = 0;
-    let ruined = false;
-
-    for (const trade of path) {
-      if (random() < policy.missedFillProbability) {
-        totalMissedFills += 1;
         continue;
       }
-      const fillFraction = sampleRange(
-        random,
-        policy.partialFillFractionRange,
-      );
-      if (fillFraction < 0.999999) {
-        totalPartialFills += 1;
-      }
-      const feeMultiplier = sampleRange(random, policy.feeMultiplierRange);
-      const fundingMultiplier = sampleRange(
-        random,
-        policy.fundingMultiplierRange,
-      );
-      const slippageMultiplier = sampleRange(
-        random,
-        policy.slippageMultiplierRange,
-      );
-      const latencyMultiplier = sampleRange(
-        random,
-        policy.latencyMultiplierRange,
-      );
-      const latencySeconds =
-        (trade.latencyMs * latencyMultiplier) / 1_000;
-      const latencyCost =
-        trade.notional *
-        (policy.latencyImpactBpsPerSecond * latencySeconds) /
-        10_000;
-      const pnl =
-        trade.grossPnl * fillFraction -
-        trade.feeCost * feeMultiplier * fillFraction +
-        trade.fundingPnl * fundingMultiplier * fillFraction -
-        trade.slippageCost * slippageMultiplier * fillFraction -
-        latencyCost * fillFraction;
-      equity += pnl;
-      peakEquity = Math.max(peakEquity, equity);
-      maximumDrawdown = Math.max(
-        maximumDrawdown,
-        peakEquity <= 0 ? 1 : (peakEquity - equity) / peakEquity,
-      );
-      if (equity <= policy.initialEquity * policy.ruinEquityFraction) {
-        ruined = true;
+      for (const trade of episode.trades) {
+        const favorable = trade.grossPnl > 0;
+        const missedProbability = Math.min(
+          1,
+          policy.missedFillProbability *
+            (favorable ? policy.favorableTradeMissedFillMultiplier : 1),
+        );
+        if (random() < missedProbability) {
+          totalMissed += 1;
+          if (favorable) {
+            totalFavorableMissed += 1;
+          } else {
+            totalUnfavorableMissed += 1;
+          }
+          continue;
+        }
+
+        const fillFraction = sampleRange(
+          policy.partialFillFractionRange,
+          random,
+        );
+        attemptedFillCount += 1;
+        totalFillFraction += fillFraction;
+        if (fillFraction < 1 - 1e-12) {
+          totalPartial += 1;
+        }
+        const feeMultiplier = combinedMultiplier({
+          systemic: systemicFee,
+          idiosyncratic: sampleRange(policy.feeMultiplierRange, random),
+          systemicWeight: policy.systemicShockWeight,
+        });
+        const fundingMultiplier = combinedMultiplier({
+          systemic: systemicFunding,
+          idiosyncratic: sampleRange(policy.fundingMultiplierRange, random),
+          systemicWeight: policy.systemicShockWeight,
+        });
+        const slippageMultiplier = combinedMultiplier({
+          systemic: systemicSlippage,
+          idiosyncratic: sampleRange(policy.slippageMultiplierRange, random),
+          systemicWeight: policy.systemicShockWeight,
+        });
+        const latencyMultiplier = combinedMultiplier({
+          systemic: systemicLatency,
+          idiosyncratic: sampleRange(policy.latencyMultiplierRange, random),
+          systemicWeight: policy.systemicShockWeight,
+        });
+        const latencyCost =
+          trade.notional *
+          ((trade.latencyMs * latencyMultiplier) / 1_000) *
+          (policy.latencyImpactBpsPerSecond / 10_000);
+        const fundingPnl =
+          trade.fundingPnl <= 0
+            ? trade.fundingPnl * fundingMultiplier
+            : trade.fundingPnl *
+              sampleRange(policy.positiveFundingReceiptHaircutRange, random);
+        const netPnl =
+          (trade.grossPnl -
+            trade.feeCost * feeMultiplier -
+            trade.slippageCost * slippageMultiplier -
+            latencyCost +
+            fundingPnl) *
+          fillFraction;
+        equity += netPnl;
+        peak = Math.max(peak, equity);
+        maximumDrawdown = Math.max(
+          maximumDrawdown,
+          peak <= 0 ? 1 : Math.max(0, (peak - equity) / peak),
+        );
       }
     }
-    const returnFraction = (equity - policy.initialEquity) / policy.initialEquity;
+
     endingEquities.push(equity);
-    returns.push(returnFraction);
+    const netReturn = (equity - policy.initialEquity) / policy.initialEquity;
+    returns.push(netReturn);
     drawdowns.push(maximumDrawdown);
-    if (ruined) {
+    if (equity <= policy.initialEquity * policy.ruinEquityFraction) {
       ruinCount += 1;
     }
-    if (returnFraction > 0) {
-      positiveCount += 1;
+    if (equity > policy.initialEquity) {
+      positiveReturnCount += 1;
+    }
+    if (maximumDrawdown >= policy.maximumDrawdownThresholdFraction) {
+      drawdownThresholdCount += 1;
     }
   }
 
-  const alpha = 1 - policy.confidenceLevel;
+  const confidenceAlpha = 1 - policy.confidenceLevel;
+  const tailCutoff = quantile(returns, 1 - policy.tailConfidenceLevel);
+  const tailReturns = returns.filter((value) => value <= tailCutoff);
   return {
     iterations: policy.iterations,
     tradeCount: input.trades.length,
     independentEpisodeCount: episodes.length,
-    endingEquity: summarize(endingEquities),
-    netReturnFraction: summarize(returns),
-    maximumDrawdownFraction: summarize(drawdowns),
+    endingEquity: distribution(endingEquities),
+    netReturnFraction: distribution(returns),
+    maximumDrawdownFraction: distribution(drawdowns),
     expectedReturnConfidenceInterval: {
-      lower: quantile(returns, alpha / 2),
-      upper: quantile(returns, 1 - alpha / 2),
+      lower: quantile(returns, confidenceAlpha / 2),
+      upper: quantile(returns, 1 - confidenceAlpha / 2),
       level: policy.confidenceLevel,
     },
+    expectedShortfallReturnFraction:
+      tailReturns.reduce((sum, value) => sum + value, 0) / tailReturns.length,
+    tailConfidenceLevel: policy.tailConfidenceLevel,
     probabilityOfRuin: ruinCount / policy.iterations,
-    probabilityOfPositiveReturn: positiveCount / policy.iterations,
-    averageMissedFills: totalMissedFills / policy.iterations,
-    averagePartialFills: totalPartialFills / policy.iterations,
+    probabilityOfPositiveReturn: positiveReturnCount / policy.iterations,
+    probabilityDrawdownExceedsThreshold:
+      drawdownThresholdCount / policy.iterations,
+    maximumDrawdownThresholdFraction:
+      policy.maximumDrawdownThresholdFraction,
+    averageMissedFills: totalMissed / policy.iterations,
+    averageFavorableMissedFills:
+      totalFavorableMissed / policy.iterations,
+    averageUnfavorableMissedFills:
+      totalUnfavorableMissed / policy.iterations,
+    averagePartialFills: totalPartial / policy.iterations,
+    averageFillFraction:
+      attemptedFillCount === 0 ? 0 : totalFillFraction / attemptedFillCount,
+    averageSystemicCostMultiplier:
+      totalSystemicMultiplier / policy.iterations,
     liveExecutionAllowed: false,
   };
 };
