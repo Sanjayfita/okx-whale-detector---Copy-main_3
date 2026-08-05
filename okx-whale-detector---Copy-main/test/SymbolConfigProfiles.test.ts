@@ -13,19 +13,31 @@ describe('symbol configuration profiles', () => {
     expect(WATCHLIST).toEqual(SYMBOL_PROFILES.map((profile) => profile.symbol));
   });
 
-  it('declares spot and swap instrument types without contract values', () => {
+  it('declares only perpetual or expiry futures without hard-coded contract values', () => {
     expect(
-      SYMBOL_PROFILES.find((profile) => profile.symbol === 'BTC-USDT')
+      SYMBOL_PROFILES.every(
+        (profile) =>
+          profile.instrumentType === 'SWAP' ||
+          profile.instrumentType === 'FUTURES',
+      ),
+    ).toBe(true);
+    expect(
+      SYMBOL_PROFILES.find((profile) => profile.symbol === 'BTC-USDT-SWAP')
         ?.instrumentType,
-    ).toBe('SPOT');
+    ).toBe('SWAP');
     expect(
       SYMBOL_PROFILES.find((profile) => profile.symbol === 'XAU-USDT-SWAP')
         ?.instrumentType,
     ).toBe('SWAP');
+    expect(
+      SYMBOL_PROFILES.every(
+        (profile) => !('baseUnitsPerSize' in profile),
+      ),
+    ).toBe(true);
   });
 
   it('uses global defaults when a symbol has no override', () => {
-    const resolved = resolveSymbolConfig('BTC-USDT');
+    const resolved = resolveSymbolConfig('BTC-USDT-SWAP');
 
     expect(resolved).toEqual(appConfig);
     expect(resolved).not.toBe(appConfig);
@@ -35,8 +47,8 @@ describe('symbol configuration profiles', () => {
   it('applies a partial override without duplicating the full config', () => {
     const profiles: readonly SymbolProfile[] = [
       {
-        symbol: 'SOL-USDT',
-        instrumentType: 'SPOT',
+        symbol: 'SOL-USDT-SWAP',
+        instrumentType: 'SWAP',
         config: {
           tracker: {
             minimumNotionalQuote: 250_000,
@@ -48,7 +60,7 @@ describe('symbol configuration profiles', () => {
       },
     ];
 
-    const resolved = resolveSymbolConfig('SOL-USDT', profiles);
+    const resolved = resolveSymbolConfig('SOL-USDT-SWAP', profiles);
 
     expect(resolved.tracker.minimumNotionalQuote).toBe(250_000);
     expect(resolved.market.neutralBandPercent).toBe(15);
@@ -61,8 +73,8 @@ describe('symbol configuration profiles', () => {
   it('does not leak one symbol override into another symbol', () => {
     const profiles: readonly SymbolProfile[] = [
       {
-        symbol: 'DOGE-USDT',
-        instrumentType: 'SPOT',
+        symbol: 'DOGE-USDT-SWAP',
+        instrumentType: 'SWAP',
         config: {
           tracker: {
             minimumNotionalQuote: 100_000,
@@ -71,8 +83,8 @@ describe('symbol configuration profiles', () => {
       },
     ];
 
-    const dogeConfig = resolveSymbolConfig('DOGE-USDT', profiles);
-    const xrpConfig = resolveSymbolConfig('XRP-USDT', profiles);
+    const dogeConfig = resolveSymbolConfig('DOGE-USDT-SWAP', profiles);
+    const xrpConfig = resolveSymbolConfig('XRP-USDT-SWAP', profiles);
 
     expect(dogeConfig.tracker.minimumNotionalQuote).toBe(100_000);
     expect(xrpConfig.tracker.minimumNotionalQuote).toBe(
@@ -80,8 +92,8 @@ describe('symbol configuration profiles', () => {
     );
   });
 
-  it('lets an unknown future symbol inherit the global defaults', () => {
-    const resolved = resolveSymbolConfig('NEW-TOKEN-USDT');
+  it('lets an unknown derivative symbol inherit the global defaults', () => {
+    const resolved = resolveSymbolConfig('NEW-TOKEN-USDT-SWAP');
 
     expect(resolved).toEqual(appConfig);
   });
@@ -89,8 +101,8 @@ describe('symbol configuration profiles', () => {
   it('rejects an invalid symbol override after merging', () => {
     const profiles: readonly SymbolProfile[] = [
       {
-        symbol: 'ETH-USDT',
-        instrumentType: 'SPOT',
+        symbol: 'ETH-USDT-SWAP',
+        instrumentType: 'SWAP',
         config: {
           tracker: {
             minimumMovementSizeRatio: 2,
@@ -100,7 +112,7 @@ describe('symbol configuration profiles', () => {
       },
     ];
 
-    expect(() => resolveSymbolConfig('ETH-USDT', profiles)).toThrow(
+    expect(() => resolveSymbolConfig('ETH-USDT-SWAP', profiles)).toThrow(
       'tracker.minimumMovementSizeRatio',
     );
   });
