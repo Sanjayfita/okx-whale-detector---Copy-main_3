@@ -45,6 +45,43 @@ describe('generateStrategyCandidates', () => {
     expect(first.liveExecutionAllowed).toBe(false);
   });
 
+  it('uses the same identity for logically identical reordered families', () => {
+    const lessThanConstraint = {
+      leftParameter: 'initialStopAtrMultiple',
+      operator: 'LESS_THAN' as const,
+      rightParameter: 'trailingStopAtrMultiple',
+    };
+    const nonZeroConstraint = {
+      leftParameter: 'initialStopAtrMultiple',
+      operator: 'NOT_EQUAL' as const,
+      rightValue: 0,
+    };
+    const first = generateStrategyCandidates({
+      ...baseInput(),
+      parameterSpace: {
+        initialStopAtrMultiple: [1, 2],
+        trailingStopAtrMultiple: [2.5, 1.5],
+      },
+      constraints: [lessThanConstraint, nonZeroConstraint],
+    });
+    const reordered = generateStrategyCandidates({
+      ...baseInput(),
+      parameterSpace: {
+        trailingStopAtrMultiple: [1.5, 2.5, 1.5],
+        initialStopAtrMultiple: [2, 1, 2],
+      },
+      constraints: [
+        nonZeroConstraint,
+        lessThanConstraint,
+        lessThanConstraint,
+      ],
+    });
+
+    expect(reordered.familyFingerprint).toBe(first.familyFingerprint);
+    expect(reordered.searchSpaceSize).toBe(first.searchSpaceSize);
+    expect(reordered.candidates).toEqual(first.candidates);
+  });
+
   it('rejects oversized search families instead of silently truncating them', () => {
     const report = generateStrategyCandidates({
       ...baseInput(),
