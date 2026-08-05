@@ -60,7 +60,12 @@ describe('synchronizeDerivativeSnapshot', () => {
   it('rejects stale and excessively skewed sources', () => {
     const sources = validSources();
     const staleObservedAt =
-      at - DEFAULT_DERIVATIVE_FRESHNESS_POLICY.maxAgeMs.book - 1;
+      at -
+      Math.max(
+        DEFAULT_DERIVATIVE_FRESHNESS_POLICY.maxAgeMs.book,
+        DEFAULT_DERIVATIVE_FRESHNESS_POLICY.maxSourceSkewMs,
+      ) -
+      1;
 
     const result = synchronizeDerivativeSnapshot({
       asOf: at,
