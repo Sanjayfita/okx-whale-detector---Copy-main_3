@@ -8,7 +8,7 @@ import type {
 } from '../autonomy/DistributedBacktest';
 import type { ExperimentTaskSnapshot } from '../autonomy/ExperimentScheduler';
 import type { AutonomousHypothesisGenerationReport } from '../autonomy/ResearchHypothesis';
-import type { SqlConnection, SqlPool } from './PostgresResearchStore';
+import type { SqlPool } from './PostgresResearchStore';
 
 const json = (value: unknown): string => JSON.stringify(value);
 
