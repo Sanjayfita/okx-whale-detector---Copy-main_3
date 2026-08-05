@@ -3,6 +3,11 @@ import {
   type BacktestStatistics,
   type BacktestTradeRecord,
 } from '../backtest/BacktestStatistics';
+import {
+  adjustHolmBonferroni,
+  evaluatePairedSignificance,
+  type PairedSignificanceResult,
+} from './StatisticalSignificance';
 
 export interface StrategyComparisonTrade extends BacktestTradeRecord {
   readonly episodeId: string;
@@ -13,6 +18,7 @@ export interface StrategyComparisonCandidate {
   readonly strategyId: string;
   readonly label: string;
   readonly trades: readonly StrategyComparisonTrade[];
+  readonly evaluatedEpisodeIds?: readonly string[];
   readonly validationStatus:
     | 'UNVALIDATED'
     | 'REJECTED'
@@ -30,12 +36,21 @@ export interface RegimePerformance {
 
 export interface PairedImprovementEvidence {
   readonly baselineStrategyId: string;
+  readonly evaluationUniverseComplete: boolean;
+  readonly evaluationEpisodeCount: number;
+  readonly baselineTradeEpisodeCount: number;
+  readonly candidateTradeEpisodeCount: number;
   readonly pairedEpisodeCount: number;
   readonly meanPnlImprovement: number | null;
   readonly confidenceLower: number | null;
   readonly confidenceUpper: number | null;
   readonly probabilityOfImprovement: number | null;
+  readonly standardizedEffect: number | null;
+  readonly rawPValue: number | null;
+  readonly adjustedPValue: number | null;
+  readonly multiplicityMethod: 'HOLM_BONFERRONI';
   readonly statisticallySignificant: boolean;
+  readonly rejectionReasons: readonly string[];
 }
 
 export interface StrategyComparisonRow {
@@ -50,6 +65,7 @@ export interface StrategyComparisonRow {
   readonly promotionStatus:
     | 'BASELINE'
     | 'NOT_VALIDATED'
+    | 'INCOMPLETE_EVALUATION_UNIVERSE'
     | 'NO_SIGNIFICANT_IMPROVEMENT'
     | 'ELIGIBLE_FOR_PAPER_COMPARISON';
   readonly liveExecutionAllowed: false;
@@ -57,6 +73,8 @@ export interface StrategyComparisonRow {
 
 export interface StrategyComparisonReport {
   readonly baselineStrategyId: string;
+  readonly hypothesisFamilySize: number;
+  readonly multiplicityMethod: 'HOLM_BONFERRONI';
   readonly rows: readonly StrategyComparisonRow[];
   readonly liveExecutionAllowed: false;
 }
@@ -64,118 +82,162 @@ export interface StrategyComparisonReport {
 export interface StrategyComparisonPolicy {
   readonly initialEquity: number;
   readonly bootstrapIterations: number;
+  readonly randomizationIterations: number;
   readonly confidenceLevel: number;
   readonly minimumPairedEpisodes: number;
   readonly minimumPositiveRegimeFraction: number;
+  readonly familywiseAlpha: number;
   readonly seed: number;
 }
 
 export const DEFAULT_STRATEGY_COMPARISON_POLICY: StrategyComparisonPolicy = {
   initialEquity: 10_000,
   bootstrapIterations: 5_000,
+  randomizationIterations: 5_000,
   confidenceLevel: 0.95,
   minimumPairedEpisodes: 50,
   minimumPositiveRegimeFraction: 0.6,
+  familywiseAlpha: 0.05,
   seed: 42,
 };
 
-const createRandom = (seed: number): (() => number) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
-    return state / 0x1_0000_0000;
-  };
-};
-
-const quantile = (values: readonly number[], probability: number): number | null => {
-  if (values.length === 0) {
-    return null;
+const validatePolicy = (policy: StrategyComparisonPolicy): void => {
+  if (!Number.isFinite(policy.initialEquity) || policy.initialEquity <= 0) {
+    throw new Error('initialEquity must be positive');
   }
-  const sorted = values.slice().sort((left, right) => left - right);
-  const position = (sorted.length - 1) * probability;
-  const lowerIndex = Math.floor(position);
-  const upperIndex = Math.ceil(position);
-  const lower = sorted[lowerIndex];
-  const upper = sorted[upperIndex];
-  if (lower === undefined || upper === undefined) {
-    return null;
+  if (
+    !Number.isSafeInteger(policy.bootstrapIterations) ||
+    policy.bootstrapIterations < 1_000 ||
+    !Number.isSafeInteger(policy.randomizationIterations) ||
+    policy.randomizationIterations < 1_000 ||
+    !Number.isSafeInteger(policy.minimumPairedEpisodes) ||
+    policy.minimumPairedEpisodes <= 0 ||
+    !Number.isSafeInteger(policy.seed)
+  ) {
+    throw new Error('invalid strategy comparison integer policy');
   }
-  return lower + (upper - lower) * (position - lowerIndex);
+  if (
+    policy.confidenceLevel <= 0.5 ||
+    policy.confidenceLevel >= 1 ||
+    policy.minimumPositiveRegimeFraction < 0 ||
+    policy.minimumPositiveRegimeFraction > 1 ||
+    policy.familywiseAlpha <= 0 ||
+    policy.familywiseAlpha >= 1
+  ) {
+    throw new Error('invalid strategy comparison fraction policy');
+  }
 };
 
 const episodePnl = (
   trades: readonly StrategyComparisonTrade[],
 ): ReadonlyMap<string, number> => {
   const totals = new Map<string, number>();
+  const tradeIds = new Set<string>();
   for (const trade of trades) {
-    if (trade.episodeId.trim().length === 0) {
-      throw new Error('episodeId must not be empty');
+    if (trade.id.trim().length === 0 || trade.episodeId.trim().length === 0) {
+      throw new Error('trade id and episodeId must not be empty');
     }
+    if (tradeIds.has(trade.id)) {
+      throw new Error(`duplicate trade id ${trade.id}`);
+    }
+    tradeIds.add(trade.id);
     totals.set(trade.episodeId, (totals.get(trade.episodeId) ?? 0) + trade.netPnl);
   }
   return totals;
 };
 
-const pairedEvidence = (input: {
+const evaluationSet = (
+  candidate: StrategyComparisonCandidate,
+): ReadonlySet<string> | null => {
+  if (candidate.evaluatedEpisodeIds === undefined) {
+    return null;
+  }
+  const ids = new Set<string>();
+  for (const episodeId of candidate.evaluatedEpisodeIds) {
+    if (episodeId.trim().length === 0 || ids.has(episodeId)) {
+      throw new Error(
+        `evaluatedEpisodeIds for ${candidate.strategyId} must be unique and non-empty`,
+      );
+    }
+    ids.add(episodeId);
+  }
+  if (ids.size === 0) {
+    throw new Error(`evaluatedEpisodeIds for ${candidate.strategyId} must not be empty`);
+  }
+  const tradeEpisodes = episodePnl(candidate.trades);
+  for (const episodeId of tradeEpisodes.keys()) {
+    if (!ids.has(episodeId)) {
+      throw new Error(
+        `trade episode ${episodeId} is outside the evaluation universe for ${candidate.strategyId}`,
+      );
+    }
+  }
+  return ids;
+};
+
+const equalSets = (left: ReadonlySet<string>, right: ReadonlySet<string>): boolean =>
+  left.size === right.size && [...left].every((value) => right.has(value));
+
+const rawPairedEvidence = (input: {
   readonly baseline: StrategyComparisonCandidate;
   readonly candidate: StrategyComparisonCandidate;
   readonly policy: StrategyComparisonPolicy;
   readonly seedOffset: number;
-}): PairedImprovementEvidence => {
-  const baseline = episodePnl(input.baseline.trades);
-  const candidate = episodePnl(input.candidate.trades);
-  const episodeIds = [...candidate.keys()]
-    .filter((episodeId) => baseline.has(episodeId))
-    .sort();
-  const differences = episodeIds.map(
-    (episodeId) =>
-      (candidate.get(episodeId) ?? 0) - (baseline.get(episodeId) ?? 0),
-  );
-  if (differences.length < input.policy.minimumPairedEpisodes) {
-    return {
-      baselineStrategyId: input.baseline.strategyId,
-      pairedEpisodeCount: differences.length,
-      meanPnlImprovement:
-        differences.length === 0
-          ? null
-          : differences.reduce((sum, value) => sum + value, 0) /
-            differences.length,
-      confidenceLower: null,
-      confidenceUpper: null,
-      probabilityOfImprovement: null,
-      statisticallySignificant: false,
-    };
+}): Readonly<{
+  evidence: Omit<PairedImprovementEvidence, 'adjustedPValue' | 'statisticallySignificant'>;
+  significance: PairedSignificanceResult;
+}> => {
+  const baselinePnl = episodePnl(input.baseline.trades);
+  const candidatePnl = episodePnl(input.candidate.trades);
+  const baselineUniverse = evaluationSet(input.baseline);
+  const candidateUniverse = evaluationSet(input.candidate);
+  const evaluationUniverseComplete =
+    baselineUniverse !== null &&
+    candidateUniverse !== null &&
+    equalSets(baselineUniverse, candidateUniverse);
+  const fallbackUniverse = new Set([
+    ...baselinePnl.keys(),
+    ...candidatePnl.keys(),
+  ]);
+  const universe = [...(evaluationUniverseComplete
+    ? baselineUniverse
+    : fallbackUniverse)].sort();
+  const significance = evaluatePairedSignificance({
+    outcomes: universe.map((episodeId) => ({
+      pairId: episodeId,
+      baselineValue: baselinePnl.get(episodeId) ?? 0,
+      candidateValue: candidatePnl.get(episodeId) ?? 0,
+    })),
+    policy: {
+      bootstrapIterations: input.policy.bootstrapIterations,
+      randomizationIterations: input.policy.randomizationIterations,
+      confidenceLevel: input.policy.confidenceLevel,
+      minimumPairs: input.policy.minimumPairedEpisodes,
+      seed: input.policy.seed + input.seedOffset,
+    },
+  });
+  const rejectionReasons = [...significance.rejectionReasons];
+  if (!evaluationUniverseComplete) {
+    rejectionReasons.push('COMPLETE_SHARED_EVALUATION_UNIVERSE_REQUIRED');
   }
-
-  const random = createRandom(input.policy.seed + input.seedOffset);
-  const bootstrapMeans: number[] = [];
-  for (
-    let iteration = 0;
-    iteration < input.policy.bootstrapIterations;
-    iteration += 1
-  ) {
-    let sum = 0;
-    for (let index = 0; index < differences.length; index += 1) {
-      const sampled = differences[Math.floor(random() * differences.length)];
-      sum += sampled ?? 0;
-    }
-    bootstrapMeans.push(sum / differences.length);
-  }
-  const alpha = 1 - input.policy.confidenceLevel;
-  const confidenceLower = quantile(bootstrapMeans, alpha / 2);
-  const confidenceUpper = quantile(bootstrapMeans, 1 - alpha / 2);
-  const probabilityOfImprovement =
-    bootstrapMeans.filter((value) => value > 0).length / bootstrapMeans.length;
   return {
-    baselineStrategyId: input.baseline.strategyId,
-    pairedEpisodeCount: differences.length,
-    meanPnlImprovement:
-      differences.reduce((sum, value) => sum + value, 0) / differences.length,
-    confidenceLower,
-    confidenceUpper,
-    probabilityOfImprovement,
-    statisticallySignificant:
-      confidenceLower !== null && confidenceLower > 0,
+    significance,
+    evidence: {
+      baselineStrategyId: input.baseline.strategyId,
+      evaluationUniverseComplete,
+      evaluationEpisodeCount: universe.length,
+      baselineTradeEpisodeCount: baselinePnl.size,
+      candidateTradeEpisodeCount: candidatePnl.size,
+      pairedEpisodeCount: significance.pairCount,
+      meanPnlImprovement: significance.meanDifference,
+      confidenceLower: significance.confidenceInterval?.lower ?? null,
+      confidenceUpper: significance.confidenceInterval?.upper ?? null,
+      probabilityOfImprovement: significance.probabilityOfImprovement,
+      standardizedEffect: significance.standardizedEffect,
+      rawPValue: significance.randomizationPValue,
+      multiplicityMethod: 'HOLM_BONFERRONI',
+      rejectionReasons: [...new Set(rejectionReasons)],
+    },
   };
 };
 
@@ -185,6 +247,9 @@ const regimePerformance = (input: {
 }): readonly RegimePerformance[] => {
   const groups = new Map<string, StrategyComparisonTrade[]>();
   for (const trade of input.trades) {
+    if (trade.regime.trim().length === 0) {
+      throw new Error(`regime is required for trade ${trade.id}`);
+    }
     groups.set(trade.regime, [...(groups.get(trade.regime) ?? []), trade]);
   }
   return [...groups.entries()]
@@ -235,18 +300,17 @@ export const compareStrategies = (input: {
     ...DEFAULT_STRATEGY_COMPARISON_POLICY,
     ...input.policy,
   };
+  validatePolicy(policy);
   if (input.candidates.length === 0) {
     throw new Error('strategy comparison requires candidates');
   }
   const ids = new Set<string>();
   for (const candidate of input.candidates) {
-    if (candidate.strategyId.trim().length === 0) {
-      throw new Error('strategyId must not be empty');
-    }
-    if (ids.has(candidate.strategyId)) {
-      throw new Error(`duplicate strategyId ${candidate.strategyId}`);
+    if (candidate.strategyId.trim().length === 0 || ids.has(candidate.strategyId)) {
+      throw new Error('strategyIds must be unique and non-empty');
     }
     ids.add(candidate.strategyId);
+    evaluationSet(candidate);
   }
   const baseline = input.candidates.find(
     (candidate) => candidate.strategyId === input.baselineStrategyId,
@@ -255,7 +319,7 @@ export const compareStrategies = (input: {
     throw new Error(`baseline ${input.baselineStrategyId} is missing`);
   }
 
-  const unsortedRows = input.candidates.map((candidate, index) => {
+  const preliminaries = input.candidates.map((candidate, index) => {
     const statistics = calculateBacktestStatistics({
       initialEquity: policy.initialEquity,
       trades: candidate.trades,
@@ -269,45 +333,84 @@ export const compareStrategies = (input: {
         ? 0
         : regimes.filter((regime) => regime.expectancy > 0).length /
           regimes.length;
-    const pairedImprovement =
+    const paired =
       candidate.strategyId === baseline.strategyId
         ? null
-        : pairedEvidence({
+        : rawPairedEvidence({
             baseline,
             candidate,
             policy,
             seedOffset: index + 1,
           });
-    const score = robustScore({ statistics, positiveRegimeFraction });
-    let promotionStatus: StrategyComparisonRow['promotionStatus'];
-    if (candidate.strategyId === baseline.strategyId) {
-      promotionStatus = 'BASELINE';
-    } else if (
-      candidate.validationStatus !== 'VALIDATED_FOR_PAPER_RESEARCH' ||
-      positiveRegimeFraction < policy.minimumPositiveRegimeFraction
-    ) {
-      promotionStatus = 'NOT_VALIDATED';
-    } else if (!pairedImprovement?.statisticallySignificant) {
-      promotionStatus = 'NO_SIGNIFICANT_IMPROVEMENT';
-    } else {
-      promotionStatus = 'ELIGIBLE_FOR_PAPER_COMPARISON';
-    }
     return {
-      rank: 0,
-      strategyId: candidate.strategyId,
-      label: candidate.label,
+      candidate,
       statistics,
-      regimePerformance: regimes,
+      regimes,
       positiveRegimeFraction,
-      robustScore: score,
-      pairedImprovement,
-      promotionStatus,
-      liveExecutionAllowed: false as const,
+      score: robustScore({ statistics, positiveRegimeFraction }),
+      paired,
     };
   });
 
-  const rows = unsortedRows
-    .slice()
+  const adjusted = adjustHolmBonferroni({
+    alpha: policy.familywiseAlpha,
+    hypotheses: preliminaries.flatMap((item) =>
+      item.paired === null
+        ? []
+        : [
+            {
+              id: item.candidate.strategyId,
+              rawPValue: item.paired.evidence.rawPValue,
+              value: item,
+            },
+          ],
+    ),
+  });
+  const adjustmentById = new Map(
+    adjusted.map((item) => [item.id, item] as const),
+  );
+
+  const rows = preliminaries
+    .map((item): Omit<StrategyComparisonRow, 'rank'> => {
+      const adjustment = adjustmentById.get(item.candidate.strategyId);
+      const pairedImprovement =
+        item.paired === null
+          ? null
+          : {
+              ...item.paired.evidence,
+              adjustedPValue: adjustment?.adjustedPValue ?? null,
+              statisticallySignificant:
+                item.paired.significance.status === 'PASSED' &&
+                item.paired.evidence.evaluationUniverseComplete &&
+                (adjustment?.rejectedAtAlpha ?? false),
+            };
+      let promotionStatus: StrategyComparisonRow['promotionStatus'];
+      if (item.candidate.strategyId === baseline.strategyId) {
+        promotionStatus = 'BASELINE';
+      } else if (
+        item.candidate.validationStatus !== 'VALIDATED_FOR_PAPER_RESEARCH' ||
+        item.positiveRegimeFraction < policy.minimumPositiveRegimeFraction
+      ) {
+        promotionStatus = 'NOT_VALIDATED';
+      } else if (!pairedImprovement?.evaluationUniverseComplete) {
+        promotionStatus = 'INCOMPLETE_EVALUATION_UNIVERSE';
+      } else if (!pairedImprovement.statisticallySignificant) {
+        promotionStatus = 'NO_SIGNIFICANT_IMPROVEMENT';
+      } else {
+        promotionStatus = 'ELIGIBLE_FOR_PAPER_COMPARISON';
+      }
+      return {
+        strategyId: item.candidate.strategyId,
+        label: item.candidate.label,
+        statistics: item.statistics,
+        regimePerformance: item.regimes,
+        positiveRegimeFraction: item.positiveRegimeFraction,
+        robustScore: item.score,
+        pairedImprovement,
+        promotionStatus,
+        liveExecutionAllowed: false,
+      };
+    })
     .sort((left, right) => {
       if (left.robustScore === null && right.robustScore === null) {
         return left.strategyId.localeCompare(right.strategyId);
@@ -325,6 +428,8 @@ export const compareStrategies = (input: {
 
   return {
     baselineStrategyId: baseline.strategyId,
+    hypothesisFamilySize: adjusted.length,
+    multiplicityMethod: 'HOLM_BONFERRONI',
     rows,
     liveExecutionAllowed: false,
   };
