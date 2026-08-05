@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+      - 'research/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: okx-whale-detector---Copy-main
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check, lint, and test
+        run: npm run check
+
+      - name: Build
+        run: npm run build
