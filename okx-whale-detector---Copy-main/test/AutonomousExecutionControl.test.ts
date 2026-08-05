@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { rankAutonomousResearchCandidates } from '../src/autonomy/AutonomousResearchRanking';
 import {
   aggregateDistributedBacktests,
+  createBacktestWorkUnitResult,
   planDistributedBacktests,
   type BacktestWorkUnitResult,
 } from '../src/autonomy/DistributedBacktest';
@@ -140,24 +141,24 @@ describe('distributed backtest protocol', () => {
 
   const resultFor = (
     workUnit: ReturnType<typeof plan>['workUnits'][number],
-  ): BacktestWorkUnitResult => ({
-    workUnitId: workUnit.workUnitId,
-    workUnitFingerprint: workUnit.workUnitFingerprint,
-    resultFingerprint: `result-${workUnit.workUnitFingerprint}`,
-    workerId: 'worker',
-    startedAt: 10,
-    completedAt: 20,
-    observationCount: workUnit.observationIds.length,
-    independentEpisodeCount: workUnit.episodeIds.length,
-    tradeCount: workUnit.observationIds.length,
-    netPnl: 2,
-    grossProfit: 3,
-    grossLoss: 1,
-    maximumDrawdownFraction: 0.05,
-    status: 'COMPLETED',
-    failureReason: null,
-    liveExecutionAllowed: false,
-  });
+  ): BacktestWorkUnitResult =>
+    createBacktestWorkUnitResult({
+      workUnitId: workUnit.workUnitId,
+      workUnitFingerprint: workUnit.workUnitFingerprint,
+      workerId: 'worker',
+      startedAt: 10,
+      completedAt: 20,
+      observationCount: workUnit.observationIds.length,
+      independentEpisodeCount: workUnit.episodeIds.length,
+      tradeCount: workUnit.observationIds.length,
+      netPnl: 2,
+      grossProfit: 3,
+      grossLoss: 1,
+      maximumDrawdownFraction: 0.05,
+      status: 'COMPLETED',
+      failureReason: null,
+      liveExecutionAllowed: false,
+    });
 
   it('creates deterministic shards and aggregates only complete result sets', () => {
     const first = plan();
@@ -183,7 +184,69 @@ describe('distributed backtest protocol', () => {
     });
     expect(report.status).toBe('REJECTED');
     expect(report.rejectionReasons).toContain('DUPLICATE_RESULTS');
-    expect(report.missingWorkUnitIds.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('rejects tampered result metrics and coverage', () => {
+    const backtestPlan = plan();
+    const valid = resultFor(backtestPlan.workUnits[0]!);
+    const tampered = { ...valid, netPnl: valid.netPnl + 1 };
+    const fingerprintReport = aggregateDistributedBacktests({
+      plan: backtestPlan,
+      results: [tampered],
+    });
+    expect(fingerprintReport.status).toBe('REJECTED');
+    expect(fingerprintReport.rejectionReasons).toContain(
+      'RESULT_FINGERPRINT_MISMATCH',
+    );
+
+    const invalidCoverage = createBacktestWorkUnitResult({
+      ...valid,
+      observationCount: valid.observationCount + 1,
+    });
+    const coverageReport = aggregateDistributedBacktests({
+      plan: backtestPlan,
+      results: [invalidCoverage],
+    });
+    expect(coverageReport.status).toBe('REJECTED');
+    expect(coverageReport.rejectionReasons).toContain('RESULT_COVERAGE_MISMATCH');
+  });
+
+  it('rejects one independent episode spanning folds or instruments', () => {
+    const report = planDistributedBacktests({
+      datasetFingerprint: 'dataset',
+      codeCommit: 'commit',
+      configurationHash: 'config',
+      candidates: [
+        { candidateId: 'candidate-1', candidateFingerprint: 'candidate-fp-1' },
+      ],
+      scenarios: [
+        { scenarioId: 'baseline', assumptionsFingerprint: 'assumptions-1' },
+      ],
+      observations: [
+        {
+          observationId: 'observation-1',
+          episodeId: 'shared-episode',
+          instrumentId: 'BTC-USDT-SWAP',
+          foldId: 'fold-1',
+          observedAt: 1,
+        },
+        {
+          observationId: 'observation-2',
+          episodeId: 'shared-episode',
+          instrumentId: 'BTC-USDT-SWAP',
+          foldId: 'fold-2',
+          observedAt: 2,
+        },
+      ],
+      discoveryOnly: true,
+      holdoutAccessed: false,
+    });
+
+    expect(report.status).toBe('REJECTED');
+    expect(report.workUnits).toEqual([]);
+    expect(report.rejectionReasons).toContain(
+      'EPISODE_SPANS_FOLD_OR_INSTRUMENT',
+    );
   });
 });
 
@@ -240,5 +303,34 @@ describe('rankAutonomousResearchCandidates', () => {
     ).toBe('BLOCKED');
     expect(report.strategyPromotionAllowed).toBe(false);
     expect(report.liveExecutionAllowed).toBe(false);
+  });
+
+  it('rejects impossible probability and drawdown evidence', () => {
+    expect(() =>
+      rankAutonomousResearchCandidates({
+        candidates: [
+          {
+            candidateId: 'invalid',
+            candidateFingerprint: 'invalid-fingerprint',
+            experimentCompleted: true,
+            dataQualityPassed: true,
+            splitIntegrityPassed: true,
+            robustnessPassed: true,
+            scenarioCount: 1,
+            completedScenarioCount: 1,
+            independentEpisodeCount: 100,
+            tradeCount: 100,
+            expectancyConfidenceLower: 0.01,
+            adjustedPValue: 1.1,
+            profitFactor: 1.2,
+            maximumDrawdownFraction: 0.1,
+            expectedShortfallReturnFraction: -0.1,
+            probabilityOfRuin: 0,
+            hypothesisFamilySize: 1,
+            complexityUnits: 1,
+          },
+        ],
+      }),
+    ).toThrow('adjustedPValue');
   });
 });
