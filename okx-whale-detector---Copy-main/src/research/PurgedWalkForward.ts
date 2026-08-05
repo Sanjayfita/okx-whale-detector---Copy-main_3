@@ -1,6 +1,7 @@
 export interface WalkForwardObservation {
   readonly id: string;
   readonly observedAt: number;
+  readonly labelEndAt?: number;
   readonly episodeId: string;
 }
 
@@ -21,12 +22,18 @@ export interface PurgedWalkForwardFold<T extends WalkForwardObservation> {
   readonly purgedObservationCount: number;
   readonly embargoedObservationCount: number;
   readonly overlappingEpisodeCount: number;
+  readonly maximumTrainLabelEndAt: number;
+  readonly firstTestObservedAt: number;
 }
 
 export interface PurgedWalkForwardPlan<T extends WalkForwardObservation> {
   readonly discovery: readonly T[];
   readonly holdout: readonly T[];
   readonly folds: readonly PurgedWalkForwardFold<T>[];
+  readonly holdoutBoundaryAt: number;
+  readonly holdoutEpisodeCount: number;
+  readonly holdoutPurgedObservationCount: number;
+  readonly holdoutEmbargoedObservationCount: number;
 }
 
 const requirePositiveInteger = (value: number, name: string): void => {
@@ -39,11 +46,11 @@ const validatePolicy = (policy: PurgedWalkForwardPolicy): void => {
   requirePositiveInteger(policy.trainSize, 'trainSize');
   requirePositiveInteger(policy.testSize, 'testSize');
   requirePositiveInteger(policy.stepSize, 'stepSize');
-  if (!Number.isFinite(policy.purgeMs) || policy.purgeMs < 0) {
-    throw new Error('purgeMs must be finite and non-negative');
+  if (!Number.isSafeInteger(policy.purgeMs) || policy.purgeMs < 0) {
+    throw new Error('purgeMs must be a non-negative safe integer');
   }
-  if (!Number.isFinite(policy.embargoMs) || policy.embargoMs < 0) {
-    throw new Error('embargoMs must be finite and non-negative');
+  if (!Number.isSafeInteger(policy.embargoMs) || policy.embargoMs < 0) {
+    throw new Error('embargoMs must be a non-negative safe integer');
   }
   if (
     !Number.isFinite(policy.holdoutFraction) ||
@@ -53,6 +60,9 @@ const validatePolicy = (policy: PurgedWalkForwardPolicy): void => {
     throw new Error('holdoutFraction must be in (0, 0.5)');
   }
 };
+
+const labelEndAt = (observation: WalkForwardObservation): number =>
+  observation.labelEndAt ?? observation.observedAt;
 
 const validateObservations = <T extends WalkForwardObservation>(
   observations: readonly T[],
@@ -67,15 +77,60 @@ const validateObservations = <T extends WalkForwardObservation>(
     }
     if (
       !Number.isSafeInteger(observation.observedAt) ||
-      observation.observedAt < 0
+      observation.observedAt < 0 ||
+      !Number.isSafeInteger(labelEndAt(observation)) ||
+      labelEndAt(observation) < observation.observedAt
     ) {
-      throw new Error(`invalid observedAt for ${observation.id}`);
+      throw new Error(`invalid observation interval for ${observation.id}`);
     }
     if (ids.has(observation.id)) {
       throw new Error(`duplicate observation id ${observation.id}`);
     }
     ids.add(observation.id);
   }
+};
+
+const selectHoldoutEpisodeIds = <T extends WalkForwardObservation>(
+  ordered: readonly T[],
+  targetObservationCount: number,
+): ReadonlySet<string> => {
+  const byEpisode = new Map<
+    string,
+    { readonly observations: T[]; readonly lastObservedAt: number }
+  >();
+  for (const observation of ordered) {
+    const existing = byEpisode.get(observation.episodeId);
+    if (existing === undefined) {
+      byEpisode.set(observation.episodeId, {
+        observations: [observation],
+        lastObservedAt: observation.observedAt,
+      });
+    } else {
+      existing.observations.push(observation);
+      byEpisode.set(observation.episodeId, {
+        observations: existing.observations,
+        lastObservedAt: Math.max(existing.lastObservedAt, observation.observedAt),
+      });
+    }
+  }
+  const episodes = [...byEpisode.entries()].sort(
+    ([leftId, left], [rightId, right]) =>
+      left.lastObservedAt - right.lastObservedAt || leftId.localeCompare(rightId),
+  );
+  const selected = new Set<string>();
+  let selectedObservationCount = 0;
+  for (let index = episodes.length - 1; index >= 0; index -= 1) {
+    const episode = episodes[index];
+    if (episode === undefined) {
+      continue;
+    }
+    selected.add(episode[0]);
+    selectedObservationCount += episode[1].observations.length;
+    if (selectedObservationCount >= targetObservationCount) {
+      break;
+    }
+  }
+  return selected;
 };
 
 export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
@@ -86,6 +141,9 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
 ): PurgedWalkForwardPlan<T> => {
   validatePolicy(input.policy);
   validateObservations(input.observations);
+  if (input.observations.length < 2) {
+    throw new Error('purged walk-forward requires at least two observations');
+  }
 
   const ordered = input.observations
     .slice()
@@ -93,13 +151,35 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
       (left, right) =>
         left.observedAt - right.observedAt || left.id.localeCompare(right.id),
     );
-  const holdoutCount = Math.max(
+  const targetHoldoutCount = Math.max(
     1,
     Math.floor(ordered.length * input.policy.holdoutFraction),
   );
-  const discoveryEnd = Math.max(0, ordered.length - holdoutCount);
-  const discovery = ordered.slice(0, discoveryEnd);
-  const holdout = ordered.slice(discoveryEnd);
+  const holdoutEpisodeIds = selectHoldoutEpisodeIds(
+    ordered,
+    targetHoldoutCount,
+  );
+  const holdout = ordered.filter((observation) =>
+    holdoutEpisodeIds.has(observation.episodeId),
+  );
+  const rawDiscovery = ordered.filter(
+    (observation) => !holdoutEpisodeIds.has(observation.episodeId),
+  );
+  const holdoutBoundaryAt = Math.min(
+    ...holdout.map((observation) => observation.observedAt),
+  );
+  const embargoCutoff = holdoutBoundaryAt - input.policy.embargoMs;
+  const embargoSafeDiscovery = rawDiscovery.filter(
+    (observation) => observation.observedAt <= embargoCutoff,
+  );
+  const holdoutEmbargoedObservationCount =
+    rawDiscovery.length - embargoSafeDiscovery.length;
+  const purgeCutoff = holdoutBoundaryAt - input.policy.purgeMs;
+  const discovery = embargoSafeDiscovery.filter(
+    (observation) => labelEndAt(observation) <= purgeCutoff,
+  );
+  const holdoutPurgedObservationCount =
+    embargoSafeDiscovery.length - discovery.length;
   const folds: PurgedWalkForwardFold<T>[] = [];
 
   for (
@@ -115,14 +195,17 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
       rawTestStart,
       rawTestStart + input.policy.testSize,
     );
-    const lastRawTrain = rawTrain.at(-1);
-    if (lastRawTrain === undefined) {
+    if (rawTrain.length === 0 || rawTest.length === 0) {
       continue;
     }
 
-    const embargoCutoff = lastRawTrain.observedAt + input.policy.embargoMs;
+    const maximumTrainLabelEndAt = Math.max(
+      ...rawTrain.map((observation) => labelEndAt(observation)),
+    );
     const test = rawTest.filter(
-      (observation) => observation.observedAt >= embargoCutoff,
+      (observation) =>
+        observation.observedAt >=
+        maximumTrainLabelEndAt + input.policy.embargoMs,
     );
     const embargoedObservationCount = rawTest.length - test.length;
     const firstTest = test[0];
@@ -130,19 +213,18 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
       continue;
     }
 
-    const purgeCutoff = firstTest.observedAt - input.policy.purgeMs;
+    const trainPurgeCutoff = firstTest.observedAt - input.policy.purgeMs;
     const timePurgedTrain = rawTrain.filter(
-      (observation) => observation.observedAt <= purgeCutoff,
+      (observation) => labelEndAt(observation) <= trainPurgeCutoff,
     );
     const purgedObservationCount = rawTrain.length - timePurgedTrain.length;
     const testEpisodes = new Set(test.map((observation) => observation.episodeId));
     const train = timePurgedTrain.filter(
       (observation) => !testEpisodes.has(observation.episodeId),
     );
-    const overlappingEpisodeCount =
-      timePurgedTrain.length - train.length;
+    const overlappingEpisodeCount = timePurgedTrain.length - train.length;
 
-    if (train.length === 0 || test.length === 0) {
+    if (train.length === 0) {
       continue;
     }
 
@@ -153,6 +235,8 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
       purgedObservationCount,
       embargoedObservationCount,
       overlappingEpisodeCount,
+      maximumTrainLabelEndAt,
+      firstTestObservedAt: firstTest.observedAt,
     });
   }
 
@@ -160,5 +244,9 @@ export const createPurgedWalkForwardPlan = <T extends WalkForwardObservation>(
     discovery,
     holdout,
     folds,
+    holdoutBoundaryAt,
+    holdoutEpisodeCount: holdoutEpisodeIds.size,
+    holdoutPurgedObservationCount,
+    holdoutEmbargoedObservationCount,
   };
 };

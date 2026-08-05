@@ -6,6 +6,11 @@ import type {
   OpenInterestRecord,
   OrderBookSnapshotRecord,
 } from '../data/ResearchMarketData';
+import {
+  requirePointInTimeSelection,
+  selectPointInTimeRecords,
+  type PointInTimeSelectionQuality,
+} from '../data/PointInTimeRecords';
 
 export type MarketRegime =
   | 'TRENDING_HIGH_VOLATILITY'
@@ -17,12 +22,35 @@ export interface FeaturePipelinePolicy {
   readonly depthLevels: number;
   readonly trendEfficiencyThreshold: number;
   readonly highVolatilityThresholdPercent: number;
+  readonly tradeLookbackMs: number;
+  readonly bookLookbackMs: number;
+  readonly candleLookbackMs: number;
+  readonly fundingLookbackMs: number;
+  readonly openInterestLookbackMs: number;
+  readonly markIndexLookbackMs: number;
+  readonly maximumTradeAgeMs: number;
+  readonly maximumBookAgeMs: number;
+  readonly maximumCandleAgeMs: number;
+  readonly maximumFundingAgeMs: number;
+  readonly maximumOpenInterestAgeMs: number;
+  readonly maximumMarkIndexAgeMs: number;
+}
+
+export interface FeaturePipelineDataQuality {
+  readonly status: 'PASSED';
+  readonly trades: PointInTimeSelectionQuality;
+  readonly books: PointInTimeSelectionQuality;
+  readonly candles: PointInTimeSelectionQuality;
+  readonly funding: PointInTimeSelectionQuality;
+  readonly openInterest: PointInTimeSelectionQuality;
+  readonly markIndex: PointInTimeSelectionQuality;
 }
 
 export interface ResearchFeatureVector {
   readonly instrumentId: string;
   readonly observedAt: number;
   readonly sourceMaxObservedAt: number;
+  readonly sourceMaxReceivedAt: number;
   readonly aggressiveDeltaContracts: number;
   readonly aggressiveDeltaNormalized: number;
   readonly cumulativeVolumeDelta: number;
@@ -37,6 +65,7 @@ export interface ResearchFeatureVector {
   readonly vwapDeviationAtr: number;
   readonly trendEfficiency: number;
   readonly regime: MarketRegime;
+  readonly dataQuality: FeaturePipelineDataQuality;
 }
 
 export interface FeaturePipelineInput {
@@ -55,6 +84,18 @@ export const DEFAULT_FEATURE_PIPELINE_POLICY: FeaturePipelinePolicy = {
   depthLevels: 20,
   trendEfficiencyThreshold: 0.35,
   highVolatilityThresholdPercent: 1.5,
+  tradeLookbackMs: 15 * 60_000,
+  bookLookbackMs: 60_000,
+  candleLookbackMs: 24 * 60 * 60_000,
+  fundingLookbackMs: 72 * 60 * 60_000,
+  openInterestLookbackMs: 24 * 60 * 60_000,
+  markIndexLookbackMs: 60_000,
+  maximumTradeAgeMs: 5 * 60_000,
+  maximumBookAgeMs: 5_000,
+  maximumCandleAgeMs: 2 * 60 * 60_000,
+  maximumFundingAgeMs: 12 * 60 * 60_000,
+  maximumOpenInterestAgeMs: 30 * 60_000,
+  maximumMarkIndexAgeMs: 5_000,
 };
 
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1_000;
@@ -68,6 +109,36 @@ const requireTimestamp = (value: number, name: string): void => {
 const requireFinite = (value: number, name: string): void => {
   if (!Number.isFinite(value)) {
     throw new Error(`${name} must be finite`);
+  }
+};
+
+const requireNonNegativeInteger = (value: number, name: string): void => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+};
+
+const validatePolicy = (policy: FeaturePipelinePolicy): void => {
+  if (!Number.isSafeInteger(policy.depthLevels) || policy.depthLevels <= 0) {
+    throw new Error('depthLevels must be a positive safe integer');
+  }
+  if (
+    !Number.isFinite(policy.trendEfficiencyThreshold) ||
+    policy.trendEfficiencyThreshold < 0 ||
+    policy.trendEfficiencyThreshold > 1
+  ) {
+    throw new Error('trendEfficiencyThreshold must be in [0, 1]');
+  }
+  if (
+    !Number.isFinite(policy.highVolatilityThresholdPercent) ||
+    policy.highVolatilityThresholdPercent <= 0
+  ) {
+    throw new Error('highVolatilityThresholdPercent must be positive');
+  }
+  for (const [name, value] of Object.entries(policy)) {
+    if (name.endsWith('Ms')) {
+      requireNonNegativeInteger(value, name);
+    }
   }
 };
 
@@ -89,15 +160,6 @@ const sampleStandardDeviation = (values: readonly number[]): number => {
     ),
   );
 };
-
-const before = <T extends { readonly observedAt: number }>(
-  records: readonly T[],
-  asOf: number,
-): readonly T[] =>
-  records
-    .filter((record) => record.observedAt <= asOf)
-    .slice()
-    .sort((left, right) => left.observedAt - right.observedAt);
 
 const requiredLatest = <T>(records: readonly T[], name: string): T => {
   const value = records[records.length - 1];
@@ -248,29 +310,92 @@ export const calculateResearchFeatures = (
   input: FeaturePipelineInput,
 ): ResearchFeatureVector => {
   requireTimestamp(input.asOf, 'asOf');
+  if (input.instrumentId.trim().length === 0) {
+    throw new Error('instrumentId must not be empty');
+  }
   const policy: FeaturePipelinePolicy = {
     ...DEFAULT_FEATURE_PIPELINE_POLICY,
     ...input.policy,
   };
-  if (!Number.isSafeInteger(policy.depthLevels) || policy.depthLevels <= 0) {
-    throw new Error('depthLevels must be a positive safe integer');
-  }
+  validatePolicy(policy);
 
-  const trades = before(input.trades, input.asOf);
-  const books = before(input.books, input.asOf);
-  const candles = before(input.candles, input.asOf).filter(
-    (candle) => candle.confirmed,
-  );
-  const funding = before(input.funding, input.asOf).filter(
-    (record) => record.fundingTime <= input.asOf,
-  );
-  const openInterest = before(input.openInterest, input.asOf);
-  const markIndex = before(input.markIndex, input.asOf);
+  const tradeSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline trades',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.trades,
+    policy: {
+      lookbackMs: policy.tradeLookbackMs,
+      maximumAgeMs: policy.maximumTradeAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const bookSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline books',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.books,
+    policy: {
+      lookbackMs: policy.bookLookbackMs,
+      maximumAgeMs: policy.maximumBookAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const candleSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline candles',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.candles.filter((candle) => candle.confirmed),
+    policy: {
+      lookbackMs: policy.candleLookbackMs,
+      maximumAgeMs: policy.maximumCandleAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const fundingSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline funding',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.funding.filter((record) => record.fundingTime <= input.asOf),
+    policy: {
+      lookbackMs: policy.fundingLookbackMs,
+      maximumAgeMs: policy.maximumFundingAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const openInterestSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline open interest',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.openInterest,
+    policy: {
+      lookbackMs: policy.openInterestLookbackMs,
+      maximumAgeMs: policy.maximumOpenInterestAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const markIndexSelection = selectPointInTimeRecords({
+    sourceName: 'feature pipeline mark/index',
+    instrumentId: input.instrumentId,
+    asOf: input.asOf,
+    records: input.markIndex,
+    policy: {
+      lookbackMs: policy.markIndexLookbackMs,
+      maximumAgeMs: policy.maximumMarkIndexAgeMs,
+      minimumRecords: 1,
+    },
+  });
+
+  const trades = requirePointInTimeSelection(tradeSelection);
+  const books = requirePointInTimeSelection(bookSelection);
+  const candles = requirePointInTimeSelection(candleSelection);
+  const funding = requirePointInTimeSelection(fundingSelection);
+  const openInterest = requirePointInTimeSelection(openInterestSelection);
+  const markIndex = requirePointInTimeSelection(markIndexSelection);
 
   const currentBook = requiredLatest(books, 'feature pipeline order book');
   const currentCandle = requiredLatest(candles, 'feature pipeline candles');
   const currentFunding = requiredLatest(funding, 'feature pipeline funding');
-  requiredLatest(openInterest, 'feature pipeline open interest');
   const currentMarkIndex = requiredLatest(
     markIndex,
     'feature pipeline mark/index',
@@ -292,23 +417,29 @@ export const calculateResearchFeatures = (
       ? 'RANGE_HIGH_VOLATILITY'
       : 'RANGE_LOW_VOLATILITY';
 
-  const sourceTimes = [
-    ...trades.map((record) => record.observedAt),
-    currentBook.observedAt,
-    ...candles.map((record) => record.observedAt),
-    ...funding.map((record) => record.observedAt),
-    ...openInterest.map((record) => record.observedAt),
-    currentMarkIndex.observedAt,
+  const selectedRecords = [
+    ...trades,
+    ...books,
+    ...candles,
+    ...funding,
+    ...openInterest,
+    ...markIndex,
   ];
-  const sourceMaxObservedAt = Math.max(...sourceTimes);
-  if (sourceMaxObservedAt > input.asOf) {
-    throw new Error('Feature pipeline source timestamp exceeds asOf');
+  const sourceMaxObservedAt = Math.max(
+    ...selectedRecords.map((record) => record.observedAt),
+  );
+  const sourceMaxReceivedAt = Math.max(
+    ...selectedRecords.map((record) => record.receivedAt),
+  );
+  if (sourceMaxObservedAt > input.asOf || sourceMaxReceivedAt > input.asOf) {
+    throw new Error('Feature pipeline source availability exceeds asOf');
   }
 
   const output: ResearchFeatureVector = {
     instrumentId: input.instrumentId,
     observedAt: input.asOf,
     sourceMaxObservedAt,
+    sourceMaxReceivedAt,
     aggressiveDeltaContracts: flow.delta,
     aggressiveDeltaNormalized: flow.normalized,
     cumulativeVolumeDelta: flow.delta,
@@ -329,6 +460,15 @@ export const calculateResearchFeatures = (
         : (currentCandle.close - flow.vwap) / averageTrueRange,
     trendEfficiency: efficiency,
     regime,
+    dataQuality: {
+      status: 'PASSED',
+      trades: tradeSelection.quality,
+      books: bookSelection.quality,
+      candles: candleSelection.quality,
+      funding: fundingSelection.quality,
+      openInterest: openInterestSelection.quality,
+      markIndex: markIndexSelection.quality,
+    },
   };
 
   for (const [name, value] of Object.entries(output)) {
