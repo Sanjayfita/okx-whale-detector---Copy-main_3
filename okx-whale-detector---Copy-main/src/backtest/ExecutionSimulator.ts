@@ -35,6 +35,7 @@ export interface MarketFillResult {
   readonly filledQuantity: number;
   readonly unfilledQuantity: number;
   readonly fillRatio: number;
+  readonly minimumFillRatioMet: boolean;
   readonly averagePrice: number | null;
   readonly grossNotional: number;
   readonly fee: number;
@@ -119,6 +120,28 @@ const latencyAdjustedPrice = (
   return price * multiplier;
 };
 
+const rejectedFill = (input: {
+  readonly side: MarketOrderSide;
+  readonly requestedQuantity: number;
+  readonly midpointPrice: number | null;
+  readonly reason: string;
+}): MarketFillResult => ({
+  status: 'REJECTED',
+  side: input.side,
+  requestedQuantity: input.requestedQuantity,
+  filledQuantity: 0,
+  unfilledQuantity: Math.max(0, input.requestedQuantity),
+  fillRatio: 0,
+  minimumFillRatioMet: false,
+  averagePrice: null,
+  grossNotional: 0,
+  fee: 0,
+  midpointPrice: input.midpointPrice,
+  slippageBps: null,
+  consumedLevels: 0,
+  rejectionReasons: [input.reason],
+});
+
 export const simulateMarketOrder = (input: {
   readonly side: MarketOrderSide;
   readonly quantity: number;
@@ -129,41 +152,23 @@ export const simulateMarketOrder = (input: {
   validatePolicy(policy);
 
   if (!isPositiveFinite(input.quantity)) {
-    return {
-      status: 'REJECTED',
+    return rejectedFill({
       side: input.side,
       requestedQuantity: input.quantity,
-      filledQuantity: 0,
-      unfilledQuantity: input.quantity,
-      fillRatio: 0,
-      averagePrice: null,
-      grossNotional: 0,
-      fee: 0,
       midpointPrice: null,
-      slippageBps: null,
-      consumedLevels: 0,
-      rejectionReasons: ['INVALID_QUANTITY'],
-    };
+      reason: 'INVALID_QUANTITY',
+    });
   }
 
   const normalized = normalizeBook(input.book);
   const levels = input.side === 'BUY' ? normalized.asks : normalized.bids;
   if (normalized.midpointPrice === null || levels.length === 0) {
-    return {
-      status: 'REJECTED',
+    return rejectedFill({
       side: input.side,
       requestedQuantity: input.quantity,
-      filledQuantity: 0,
-      unfilledQuantity: input.quantity,
-      fillRatio: 0,
-      averagePrice: null,
-      grossNotional: 0,
-      fee: 0,
       midpointPrice: normalized.midpointPrice,
-      slippageBps: null,
-      consumedLevels: 0,
-      rejectionReasons: ['INVALID_OR_EMPTY_BOOK'],
-    };
+      reason: 'INVALID_OR_EMPTY_BOOK',
+    });
   }
 
   let remaining = input.quantity;
@@ -172,14 +177,10 @@ export const simulateMarketOrder = (input: {
   let consumedLevels = 0;
 
   for (const level of levels) {
-    if (remaining <= 0) {
-      break;
-    }
+    if (remaining <= 0) break;
     const available = level.quantity * policy.maxLevelParticipationRate;
     const fillQuantity = Math.min(remaining, available);
-    if (fillQuantity <= 0) {
-      continue;
-    }
+    if (fillQuantity <= 0) continue;
 
     const executionPrice = latencyAdjustedPrice(level.price, input.side, policy);
     filledQuantity += fillQuantity;
@@ -188,38 +189,41 @@ export const simulateMarketOrder = (input: {
     consumedLevels += 1;
   }
 
+  if (filledQuantity <= 0) {
+    return rejectedFill({
+      side: input.side,
+      requestedQuantity: input.quantity,
+      midpointPrice: normalized.midpointPrice,
+      reason: 'INSUFFICIENT_EXECUTABLE_DEPTH',
+    });
+  }
+
   const fillRatio = filledQuantity / input.quantity;
-  const averagePrice =
-    filledQuantity > 0 ? grossNotional / filledQuantity : null;
+  const minimumFillRatioMet = fillRatio >= policy.minimumFillRatio;
+  const averagePrice = grossNotional / filledQuantity;
   const fee = grossNotional * (policy.takerFeeBps / 10_000);
   const slippageBps =
-    averagePrice === null
-      ? null
-      : ((averagePrice - normalized.midpointPrice) /
-          normalized.midpointPrice) *
-        10_000 *
-        (input.side === 'BUY' ? 1 : -1);
+    ((averagePrice - normalized.midpointPrice) / normalized.midpointPrice) *
+    10_000 *
+    (input.side === 'BUY' ? 1 : -1);
 
   return {
-    status:
-      fillRatio >= 1 - Number.EPSILON
-        ? 'FILLED'
-        : fillRatio >= policy.minimumFillRatio
-          ? 'PARTIALLY_FILLED'
-          : 'REJECTED',
+    status: fillRatio >= 1 - Number.EPSILON ? 'FILLED' : 'PARTIALLY_FILLED',
     side: input.side,
     requestedQuantity: input.quantity,
     filledQuantity,
     unfilledQuantity: Math.max(0, input.quantity - filledQuantity),
     fillRatio,
+    minimumFillRatioMet,
     averagePrice,
     grossNotional,
     fee,
     midpointPrice: normalized.midpointPrice,
     slippageBps,
     consumedLevels,
-    rejectionReasons:
-      fillRatio >= policy.minimumFillRatio ? [] : ['INSUFFICIENT_EXECUTABLE_DEPTH'],
+    rejectionReasons: minimumFillRatioMet
+      ? []
+      : ['MINIMUM_FILL_RATIO_NOT_MET'],
   };
 };
 
@@ -229,6 +233,7 @@ export interface LeveragedTradeSimulationResult {
   readonly entry: MarketFillResult;
   readonly exit: MarketFillResult | null;
   readonly matchedQuantity: number;
+  readonly unmatchedQuantity: number;
   readonly leverage: number;
   readonly initialMargin: number;
   readonly estimatedLiquidationPrice: number | null;
@@ -292,12 +297,17 @@ export const simulateLeveragedTrade = (input: {
     policy: input.policy,
   });
 
+  const holdingTimeMs = Math.max(
+    0,
+    input.exitBook.observedAt - input.entryBook.observedAt,
+  );
   const baseRejected: LeveragedTradeSimulationResult = {
     status: 'REJECTED',
     direction: input.direction,
     entry,
     exit: null,
     matchedQuantity: 0,
+    unmatchedQuantity: 0,
     leverage: input.leverage,
     initialMargin: 0,
     estimatedLiquidationPrice: null,
@@ -305,7 +315,7 @@ export const simulateLeveragedTrade = (input: {
     feeCost: entry.fee,
     fundingPnl: 0,
     netPnl: -entry.fee,
-    holdingTimeMs: Math.max(0, input.exitBook.observedAt - input.entryBook.observedAt),
+    holdingTimeMs,
     rejectionReasons: entry.rejectionReasons,
     liveExecutionAllowed: false,
   };
@@ -334,10 +344,6 @@ export const simulateLeveragedTrade = (input: {
 
   const entryNotional = entry.averagePrice * entry.filledQuantity;
   const initialMargin = entryNotional / input.leverage;
-  const holdingTimeMs = Math.max(
-    0,
-    input.exitBook.observedAt - input.entryBook.observedAt,
-  );
   const holdingHours = holdingTimeMs / 3_600_000;
   const fundingIntervals = Math.max(
     0,
@@ -361,6 +367,7 @@ export const simulateLeveragedTrade = (input: {
       entry,
       exit: null,
       matchedQuantity: entry.filledQuantity,
+      unmatchedQuantity: 0,
       leverage: input.leverage,
       initialMargin,
       estimatedLiquidationPrice: liquidationPrice,
@@ -382,42 +389,41 @@ export const simulateLeveragedTrade = (input: {
   });
   if (exit.averagePrice === null || exit.filledQuantity <= 0) {
     return {
-      ...baseRejected,
+      status: 'PARTIALLY_EXITED',
+      direction: input.direction,
+      entry,
+      exit,
+      matchedQuantity: 0,
+      unmatchedQuantity: entry.filledQuantity,
+      leverage: input.leverage,
       initialMargin,
       estimatedLiquidationPrice: liquidationPrice,
+      grossPnl: 0,
+      feeCost: entry.fee,
       fundingPnl,
       netPnl: -entry.fee + fundingPnl,
       holdingTimeMs,
-      rejectionReasons: exit.rejectionReasons,
+      rejectionReasons: ['EXIT_NOT_FILLED', ...exit.rejectionReasons],
+      liveExecutionAllowed: false,
     };
   }
 
-  const matchedQuantity = Math.min(
-    entry.filledQuantity,
-    exit.filledQuantity,
-  );
+  const matchedQuantity = Math.min(entry.filledQuantity, exit.filledQuantity);
+  const unmatchedQuantity = Math.max(0, entry.filledQuantity - matchedQuantity);
   const grossPnlPerUnit =
     input.direction === 'LONG'
       ? exit.averagePrice - entry.averagePrice
       : entry.averagePrice - exit.averagePrice;
   const grossPnl = grossPnlPerUnit * matchedQuantity;
-  const matchedEntryFee =
-    entry.averagePrice * matchedQuantity *
-    ((input.policy ?? DEFAULT_EXECUTION_SIMULATION_POLICY).takerFeeBps / 10_000);
-  const matchedExitFee =
-    exit.averagePrice * matchedQuantity *
-    ((input.policy ?? DEFAULT_EXECUTION_SIMULATION_POLICY).takerFeeBps / 10_000);
-  const feeCost = matchedEntryFee + matchedExitFee;
+  const feeCost = entry.fee + exit.fee;
 
   return {
-    status:
-      matchedQuantity >= entry.filledQuantity - Number.EPSILON
-        ? 'COMPLETED'
-        : 'PARTIALLY_EXITED',
+    status: unmatchedQuantity <= Number.EPSILON ? 'COMPLETED' : 'PARTIALLY_EXITED',
     direction: input.direction,
     entry,
     exit,
     matchedQuantity,
+    unmatchedQuantity,
     leverage: input.leverage,
     initialMargin,
     estimatedLiquidationPrice: liquidationPrice,
@@ -426,7 +432,10 @@ export const simulateLeveragedTrade = (input: {
     fundingPnl,
     netPnl: grossPnl - feeCost + fundingPnl,
     holdingTimeMs,
-    rejectionReasons: [],
+    rejectionReasons:
+      unmatchedQuantity <= Number.EPSILON
+        ? []
+        : ['RESIDUAL_POSITION_REMAINS_OPEN'],
     liveExecutionAllowed: false,
   };
 };

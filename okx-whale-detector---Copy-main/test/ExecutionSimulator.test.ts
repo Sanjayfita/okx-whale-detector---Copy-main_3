@@ -42,6 +42,7 @@ describe('simulateMarketOrder', () => {
     });
 
     expect(result.status).toBe('FILLED');
+    expect(result.minimumFillRatioMet).toBe(true);
     expect(result.averagePrice).toBe(101.5);
     expect(result.grossNotional).toBe(203);
     expect(result.fee).toBeCloseTo(0.1015, 8);
@@ -49,7 +50,7 @@ describe('simulateMarketOrder', () => {
     expect(result.consumedLevels).toBe(2);
   });
 
-  it('rejects orders that cannot meet the minimum executable fill ratio', () => {
+  it('records real partial exposure below the preferred fill ratio', () => {
     const result = simulateMarketOrder({
       side: 'SELL',
       quantity: 10,
@@ -57,16 +58,17 @@ describe('simulateMarketOrder', () => {
       policy,
     });
 
-    expect(result.status).toBe('REJECTED');
+    expect(result.status).toBe('PARTIALLY_FILLED');
     expect(result.fillRatio).toBe(0.3);
-    expect(result.rejectionReasons).toEqual([
-      'INSUFFICIENT_EXECUTABLE_DEPTH',
-    ]);
+    expect(result.filledQuantity).toBe(3);
+    expect(result.unfilledQuantity).toBe(7);
+    expect(result.minimumFillRatioMet).toBe(false);
+    expect(result.rejectionReasons).toEqual(['MINIMUM_FILL_RATIO_NOT_MET']);
   });
 });
 
 describe('simulateLeveragedTrade', () => {
-  it('deducts taker fees and positive funding from a long trade', () => {
+  it('deducts taker fees and funding from a long trade', () => {
     const result = simulateLeveragedTrade({
       direction: 'LONG',
       quantity: 1,
@@ -86,7 +88,63 @@ describe('simulateLeveragedTrade', () => {
     expect(result.feeCost).toBeCloseTo(0.105, 8);
     expect(result.fundingPnl).toBeCloseTo(-0.01, 8);
     expect(result.netPnl).toBeCloseTo(9.885, 8);
+    expect(result.unmatchedQuantity).toBe(0);
     expect(result.liveExecutionAllowed).toBe(false);
+  });
+
+  it('keeps partial entry fills in the simulated position', () => {
+    const result = simulateLeveragedTrade({
+      direction: 'LONG',
+      quantity: 10,
+      entryBook: book(0, 99, 100),
+      exitBook: {
+        observedAt: 3_600_000,
+        bids: [{ price: 105, quantity: 3 }],
+        asks: [{ price: 106, quantity: 3 }],
+      },
+      leverage: 3,
+      maintenanceMarginRate: 0.05,
+      fundingRatePercentPerInterval: 0,
+      fundingIntervalHours: 8,
+      pathLow: 95,
+      pathHigh: 106,
+      policy,
+    });
+
+    expect(result.entry.status).toBe('PARTIALLY_FILLED');
+    expect(result.entry.filledQuantity).toBe(3);
+    expect(result.status).toBe('COMPLETED');
+    expect(result.matchedQuantity).toBe(3);
+    expect(result.unmatchedQuantity).toBe(0);
+  });
+
+  it('reports residual exposure and all paid fees after a partial exit', () => {
+    const result = simulateLeveragedTrade({
+      direction: 'LONG',
+      quantity: 3,
+      entryBook: book(0, 99, 100),
+      exitBook: {
+        observedAt: 3_600_000,
+        bids: [{ price: 105, quantity: 1 }],
+        asks: [{ price: 106, quantity: 1 }],
+      },
+      leverage: 3,
+      maintenanceMarginRate: 0.05,
+      fundingRatePercentPerInterval: 0,
+      fundingIntervalHours: 8,
+      pathLow: 95,
+      pathHigh: 106,
+      policy,
+    });
+
+    expect(result.status).toBe('PARTIALLY_EXITED');
+    expect(result.matchedQuantity).toBe(1);
+    expect(result.unmatchedQuantity).toBe(2);
+    expect(result.rejectionReasons).toContain('RESIDUAL_POSITION_REMAINS_OPEN');
+    expect(result.feeCost).toBeCloseTo(
+      result.entry.fee + (result.exit?.fee ?? 0),
+      8,
+    );
   });
 
   it('flags a path that crosses the estimated isolated liquidation price', () => {
@@ -115,5 +173,6 @@ describe('simulateLeveragedTrade', () => {
     expect(result.status).toBe('LIQUIDATED');
     expect(result.netPnl).toBeLessThan(0);
     expect(result.exit).toBeNull();
+    expect(result.unmatchedQuantity).toBe(0);
   });
 });

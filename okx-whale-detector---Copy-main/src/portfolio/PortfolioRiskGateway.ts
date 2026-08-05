@@ -36,6 +36,7 @@ export interface PortfolioRiskGatewayPolicy {
   readonly fractionalKellyMultiplier: number;
   readonly maximumSimultaneousPositions: number;
   readonly maximumAbsolutePairCorrelation: number;
+  readonly requireCompleteCorrelationCoverage?: boolean;
   readonly softDrawdownFraction: number;
   readonly hardDrawdownFraction: number;
   readonly minimumDynamicLeverageFraction: number;
@@ -47,6 +48,7 @@ export const DEFAULT_PORTFOLIO_RISK_GATEWAY_POLICY: PortfolioRiskGatewayPolicy =
   fractionalKellyMultiplier: 0.25,
   maximumSimultaneousPositions: 5,
   maximumAbsolutePairCorrelation: 0.8,
+  requireCompleteCorrelationCoverage: true,
   softDrawdownFraction: 0.05,
   hardDrawdownFraction: 0.1,
   minimumDynamicLeverageFraction: 0.25,
@@ -103,13 +105,17 @@ const allocationScore = (input: {
   inverseVolatilityWeight: number;
 }> => {
   if (
+    input.proposal.strategyId.trim().length === 0 ||
+    input.proposal.instrumentId.trim().length === 0 ||
+    input.proposal.sector.trim().length === 0 ||
+    input.proposal.correlationGroup.trim().length === 0 ||
     !Number.isFinite(input.proposal.expectedEdge) ||
     !Number.isFinite(input.proposal.dailyVolatility) ||
     input.proposal.dailyVolatility <= 0 ||
     !Number.isFinite(input.proposal.maximumNotional) ||
     input.proposal.maximumNotional <= 0
   ) {
-    throw new Error('proposal edge, volatility, and maximumNotional are invalid');
+    throw new Error('proposal identifiers, edge, volatility, or notional are invalid');
   }
   const kelly = fractionalKelly(input.proposal);
   const inverseVolatilityWeight = 1 / input.proposal.dailyVolatility;
@@ -146,8 +152,7 @@ const emptyPortfolioDecision = (
     leverage: grossExposure / state.equity,
     valueAtRisk: 0,
     valueAtRiskFraction: 0,
-    drawdownFraction:
-      (state.peakEquity - state.equity) / state.peakEquity,
+    drawdownFraction: (state.peakEquity - state.equity) / state.peakEquity,
     rejectionReasons: [reason],
     liveExecutionAllowed: false,
   };
@@ -172,6 +177,14 @@ export const evaluatePortfolioProposals = (input: {
     policy.minimumDynamicLeverageFraction,
     'minimumDynamicLeverageFraction',
   );
+  if (
+    !Number.isFinite(input.state.equity) ||
+    input.state.equity <= 0 ||
+    !Number.isFinite(input.state.peakEquity) ||
+    input.state.peakEquity <= 0
+  ) {
+    throw new Error('portfolio equity and peak equity must be positive');
+  }
   if (
     policy.softDrawdownFraction >= policy.hardDrawdownFraction ||
     !Number.isSafeInteger(policy.maximumSimultaneousPositions) ||
@@ -221,13 +234,21 @@ export const evaluatePortfolioProposals = (input: {
 
   const correlations = new Map<string, number>();
   for (const pair of input.correlations) {
-    if (!Number.isFinite(pair.correlation) || Math.abs(pair.correlation) > 1) {
-      throw new Error('correlation must be in [-1, 1]');
+    if (
+      pair.leftInstrumentId.trim().length === 0 ||
+      pair.rightInstrumentId.trim().length === 0 ||
+      pair.leftInstrumentId === pair.rightInstrumentId ||
+      !Number.isFinite(pair.correlation) ||
+      Math.abs(pair.correlation) > 1
+    ) {
+      throw new Error('correlation pair is invalid');
     }
-    correlations.set(
-      correlationKey(pair.leftInstrumentId, pair.rightInstrumentId),
-      pair.correlation,
-    );
+    const key = correlationKey(pair.leftInstrumentId, pair.rightInstrumentId);
+    const previous = correlations.get(key);
+    if (previous !== undefined && Math.abs(previous - pair.correlation) > 1e-12) {
+      throw new Error(`conflicting correlation pair ${key}`);
+    }
+    correlations.set(key, pair.correlation);
   }
 
   const scored = input.proposals
@@ -242,7 +263,8 @@ export const evaluatePortfolioProposals = (input: {
     .sort(
       (left, right) =>
         right.score - left.score ||
-        left.proposal.instrumentId.localeCompare(right.proposal.instrumentId),
+        left.proposal.instrumentId.localeCompare(right.proposal.instrumentId) ||
+        left.proposal.strategyId.localeCompare(right.proposal.strategyId),
     );
 
   const existingInstrumentIds = new Set(
@@ -253,42 +275,64 @@ export const evaluatePortfolioProposals = (input: {
     policy.maximumSimultaneousPositions - existingInstrumentIds.size,
   );
   const admitted: typeof scored = [];
+  const admittedNewInstrumentIds = new Set<string>();
+  const consideredInstrumentIds = new Set<string>();
   const proposalDecisions: PortfolioProposalDecision[] = [];
+
   for (const item of scored) {
     const rejectionReasons: string[] = [];
-    if (item.score <= 0) {
-      rejectionReasons.push('NON_POSITIVE_ALLOCATION_SCORE');
+    const instrumentId = item.proposal.instrumentId;
+    if (consideredInstrumentIds.has(instrumentId)) {
+      rejectionReasons.push('DUPLICATE_INSTRUMENT_PROPOSAL');
     }
-    if (admitted.length >= capacity) {
+    consideredInstrumentIds.add(instrumentId);
+
+    if (item.score <= 0) rejectionReasons.push('NON_POSITIVE_ALLOCATION_SCORE');
+
+    const opensNewPosition = !existingInstrumentIds.has(instrumentId);
+    if (
+      opensNewPosition &&
+      !admittedNewInstrumentIds.has(instrumentId) &&
+      admittedNewInstrumentIds.size >= capacity
+    ) {
       rejectionReasons.push('MAXIMUM_SIMULTANEOUS_POSITIONS');
     }
+
     const comparisonIds = [
       ...existingInstrumentIds,
       ...admitted.map((candidate) => candidate.proposal.instrumentId),
-    ];
-    if (
-      comparisonIds.some(
-        (instrumentId) =>
-          Math.abs(
-            correlations.get(
-              correlationKey(instrumentId, item.proposal.instrumentId),
-            ) ?? 0,
-          ) > policy.maximumAbsolutePairCorrelation,
-      )
-    ) {
-      rejectionReasons.push('PAIR_CORRELATION_LIMIT');
+    ].filter((comparisonId) => comparisonId !== instrumentId);
+    for (const comparisonId of [...new Set(comparisonIds)]) {
+      const correlation = correlations.get(
+        correlationKey(comparisonId, instrumentId),
+      );
+      if (
+        correlation === undefined &&
+        (policy.requireCompleteCorrelationCoverage ?? true)
+      ) {
+        rejectionReasons.push('CORRELATION_DATA_MISSING');
+        continue;
+      }
+      if (
+        correlation !== undefined &&
+        Math.abs(correlation) > policy.maximumAbsolutePairCorrelation
+      ) {
+        rejectionReasons.push('PAIR_CORRELATION_LIMIT');
+      }
     }
+
     if (rejectionReasons.length === 0) {
       admitted.push(item);
+      if (opensNewPosition) admittedNewInstrumentIds.add(instrumentId);
     }
     proposalDecisions.push({
       strategyId: item.proposal.strategyId,
-      instrumentId: item.proposal.instrumentId,
+      instrumentId,
       allocationScore: item.score,
       fractionalKelly: item.fractionalKelly,
       inverseVolatilityWeight: item.inverseVolatilityWeight,
       status: rejectionReasons.length === 0 ? 'ADMITTED' : 'REJECTED',
-      rejectionReasons,
+      rejectionReasons: [...new Set(rejectionReasons)],
     });
   }
 

@@ -23,8 +23,24 @@ const proposal = (
   maximumNotional: 5_000,
 });
 
+const scenarios = (
+  instrumentIds: readonly string[],
+): readonly {
+  readonly timestamp: number;
+  readonly returns: Readonly<Record<string, number>>;
+}[] =>
+  Array.from({ length: 20 }, (_, index) => ({
+    timestamp: index + 1,
+    returns: Object.fromEntries(
+      instrumentIds.map((instrumentId, instrumentIndex) => [
+        instrumentId,
+        ((index + instrumentIndex) % 2 === 0 ? -1 : 1) * 0.005,
+      ]),
+    ),
+  }));
+
 describe('evaluatePortfolioProposals', () => {
-  it('applies Kelly/risk-parity scoring before portfolio risk controls', () => {
+  it('applies Kelly/risk-parity scoring before portfolio controls', () => {
     const decision = evaluatePortfolioProposals({
       state: { equity: 10_000, peakEquity: 10_000, positions: [] },
       proposals: [
@@ -38,13 +54,28 @@ describe('evaluatePortfolioProposals', () => {
           rightInstrumentId: 'ETH-USDT-SWAP',
           correlation: 0.95,
         },
+        {
+          leftInstrumentId: 'BTC-USDT-SWAP',
+          rightInstrumentId: 'SOL-USDT-SWAP',
+          correlation: 0.3,
+        },
+        {
+          leftInstrumentId: 'ETH-USDT-SWAP',
+          rightInstrumentId: 'SOL-USDT-SWAP',
+          correlation: 0.4,
+        },
       ],
-      returnScenarios: [],
+      returnScenarios: scenarios([
+        'BTC-USDT-SWAP',
+        'ETH-USDT-SWAP',
+        'SOL-USDT-SWAP',
+      ]),
       policy: {
         allocationMode: 'HYBRID',
         fractionalKellyMultiplier: 0.25,
         maximumSimultaneousPositions: 2,
         maximumAbsolutePairCorrelation: 0.8,
+        requireCompleteCorrelationCoverage: true,
         softDrawdownFraction: 0.05,
         hardDrawdownFraction: 0.1,
         minimumDynamicLeverageFraction: 0.25,
@@ -57,6 +88,8 @@ describe('evaluatePortfolioProposals', () => {
           maximumDrawdownFraction: 0.1,
           valueAtRiskConfidence: 0.99,
           maximumValueAtRiskFraction: 0.025,
+          minimumValueAtRiskScenarios: 20,
+          requireCompleteScenarioCoverage: true,
         },
       },
     });
@@ -76,12 +109,30 @@ describe('evaluatePortfolioProposals', () => {
     expect(decision.liveExecutionAllowed).toBe(false);
   });
 
+  it('rejects proposals when pair-correlation evidence is missing', () => {
+    const decision = evaluatePortfolioProposals({
+      state: { equity: 10_000, peakEquity: 10_000, positions: [] },
+      proposals: [
+        proposal('BTC-USDT-SWAP', 0.02),
+        proposal('SOL-USDT-SWAP', 0.015),
+      ],
+      correlations: [],
+      returnScenarios: scenarios(['BTC-USDT-SWAP', 'SOL-USDT-SWAP']),
+    });
+
+    expect(
+      decision.proposalDecisions.find(
+        (item) => item.instrumentId === 'SOL-USDT-SWAP',
+      )?.rejectionReasons,
+    ).toContain('CORRELATION_DATA_MISSING');
+  });
+
   it('reduces dynamic leverage as drawdown approaches the hard limit', () => {
     const decision = evaluatePortfolioProposals({
       state: { equity: 9_250, peakEquity: 10_000, positions: [] },
       proposals: [proposal('BTC-USDT-SWAP', 0.02)],
       correlations: [],
-      returnScenarios: [],
+      returnScenarios: scenarios(['BTC-USDT-SWAP']),
     });
 
     expect(decision.dynamicMaximumLeverage).toBeLessThan(3);
@@ -102,5 +153,26 @@ describe('evaluatePortfolioProposals', () => {
       'PORTFOLIO_HARD_DRAWDOWN_BREAKER',
     ]);
     expect(decision.portfolioDecision.allocations).toEqual([]);
+  });
+
+  it('keeps only the highest-ranked duplicated instrument proposal', () => {
+    const first = proposal('BTC-USDT-SWAP', 0.02);
+    const duplicate = {
+      ...proposal('BTC-USDT-SWAP', 0.01),
+      strategyId: 'secondary-btc-strategy',
+    };
+    const decision = evaluatePortfolioProposals({
+      state: { equity: 10_000, peakEquity: 10_000, positions: [] },
+      proposals: [duplicate, first],
+      correlations: [],
+      returnScenarios: scenarios(['BTC-USDT-SWAP']),
+    });
+
+    expect(
+      decision.proposalDecisions.find(
+        (item) => item.strategyId === 'secondary-btc-strategy',
+      )?.rejectionReasons,
+    ).toContain('DUPLICATE_INSTRUMENT_PROPOSAL');
+    expect(decision.portfolioDecision.allocations).toHaveLength(1);
   });
 });

@@ -70,18 +70,20 @@ describe('ShadowTradingEngine', () => {
     expect(report.filledCount).toBe(1);
     expect(report.completedOutcomeCount).toBe(1);
     expect(report.averageShadowVsPaperPriceBps).not.toBeNull();
+    expect(report.missedContracts).toBe(0);
     expect(report.liveOrderSubmitted).toBe(false);
     expect(report.liveExecutionAllowed).toBe(false);
   });
 
-  it('measures favorable outcomes after rejected fills as missed opportunities', () => {
+  it('measures favorable outcomes on unfilled partial-order quantity', () => {
     const shadow = engine();
     const record = shadow.processSignal({
       signal: signal('missed', 100),
       book: book(1),
       processedAt: BOOK_TIME + 10,
     });
-    expect(record.fill.status).toBe('REJECTED');
+    expect(record.fill.status).toBe('PARTIALLY_FILLED');
+    expect(record.fill.unfilledQuantity).toBe(99);
 
     shadow.observeOutcome({
       signalId: 'missed',
@@ -93,8 +95,11 @@ describe('ShadowTradingEngine', () => {
       dayEnd: BOOK_TIME + 24 * 60 * 60 * 1_000,
     });
 
-    expect(report.rejectedCount).toBe(1);
+    expect(report.partialFillCount).toBe(1);
+    expect(report.rejectedCount).toBe(0);
     expect(report.missedOpportunityCount).toBe(1);
+    expect(report.missedContracts).toBe(99);
+    expect(report.averageUnfilledContracts).toBe(99);
     expect(report.averageFillRatio).toBeCloseTo(0.01);
   });
 

@@ -93,6 +93,75 @@ describe('ContinuousDerivativesCollector', () => {
     expect(store.checkpoint?.lastObservedAt).toBe(3_000);
   });
 
+  it('recovers the trailing interval up to the source watermark', async () => {
+    const store = new MemoryStore();
+    const recoveryRequests: Array<{
+      readonly fromObservedAt: number;
+      readonly toObservedAt: number;
+    }> = [];
+    const source: ContinuousCollectionSource = {
+      sourceId: 'btc-trades',
+      instrumentId: 'BTC-USDT-SWAP',
+      expectedIntervalMs: 1_000,
+      load: () =>
+        Promise.resolve({
+          records: [trade(1_000, '1'), trade(2_000, '2')],
+          nextCursor: 'next',
+          sourceWatermark: 4_000,
+        }),
+      recover: ({ fromObservedAt, toObservedAt }) => {
+        recoveryRequests.push({ fromObservedAt, toObservedAt });
+        return Promise.resolve([trade(3_000, '3'), trade(4_000, '4')]);
+      },
+    };
+
+    const manifest = await new ContinuousDerivativesCollector(store).runCycle({
+      source,
+      cycleStartedAt: 4_000,
+      cycleCompletedAt: 4_100,
+    });
+
+    expect(manifest.status).toBe('PERSISTED');
+    expect(recoveryRequests).toEqual([
+      { fromObservedAt: 3_000, toObservedAt: 4_000 },
+    ]);
+    expect(store.checkpoint?.lastObservedAt).toBe(4_000);
+  });
+
+  it('rejects an unresolved trailing watermark gap', async () => {
+    const store = new MemoryStore();
+    const originalCheckpoint: ContinuousCollectionCheckpoint = {
+      sourceId: 'btc-trades',
+      cursor: 'safe',
+      lastObservedAt: 1_000,
+      lastSequenceId: null,
+      updatedAt: 1_000,
+    };
+    store.checkpoint = originalCheckpoint;
+    const source: ContinuousCollectionSource = {
+      sourceId: 'btc-trades',
+      instrumentId: 'BTC-USDT-SWAP',
+      expectedIntervalMs: 1_000,
+      load: () =>
+        Promise.resolve({
+          records: [trade(2_000, '2')],
+          nextCursor: 'unsafe',
+          sourceWatermark: 4_000,
+        }),
+      recover: () => Promise.resolve([]),
+    };
+
+    const manifest = await new ContinuousDerivativesCollector(store).runCycle({
+      source,
+      cycleStartedAt: 4_000,
+      cycleCompletedAt: 4_100,
+    });
+
+    expect(manifest.status).toBe('REJECTED');
+    expect(manifest.rejectionReasons).toContain('UNRESOLVED_TIMESTAMP_GAP');
+    expect(store.checkpoint).toEqual(originalCheckpoint);
+  });
+
   it('rejects synthetic records and leaves the checkpoint unchanged', async () => {
     const store = new MemoryStore();
     const originalCheckpoint: ContinuousCollectionCheckpoint = {
@@ -125,6 +194,36 @@ describe('ContinuousDerivativesCollector', () => {
     expect(manifest.rejectionReasons).toContain('SYNTHETIC_DATA_REJECTED');
     expect(store.checkpoint).toEqual(originalCheckpoint);
     expect(store.persistedRecords).toEqual([]);
+  });
+
+  it('rejects receive timestamps that precede exchange time', async () => {
+    const store = new MemoryStore();
+    const invalid = {
+      ...trade(5_000, '5'),
+      receivedAt: 3_000,
+    } as ResearchMarketDataRecord;
+    const source: ContinuousCollectionSource = {
+      sourceId: 'btc-trades',
+      instrumentId: 'BTC-USDT-SWAP',
+      expectedIntervalMs: null,
+      load: () =>
+        Promise.resolve({
+          records: [invalid],
+          nextCursor: null,
+          sourceWatermark: 5_000,
+        }),
+    };
+
+    const manifest = await new ContinuousDerivativesCollector(store).runCycle({
+      source,
+      cycleStartedAt: 5_000,
+      cycleCompletedAt: 5_100,
+    });
+
+    expect(manifest.status).toBe('REJECTED');
+    expect(manifest.rejectionReasons).toContain(
+      'RECEIVE_BEFORE_EXCHANGE_TIMESTAMP',
+    );
   });
 
   it('throws on conflicting duplicate identities', async () => {

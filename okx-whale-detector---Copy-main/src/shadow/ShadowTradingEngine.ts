@@ -68,7 +68,9 @@ export interface ShadowDailyReport {
   readonly rejectedCount: number;
   readonly completedOutcomeCount: number;
   readonly missedOpportunityCount: number;
+  readonly missedContracts: number;
   readonly averageFillRatio: number;
+  readonly averageUnfilledContracts: number;
   readonly averageShadowSlippageBps: number | null;
   readonly averageShadowVsPaperPriceBps: number | null;
   readonly averageObservedReturnBps: number | null;
@@ -148,7 +150,8 @@ export class ShadowTradingEngine {
     });
     const paperReference = input.paperReference ?? null;
     const shadowVsPaperPriceBps =
-      fill.averagePrice === null || paperReference?.averagePrice === null ||
+      fill.averagePrice === null ||
+      paperReference?.averagePrice === null ||
       paperReference?.averagePrice === undefined
         ? null
         : ((fill.averagePrice - paperReference.averagePrice) /
@@ -221,35 +224,50 @@ export class ShadowTradingEngine {
     }
     const records = [...this.records.values()].filter(
       (record) =>
-        record.processedAt >= input.dayStart && record.processedAt < input.dayEnd,
+        record.processedAt >= input.dayStart &&
+        record.processedAt < input.dayEnd,
     );
-    const completedOutcomes = records.flatMap((record) => record.outcomes.at(-1) ?? []);
-    const missedOpportunityCount = records.filter((record) => {
-      if (record.fill.status !== 'REJECTED') {
-        return false;
-      }
+    const completedOutcomes = records.flatMap(
+      (record) => record.outcomes.at(-1) ?? [],
+    );
+    const missedOpportunityRecords = records.filter((record) => {
+      if (record.fill.unfilledQuantity <= 0) return false;
       const outcome = record.outcomes.at(-1);
       return (
         outcome !== undefined &&
         outcome.returnBps >= this.policy.missedOpportunityThresholdBps
       );
-    }).length;
+    });
     return {
       dayStart: input.dayStart,
       dayEnd: input.dayEnd,
       signalCount: records.length,
-      filledCount: records.filter((record) => record.fill.status === 'FILLED').length,
+      filledCount: records.filter((record) => record.fill.status === 'FILLED')
+        .length,
       partialFillCount: records.filter(
         (record) => record.fill.status === 'PARTIALLY_FILLED',
       ).length,
-      rejectedCount: records.filter((record) => record.fill.status === 'REJECTED').length,
+      rejectedCount: records.filter(
+        (record) => record.fill.status === 'REJECTED',
+      ).length,
       completedOutcomeCount: completedOutcomes.length,
-      missedOpportunityCount,
+      missedOpportunityCount: missedOpportunityRecords.length,
+      missedContracts: missedOpportunityRecords.reduce(
+        (sum, record) => sum + record.fill.unfilledQuantity,
+        0,
+      ),
       averageFillRatio:
         records.length === 0
           ? 0
           : records.reduce((sum, record) => sum + record.fill.fillRatio, 0) /
             records.length,
+      averageUnfilledContracts:
+        records.length === 0
+          ? 0
+          : records.reduce(
+              (sum, record) => sum + record.fill.unfilledQuantity,
+              0,
+            ) / records.length,
       averageShadowSlippageBps: averageOrNull(
         records.flatMap((record) =>
           record.fill.slippageBps === null ? [] : [record.fill.slippageBps],

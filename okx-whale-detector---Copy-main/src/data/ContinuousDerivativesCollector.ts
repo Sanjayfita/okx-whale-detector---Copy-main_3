@@ -58,6 +58,7 @@ export interface ContinuousCollectionPolicy {
   readonly maximumReceiveLagMs: number;
   readonly gapToleranceMs: number;
   readonly rejectSyntheticData: boolean;
+  readonly maximumRecoveryPasses?: number;
 }
 
 export const DEFAULT_CONTINUOUS_COLLECTION_POLICY: ContinuousCollectionPolicy = {
@@ -65,11 +66,27 @@ export const DEFAULT_CONTINUOUS_COLLECTION_POLICY: ContinuousCollectionPolicy = 
   maximumReceiveLagMs: 60_000,
   gapToleranceMs: 5,
   rejectSyntheticData: true,
+  maximumRecoveryPasses: 3,
 };
 
 const requireTimestamp = (value: number, name: string): void => {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative safe integer`);
+  }
+};
+
+const validatePolicy = (policy: ContinuousCollectionPolicy): void => {
+  const timing = [
+    policy.maximumFutureSkewMs,
+    policy.maximumReceiveLagMs,
+    policy.gapToleranceMs,
+  ];
+  if (timing.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new Error('continuous collection timing policy is invalid');
+  }
+  const maximumRecoveryPasses = policy.maximumRecoveryPasses ?? 1;
+  if (!Number.isSafeInteger(maximumRecoveryPasses) || maximumRecoveryPasses <= 0) {
+    throw new Error('maximumRecoveryPasses must be a positive integer');
   }
 };
 
@@ -104,7 +121,8 @@ const mergeUnique = (
   }
   return [...byIdentity.values()].sort(
     (left, right) =>
-      left.observedAt - right.observedAt || identity(left).localeCompare(identity(right)),
+      left.observedAt - right.observedAt ||
+      identity(left).localeCompare(identity(right)),
   );
 };
 
@@ -114,19 +132,21 @@ const fingerprint = (records: readonly ResearchMarketDataRecord[]): string =>
 const findTimestampGap = (input: {
   readonly records: readonly ResearchMarketDataRecord[];
   readonly previousObservedAt: number | null;
+  readonly sourceWatermark: number;
   readonly expectedIntervalMs: number;
   readonly toleranceMs: number;
 }): Readonly<{ fromObservedAt: number; toObservedAt: number }> | null => {
   const timestamps = [
     ...(input.previousObservedAt === null ? [] : [input.previousObservedAt]),
     ...input.records.map((record) => record.observedAt),
-  ].sort((left, right) => left - right);
+  ]
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .sort((left, right) => left - right);
+
   for (let index = 1; index < timestamps.length; index += 1) {
     const previous = timestamps[index - 1];
     const current = timestamps[index];
-    if (previous === undefined || current === undefined) {
-      continue;
-    }
+    if (previous === undefined || current === undefined) continue;
     if (current - previous > input.expectedIntervalMs + input.toleranceMs) {
       return {
         fromObservedAt: previous + input.expectedIntervalMs,
@@ -134,11 +154,24 @@ const findTimestampGap = (input: {
       };
     }
   }
+
+  const lastTimestamp = timestamps.at(-1);
+  if (
+    lastTimestamp !== undefined &&
+    input.sourceWatermark - lastTimestamp >=
+      input.expectedIntervalMs - input.toleranceMs
+  ) {
+    return {
+      fromObservedAt: lastTimestamp + input.expectedIntervalMs,
+      toObservedAt: input.sourceWatermark,
+    };
+  }
   return null;
 };
 
 const validateRecords = (input: {
   readonly source: ContinuousCollectionSource;
+  readonly sourceWatermark: number;
   readonly records: readonly ResearchMarketDataRecord[];
   readonly now: number;
   readonly checkpoint: ContinuousCollectionCheckpoint | null;
@@ -147,6 +180,19 @@ const validateRecords = (input: {
   const reasons: string[] = [];
   let previousObservedAt = input.checkpoint?.lastObservedAt ?? null;
   let previousSequenceId = input.checkpoint?.lastSequenceId ?? null;
+
+  if (
+    input.checkpoint !== null &&
+    input.checkpoint.sourceId !== input.source.sourceId
+  ) reasons.push('CHECKPOINT_SOURCE_MISMATCH');
+  if (
+    input.checkpoint?.lastObservedAt !== null &&
+    input.checkpoint?.lastObservedAt !== undefined &&
+    input.sourceWatermark < input.checkpoint.lastObservedAt
+  ) reasons.push('SOURCE_WATERMARK_REGRESSION');
+  if (input.sourceWatermark > input.now + input.policy.maximumFutureSkewMs) {
+    reasons.push('FUTURE_SOURCE_WATERMARK');
+  }
 
   for (const record of input.records) {
     if (record.instrumentId !== input.source.instrumentId) {
@@ -167,8 +213,14 @@ const validateRecords = (input: {
     if (record.observedAt > input.now + input.policy.maximumFutureSkewMs) {
       reasons.push('FUTURE_EXCHANGE_TIMESTAMP');
     }
+    if (record.receivedAt + input.policy.maximumFutureSkewMs < record.observedAt) {
+      reasons.push('RECEIVE_BEFORE_EXCHANGE_TIMESTAMP');
+    }
     if (record.receivedAt - record.observedAt > input.policy.maximumReceiveLagMs) {
       reasons.push('RECEIVE_LAG_EXCEEDED');
+    }
+    if (record.observedAt > input.sourceWatermark + input.policy.gapToleranceMs) {
+      reasons.push('RECORD_AFTER_SOURCE_WATERMARK');
     }
     if (previousObservedAt !== null && record.observedAt < previousObservedAt) {
       reasons.push('OBSERVED_TIME_REGRESSION');
@@ -190,7 +242,9 @@ export class ContinuousDerivativesCollector {
     private readonly store: ContinuousCollectionStore,
     private readonly policy: ContinuousCollectionPolicy =
       DEFAULT_CONTINUOUS_COLLECTION_POLICY,
-  ) {}
+  ) {
+    validatePolicy(policy);
+  }
 
   public async runCycle(input: {
     readonly source: ContinuousCollectionSource;
@@ -202,8 +256,18 @@ export class ContinuousDerivativesCollector {
     if (input.cycleCompletedAt < input.cycleStartedAt) {
       throw new Error('cycleCompletedAt must not precede cycleStartedAt');
     }
-    if (input.source.sourceId.trim().length === 0) {
-      throw new Error('sourceId must not be empty');
+    if (
+      input.source.sourceId.trim().length === 0 ||
+      input.source.instrumentId.trim().length === 0
+    ) {
+      throw new Error('sourceId and instrumentId must not be empty');
+    }
+    if (
+      input.source.expectedIntervalMs !== null &&
+      (!Number.isSafeInteger(input.source.expectedIntervalMs) ||
+        input.source.expectedIntervalMs <= 0)
+    ) {
+      throw new Error('expectedIntervalMs must be a positive integer or null');
     }
 
     const checkpoint = await this.store.loadCheckpoint(input.source.sourceId);
@@ -213,37 +277,43 @@ export class ContinuousDerivativesCollector {
     let recoveredRecordCount = 0;
     let records = mergeUnique(loaded.records);
     if (input.source.expectedIntervalMs !== null) {
-      const gap = findTimestampGap({
-        records,
-        previousObservedAt: checkpoint?.lastObservedAt ?? null,
-        expectedIntervalMs: input.source.expectedIntervalMs,
-        toleranceMs: this.policy.gapToleranceMs,
-      });
-      if (gap !== null && input.source.recover !== undefined) {
+      const maximumRecoveryPasses = this.policy.maximumRecoveryPasses ?? 1;
+      for (let pass = 0; pass < maximumRecoveryPasses; pass += 1) {
+        const gap = findTimestampGap({
+          records,
+          previousObservedAt: checkpoint?.lastObservedAt ?? null,
+          sourceWatermark: loaded.sourceWatermark,
+          expectedIntervalMs: input.source.expectedIntervalMs,
+          toleranceMs: this.policy.gapToleranceMs,
+        });
+        if (gap === null || input.source.recover === undefined) break;
         const recovered = await input.source.recover({ ...gap, checkpoint });
-        recoveredRecordCount = recovered.length;
+        if (recovered.length === 0) break;
+        recoveredRecordCount += recovered.length;
         records = mergeUnique([...records, ...recovered]);
       }
     }
 
-    const rejectionReasons = [...validateRecords({
-      source: input.source,
-      records,
-      now: input.cycleCompletedAt,
-      checkpoint,
-      policy: this.policy,
-    })];
+    const rejectionReasons = [
+      ...validateRecords({
+        source: input.source,
+        sourceWatermark: loaded.sourceWatermark,
+        records,
+        now: input.cycleCompletedAt,
+        checkpoint,
+        policy: this.policy,
+      }),
+    ];
 
     if (input.source.expectedIntervalMs !== null) {
       const remainingGap = findTimestampGap({
         records,
         previousObservedAt: checkpoint?.lastObservedAt ?? null,
+        sourceWatermark: loaded.sourceWatermark,
         expectedIntervalMs: input.source.expectedIntervalMs,
         toleranceMs: this.policy.gapToleranceMs,
       });
-      if (remainingGap !== null) {
-        rejectionReasons.push('UNRESOLVED_TIMESTAMP_GAP');
-      }
+      if (remainingGap !== null) rejectionReasons.push('UNRESOLVED_TIMESTAMP_GAP');
     }
 
     const rangeStart = records[0]?.observedAt ?? null;
@@ -273,7 +343,9 @@ export class ContinuousDerivativesCollector {
 
     const lastBook = records
       .filter(
-        (record): record is Extract<ResearchMarketDataRecord, { kind: 'ORDER_BOOK' }> =>
+        (
+          record,
+        ): record is Extract<ResearchMarketDataRecord, { kind: 'ORDER_BOOK' }> =>
           record.kind === 'ORDER_BOOK' && record.sequenceId !== null,
       )
       .at(-1);
@@ -281,8 +353,7 @@ export class ContinuousDerivativesCollector {
       sourceId: input.source.sourceId,
       cursor: loaded.nextCursor,
       lastObservedAt: rangeEnd ?? checkpoint?.lastObservedAt ?? null,
-      lastSequenceId:
-        lastBook?.sequenceId ?? checkpoint?.lastSequenceId ?? null,
+      lastSequenceId: lastBook?.sequenceId ?? checkpoint?.lastSequenceId ?? null,
       updatedAt: input.cycleCompletedAt,
     };
     const manifest: ContinuousCollectionManifest = {
@@ -290,11 +361,7 @@ export class ContinuousDerivativesCollector {
       status: 'PERSISTED',
       rejectionReasons: [],
     };
-    await this.store.persist({
-      records,
-      checkpoint: nextCheckpoint,
-      manifest,
-    });
+    await this.store.persist({ records, checkpoint: nextCheckpoint, manifest });
     return manifest;
   }
 }
