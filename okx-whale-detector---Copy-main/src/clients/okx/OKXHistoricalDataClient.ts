@@ -59,13 +59,13 @@ export const OKX_HISTORICAL_COVERAGE: readonly HistoricalCoverageCapability[] = 
     dataType: 'ORDER_BOOK',
     mode: 'LIVE_CAPTURE_REQUIRED',
     reason:
-      'Depth history availability and retention vary; the platform records sequence-aware depth locally for reproducible replay.',
+      'Reproducible tick replay requires locally persisted sequence-aware depth or a verified exchange archive.',
   },
   {
     dataType: 'OPEN_INTEREST',
     mode: 'REST_SNAPSHOT_ONLY',
     reason:
-      'The public open-interest endpoint provides current state; event-time history must be captured or imported from a verified archive.',
+      'The current public endpoint is snapshotted; event-time history must be captured or imported from a verified archive.',
   },
   {
     dataType: 'FUNDING',
@@ -76,19 +76,19 @@ export const OKX_HISTORICAL_COVERAGE: readonly HistoricalCoverageCapability[] = 
     dataType: 'LIQUIDATIONS',
     mode: 'LIVE_CAPTURE_REQUIRED',
     reason:
-      'Public liquidation events are collected from the WebSocket channel and persisted at event time.',
+      'Public liquidation events are captured from the WebSocket channel and persisted at event time.',
   },
   {
     dataType: 'MARK_INDEX',
     mode: 'LIVE_CAPTURE_REQUIRED',
     reason:
-      'Historical mark/index candles are not tick-equivalent; synchronized point-in-time prices are captured live.',
+      'Independent mark and index snapshots are synchronized locally; candle substitutes are not tick-equivalent.',
   },
   {
     dataType: 'CONTRACT_METADATA',
     mode: 'REST_SNAPSHOT_ONLY',
     reason:
-      'Instrument metadata is snapshotted and versioned whenever collection starts or metadata changes.',
+      'Instrument metadata is versioned whenever collection starts or metadata changes.',
   },
 ];
 
@@ -121,8 +121,14 @@ const asString = (value: unknown, name: string): string => {
   return value;
 };
 
+const optionalString = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim().length > 0 ? value : null;
+
 const parseNumber = (value: unknown, name: string): number => {
-  const parsed = Number(asString(value, name));
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new Error(`${name} must be numeric text or a number`);
+  }
+  const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
     throw new Error(`${name} must be finite`);
   }
@@ -180,9 +186,7 @@ const parseDepthLevels = (
       contracts: parseNumber(level[1], `${name}[${index}].contracts`),
       orderCount:
         level[3] === undefined
-          ? level[2] === undefined
-            ? null
-            : parseOptionalNumber(level[2], `${name}[${index}].orderCount`)
+          ? null
           : parseOptionalNumber(level[3], `${name}[${index}].orderCount`),
     };
   });
@@ -190,13 +194,33 @@ const parseDepthLevels = (
 const firstAndLastCursor = (
   values: readonly { readonly observedAt: number }[],
 ): { readonly nextBefore: string | null; readonly nextAfter: string | null } => ({
-  nextBefore:
-    values.length === 0 ? null : String(values[0]?.observedAt ?? ''),
+  nextBefore: values.length === 0 ? null : String(values[0]?.observedAt ?? ''),
   nextAfter:
     values.length === 0
       ? null
       : String(values[values.length - 1]?.observedAt ?? ''),
 });
+
+const parseTradeSide = (value: unknown, name: string): 'BUY' | 'SELL' => {
+  const side = asString(value, name);
+  if (side === 'buy') {
+    return 'BUY';
+  }
+  if (side === 'sell') {
+    return 'SELL';
+  }
+  throw new Error(`${name} must be buy or sell`);
+};
+
+const underlyingIndexId = (instrumentId: string): string => {
+  const parts = instrumentId.split('-');
+  const base = parts[0];
+  const quote = parts[1];
+  if (base === undefined || quote === undefined || base.length === 0 || quote.length === 0) {
+    throw new Error(`Cannot derive index id from ${instrumentId}`);
+  }
+  return `${base}-${quote}`;
+};
 
 export class OKXHistoricalDataClient {
   private readonly baseUrl: string;
@@ -230,10 +254,7 @@ export class OKXHistoricalDataClient {
         kind: 'TRADE',
         instrumentId: asString(object.instId, `data[${index}].instId`),
         tradeId: asString(object.tradeId, `data[${index}].tradeId`),
-        side:
-          asString(object.side, `data[${index}].side`) === 'buy'
-            ? 'BUY'
-            : 'SELL',
+        side: parseTradeSide(object.side, `data[${index}].side`),
         price: parseNumber(object.px, `data[${index}].px`),
         contracts: parseNumber(object.sz, `data[${index}].sz`),
         observedAt: parseTimestamp(object.ts, `data[${index}].ts`),
@@ -369,44 +390,64 @@ export class OKXHistoricalDataClient {
       throw new Error('OKX order book response contained no data');
     }
     const object = asObject(first, 'data[0]');
+    const sequenceId = parseOptionalNumber(object.seqId, 'data[0].seqId');
+    if (sequenceId !== null && !Number.isSafeInteger(sequenceId)) {
+      throw new Error('data[0].seqId must be a safe integer');
+    }
     return {
       kind: 'ORDER_BOOK',
       instrumentId: input.instrumentId,
       observedAt: parseTimestamp(object.ts, 'data[0].ts'),
       receivedAt,
       source: 'OKX_REST',
-      sequenceId:
-        object.seqId === undefined
-          ? null
-          : Number(asString(String(object.seqId), 'data[0].seqId')),
+      sequenceId,
       bids: parseDepthLevels(object.bids, 'data[0].bids'),
       asks: parseDepthLevels(object.asks, 'data[0].asks'),
     };
   }
 
-  public async fetchMarkPrices(input: {
+  public async fetchMarkIndexSnapshot(input: {
     readonly instrumentType: DerivativeInstType;
     readonly instrumentId: string;
-  }): Promise<readonly MarkIndexRecord[]> {
-    const url = buildUrl(this.baseUrl, '/api/v5/public/mark-price', {
+    readonly maximumTimestampSkewMs?: number;
+  }): Promise<MarkIndexRecord> {
+    const indexId = underlyingIndexId(input.instrumentId);
+    const markUrl = buildUrl(this.baseUrl, '/api/v5/public/mark-price', {
       instType: input.instrumentType,
       instId: input.instrumentId,
     });
-    const receivedAt = this.now();
-    const envelope = parseEnvelope(await this.loader(url));
-    return envelope.data.map((raw, index): MarkIndexRecord => {
-      const object = asObject(raw, `data[${index}]`);
-      const markPrice = parseNumber(object.markPx, `data[${index}].markPx`);
-      return {
-        kind: 'MARK_INDEX',
-        instrumentId: asString(object.instId, `data[${index}].instId`),
-        observedAt: parseTimestamp(object.ts, `data[${index}].ts`),
-        receivedAt,
-        source: 'OKX_REST',
-        markPrice,
-        indexPrice: markPrice,
-      };
+    const indexUrl = buildUrl(this.baseUrl, '/api/v5/market/index-tickers', {
+      instId: indexId,
     });
+    const [markEnvelope, indexEnvelope] = await Promise.all([
+      this.loader(markUrl).then(parseEnvelope),
+      this.loader(indexUrl).then(parseEnvelope),
+    ]);
+    const markRaw = markEnvelope.data[0];
+    const indexRaw = indexEnvelope.data[0];
+    if (markRaw === undefined || indexRaw === undefined) {
+      throw new Error('OKX mark/index response contained no data');
+    }
+    const mark = asObject(markRaw, 'mark.data[0]');
+    const index = asObject(indexRaw, 'index.data[0]');
+    const markObservedAt = parseTimestamp(mark.ts, 'mark.data[0].ts');
+    const indexObservedAt = parseTimestamp(index.ts, 'index.data[0].ts');
+    const maximumSkew = input.maximumTimestampSkewMs ?? 2_000;
+    if (!Number.isSafeInteger(maximumSkew) || maximumSkew < 0) {
+      throw new Error('maximumTimestampSkewMs must be a non-negative safe integer');
+    }
+    if (Math.abs(markObservedAt - indexObservedAt) > maximumSkew) {
+      throw new Error('OKX mark and index timestamps exceed synchronization policy');
+    }
+    return {
+      kind: 'MARK_INDEX',
+      instrumentId: input.instrumentId,
+      observedAt: Math.max(markObservedAt, indexObservedAt),
+      receivedAt: this.now(),
+      source: 'OKX_REST',
+      markPrice: parseNumber(mark.markPx, 'mark.data[0].markPx'),
+      indexPrice: parseNumber(index.idxPx, 'index.data[0].idxPx'),
+    };
   }
 
   public async fetchContractMetadata(input: {
@@ -422,14 +463,16 @@ export class OKXHistoricalDataClient {
     return envelope.data.map((raw, index): ContractMetadataRecord => {
       const object = asObject(raw, `data[${index}]`);
       const instrumentId = asString(object.instId, `data[${index}].instId`);
-      const listingTime = parseOptionalNumber(
-        object.listTime,
-        `data[${index}].listTime`,
-      );
-      const expiryTime = parseOptionalNumber(
-        object.expTime,
-        `data[${index}].expTime`,
-      );
+      const parts = instrumentId.split('-');
+      const baseCurrency =
+        optionalString(object.baseCcy) ??
+        optionalString(object.ctValCcy) ??
+        parts[0] ?? '';
+      const quoteCurrency =
+        optionalString(object.quoteCcy) ?? parts[1] ?? '';
+      if (baseCurrency.length === 0 || quoteCurrency.length === 0) {
+        throw new Error(`Cannot determine currencies for ${instrumentId}`);
+      }
       return {
         kind: 'CONTRACT_METADATA',
         instrumentId,
@@ -437,29 +480,30 @@ export class OKXHistoricalDataClient {
         receivedAt,
         source: 'OKX_REST',
         instrumentType: input.instrumentType,
-        baseCurrency: asString(object.ctValCcy, `data[${index}].ctValCcy`),
-        quoteCurrency: asString(object.quoteCcy, `data[${index}].quoteCcy`),
+        baseCurrency,
+        quoteCurrency,
         settlementCurrency: asString(
           object.settleCcy,
           `data[${index}].settleCcy`,
         ),
         contractValue: parseNumber(object.ctVal, `data[${index}].ctVal`),
-        contractValueCurrency: asString(
-          object.ctValCcy,
-          `data[${index}].ctValCcy`,
-        ),
+        contractValueCurrency:
+          optionalString(object.ctValCcy) ?? baseCurrency,
         tickSize: parseNumber(object.tickSz, `data[${index}].tickSz`),
         lotSize: parseNumber(object.lotSz, `data[${index}].lotSz`),
-        minimumContracts: parseNumber(
-          object.minSz,
-          `data[${index}].minSz`,
-        ),
+        minimumContracts: parseNumber(object.minSz, `data[${index}].minSz`),
         maximumLeverage: parseOptionalNumber(
           object.lever,
           `data[${index}].lever`,
         ),
-        listingTime,
-        expiryTime,
+        listingTime: parseOptionalNumber(
+          object.listTime,
+          `data[${index}].listTime`,
+        ),
+        expiryTime: parseOptionalNumber(
+          object.expTime,
+          `data[${index}].expTime`,
+        ),
       };
     });
   }
