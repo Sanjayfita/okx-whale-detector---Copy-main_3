@@ -104,7 +104,7 @@ describe('selectFeatures', () => {
       candidates: [
         candidate({
           featureName: 'basis_expansion',
-          importance: [1, -0.1, 0.01],
+          importance: [1, -0.9, 0.01],
         }),
       ],
       correlations: [],
