@@ -8,14 +8,14 @@ The detector emits **heuristic research signals**. They are not a guarantee of f
 
 Current status:
 
-- New market scope: OKX `SWAP` and `FUTURES` only.
-- Phase 5 engineering sequence: **implemented through shadow trading**.
+- Market scope: OKX `SWAP` and `FUTURES` only.
+- Research-platform engineering: implemented through shadow trading and reviewed as the maintained foundation.
 - Strategy profitability: **not validated**.
-- Release decision: **BLOCKED** because corrected real-market discovery, frozen holdout, prolonged paper, and shadow evidence are absent.
+- Strategy release: **BLOCKED** because corrected real-market discovery, frozen holdout, prolonged paper, shadow, and paired-baseline evidence are absent.
 - Paper and shadow research: available only after their prerequisite data and validation gates.
 - Testnet/live order execution: **disabled**.
 
-Passing tests, migrations, and builds proves engineering consistency. It does not prove positive expectancy.
+Merging the research platform into `main` means the software passed its engineering gate. It does not promote a strategy or prove positive expectancy.
 
 ## Installation and supported commands
 
@@ -83,15 +83,15 @@ Do not mix old spot observations with a new derivatives evaluation. Existing spo
 - `src/features` and `src/orderflow` — timestamp-bounded features and support-aware advanced order flow.
 - `src/regime` and `src/timeframe` — explainable market classification and top-down timeframe context.
 - `src/strategy` and `src/research` — strategy laboratory, AI research governance, feature selection, purged optimization, robustness, Monte Carlo, and comparison.
-- `src/portfolio` and `src/risk` — Kelly/risk-parity allocation, portfolio controls, and point-in-time event filtering.
+- `src/portfolio` and `src/risk` — Kelly/risk-parity allocation, correlation-complete portfolio controls, and point-in-time event filtering.
 - `src/explainability` — structured machine-readable and human-readable trade explanations.
-- `src/backtest`, `src/paper`, and `src/shadow` — depth-aware backtests, paper execution, and live-data shadow evaluation.
-- `src/release` — evidence-complete release-candidate gates that never enable live execution.
+- `src/backtest`, `src/paper`, and `src/shadow` — depth-aware execution, paper execution, and live-data shadow evaluation.
+- `src/release` — separate research-platform merge and empirical strategy-release gates; neither enables live execution.
 - `src/analytics` — shared CLI and optional web analytics.
 - `src/tools` — operational and research command-line tools.
 - `test` — unit, integration, chronology, research, database, and regression tests.
 
-## Phase 5 sequential workflow
+## Research workflow
 
 ```text
 Continuous collection
@@ -109,12 +109,12 @@ Continuous collection
   -> execution-aware Monte Carlo
   -> paper trading
   -> shadow trading
-  -> release-candidate gate
+  -> empirical strategy-release gate
 ```
 
-Live order submission is not part of this workflow and remains disabled.
+`ResearchPlatformMergeGate` determines whether engineering changes may become the maintained `main`-branch foundation. `ReleaseCandidateGate` independently determines whether a frozen strategy has enough real-market evidence for later release review. Live order submission is not part of either gate and remains disabled.
 
-## Order-book integrity
+## Order-book and collection integrity
 
 A valid local order book begins from a **full snapshot** and then applies only updates that pass sequence-continuity checks.
 
@@ -122,28 +122,37 @@ When a sequence gap, invalid predecessor, crossed book, malformed update, or rec
 
 Historical datasets apply the same principle: sequence-aware depth must come from persisted event-time capture or a verified archive. A current REST snapshot cannot reconstruct missing historical depth.
 
+Regular continuous sources must also reach their declared complete-source watermark. Interior or trailing gaps block checkpoint advancement unless bounded recovery fills them. Exchange timestamps, local receive timestamps, duplicate identities, source watermarks, and sequence values are validated before persistence.
+
+## Execution and portfolio integrity
+
+Any non-zero simulated market fill remains a real partial position. Entry fees, unfilled quantity, residual exit exposure, and missed opportunities are retained in backtest, paper, and shadow evidence.
+
+Portfolio exposure is netted by instrument before gross exposure, net exposure, leverage, group limits, and historical VaR are evaluated. Missing scenario returns and missing required pair correlations fail closed instead of being interpreted as zero risk. Risk-reducing hedges may reduce an already saturated portfolio, but no strategy may bypass the portfolio gateway.
+
 ## Research platform documentation
 
+- [Final foundation technical review](docs/final-foundation-technical-review.md)
 - [Phase 5 complete quantitative research platform](docs/phase5-complete-quantitative-research-platform.md)
 - [Phase 4 trading edge and release assessment](docs/phase4-trading-edge-release-assessment.md)
 - [Phase 3 quantitative research platform](docs/phase3-quantitative-research-platform.md)
 - [Derivatives strategy refactor and validation audit](docs/derivatives-strategy-refactor.md)
 
-## Evidence required before promotion
+## Evidence required before strategy promotion
 
 A strategy must pass all of the following on a corrected immutable derivatives dataset:
 
-1. Dataset integrity, chronology, sequence, duplicate, corruption, and gap checks.
+1. Dataset integrity, chronology, sequence, duplicate, corruption, watermark, and gap checks.
 2. Independent-episode analysis.
 3. Explainable regime and multi-timeframe evaluation across multiple instruments.
 4. Fold-level feature importance and paired ablation with redundancy removal.
 5. Purged walk-forward optimization using discovery data only.
 6. Stable parameter-neighborhood checks.
-7. Observation-specific fee, spread, slippage, latency, funding, depth, missed-fill, and partial-fill stress across required market regimes.
-8. Execution-aware Monte Carlo with acceptable drawdown and ruin distributions.
+7. Observation-specific fee, spread, slippage, latency, funding, depth, missed-fill, partial-fill, and residual-exposure stress across required market regimes.
+8. Correlation-complete portfolio scenarios and execution-aware Monte Carlo with acceptable drawdown and ruin distributions.
 9. A frozen one-time evaluation on an untouched final holdout.
 10. Prolonged realistic live-market paper execution and reconciliation.
-11. Prolonged live-data shadow trading with missed-opportunity and paper-comparison reports.
+11. Prolonged live-data shadow trading with unfilled-quantity, missed-opportunity, and paper-comparison reports.
 12. Statistically significant paired improvement over the original whale baseline.
 13. Green database migrations, tests, lint, type checking, production build, and GitHub Actions.
 
