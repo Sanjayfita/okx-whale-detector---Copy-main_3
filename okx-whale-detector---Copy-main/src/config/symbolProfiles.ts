@@ -1,6 +1,6 @@
 import { appConfig, type AppConfig } from './appConfig';
 import { validateAppConfig } from './validateAppConfig';
-import type { SupportedInstType } from '../types/instrument';
+import type { DerivativeInstType } from '../types/instrument';
 
 type SymbolConfigSection = Exclude<
   keyof AppConfig,
@@ -13,21 +13,21 @@ export type AppConfigOverride = {
 
 export interface SymbolProfile {
   symbol: string;
-  instrumentType: SupportedInstType;
+  instrumentType: DerivativeInstType;
   config?: AppConfigOverride;
 }
 
 /*
- * Symbols inherit appConfig by default.
- * Add only values that genuinely need to differ for a market.
- * Instrument contract values are loaded from OKX during startup.
+ * Required markets are perpetual futures so their identifiers do not expire.
+ * Expiry futures are added through market discovery and still pass through the
+ * same derivatives-only metadata validation.
  */
 export const SYMBOL_PROFILES: readonly SymbolProfile[] = [
-  { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
-  { symbol: 'ETH-USDT', instrumentType: 'SPOT' },
-  { symbol: 'SOL-USDT', instrumentType: 'SPOT' },
-  { symbol: 'XRP-USDT', instrumentType: 'SPOT' },
-  { symbol: 'DOGE-USDT', instrumentType: 'SPOT' },
+  { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'ETH-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'SOL-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'XRP-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'DOGE-USDT-SWAP', instrumentType: 'SWAP' },
   { symbol: 'XAU-USDT-SWAP', instrumentType: 'SWAP' },
   { symbol: 'XAG-USDT-SWAP', instrumentType: 'SWAP' },
 ];
