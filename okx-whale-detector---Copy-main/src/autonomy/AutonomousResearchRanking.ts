@@ -102,6 +102,16 @@ const requireFiniteNullable = (value: number | null, name: string): void => {
   }
 };
 
+const requireProbabilityNullable = (
+  value: number | null,
+  name: string,
+): void => {
+  requireFiniteNullable(value, name);
+  if (value !== null && (value < 0 || value > 1)) {
+    throw new Error(`${name} must be between zero and one`);
+  }
+};
+
 export const rankAutonomousResearchCandidates = (input: {
   readonly candidates: readonly AutonomousCandidateEvidence[];
   readonly policy?: Partial<AutonomousRankingPolicy>;
@@ -123,7 +133,10 @@ export const rankAutonomousResearchCandidates = (input: {
   }
 
   const provisional = input.candidates.map((candidate) => {
-    if (candidate.candidateId.trim().length === 0 || candidate.candidateFingerprint.trim().length === 0) {
+    if (
+      candidate.candidateId.trim().length === 0 ||
+      candidate.candidateFingerprint.trim().length === 0
+    ) {
       throw new Error('candidate identity must not be empty');
     }
     for (const [name, value] of [
@@ -138,13 +151,25 @@ export const rankAutonomousResearchCandidates = (input: {
         throw new Error(`${name} must be a non-negative safe integer`);
       }
     }
+    if (candidate.completedScenarioCount > candidate.scenarioCount) {
+      throw new Error('completedScenarioCount cannot exceed scenarioCount');
+    }
+    if (candidate.hypothesisFamilySize <= 0) {
+      throw new Error('hypothesisFamilySize must be positive');
+    }
+    if (candidate.complexityUnits <= 0) {
+      throw new Error('complexityUnits must be positive');
+    }
     requireFiniteNullable(
       candidate.expectancyConfidenceLower,
       'expectancyConfidenceLower',
     );
-    requireFiniteNullable(candidate.adjustedPValue, 'adjustedPValue');
+    requireProbabilityNullable(candidate.adjustedPValue, 'adjustedPValue');
     requireFiniteNullable(candidate.profitFactor, 'profitFactor');
-    requireFiniteNullable(
+    if (candidate.profitFactor !== null && candidate.profitFactor < 0) {
+      throw new Error('profitFactor must be non-negative');
+    }
+    requireProbabilityNullable(
       candidate.maximumDrawdownFraction,
       'maximumDrawdownFraction',
     );
@@ -152,7 +177,7 @@ export const rankAutonomousResearchCandidates = (input: {
       candidate.expectedShortfallReturnFraction,
       'expectedShortfallReturnFraction',
     );
-    requireFiniteNullable(candidate.probabilityOfRuin, 'probabilityOfRuin');
+    requireProbabilityNullable(candidate.probabilityOfRuin, 'probabilityOfRuin');
 
     const blockingReasons: string[] = [];
     if (!candidate.experimentCompleted) blockingReasons.push('EXPERIMENT_INCOMPLETE');
@@ -243,8 +268,12 @@ export const rankAutonomousResearchCandidates = (input: {
       liveExecutionAllowed: false,
     }))
     .sort((left, right) => {
-      if (left.researchPriorityRank === null && right.researchPriorityRank !== null) return 1;
-      if (left.researchPriorityRank !== null && right.researchPriorityRank === null) return -1;
+      if (left.researchPriorityRank === null && right.researchPriorityRank !== null) {
+        return 1;
+      }
+      if (left.researchPriorityRank !== null && right.researchPriorityRank === null) {
+        return -1;
+      }
       return (
         (left.researchPriorityRank ?? 0) - (right.researchPriorityRank ?? 0) ||
         left.candidateFingerprint.localeCompare(right.candidateFingerprint)
