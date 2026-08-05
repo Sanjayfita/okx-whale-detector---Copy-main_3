@@ -1,8 +1,8 @@
 import type { SymbolProfile } from '../../config/symbolProfiles';
 import type {
+  DerivativeInstType,
   MarketInstrumentConfig,
   OKXPublicInstrument,
-  SupportedInstType,
 } from '../../types/instrument';
 
 export type JsonLoader = (url: string) => Promise<unknown>;
@@ -32,25 +32,33 @@ const defaultJsonLoader: JsonLoader = async (url) => {
 
 const parseInstrumentId = (
   instId: string,
-  instType: SupportedInstType,
+  instType: DerivativeInstType,
 ): { baseCurrency: string; quoteCurrency: string } => {
   const parts = instId.split('-');
 
-  if (instType === 'SPOT' && parts.length === 2) {
+  if (
+    instType === 'SWAP' &&
+    parts.length >= 3 &&
+    parts[parts.length - 1] === 'SWAP'
+  ) {
     return {
       baseCurrency: parts[0] ?? '',
       quoteCurrency: parts[1] ?? '',
     };
   }
 
-  if (instType === 'SWAP' && parts.length >= 3) {
+  if (
+    instType === 'FUTURES' &&
+    parts.length >= 3 &&
+    parts[parts.length - 1] !== 'SWAP'
+  ) {
     return {
       baseCurrency: parts[0] ?? '',
-      quoteCurrency: parts[parts.length - 2] ?? '',
+      quoteCurrency: parts[1] ?? '',
     };
   }
 
-  throw new Error(`Unsupported OKX instrument ID format: ${instId}`);
+  throw new Error(`Unsupported OKX derivative instrument ID format: ${instId}`);
 };
 
 const parsePublicInstrument = (value: unknown): OKXPublicInstrument => {
@@ -60,7 +68,7 @@ const parsePublicInstrument = (value: unknown): OKXPublicInstrument => {
 
   const instType = readString(value, 'instType');
 
-  if (instType !== 'SPOT' && instType !== 'SWAP') {
+  if (instType !== 'SWAP' && instType !== 'FUTURES') {
     throw new Error(
       `Unsupported OKX instrument type: ${instType || 'missing'}`,
     );
@@ -105,10 +113,6 @@ const resolveBaseUnitsPerSize = (
   instrument: OKXPublicInstrument,
   baseCurrency: string,
 ): number => {
-  if (instrument.instType === 'SPOT') {
-    return 1;
-  }
-
   if (instrument.ctType !== 'linear') {
     throw new Error(
       `Unsupported contract type for ${instrument.instId}: ` +
@@ -167,11 +171,7 @@ const toMarketInstrument = (
     );
   }
 
-  if (
-    instrument.instType === 'SWAP' &&
-    instrument.settleCcy &&
-    instrument.settleCcy !== 'USDT'
-  ) {
+  if (instrument.settleCcy && instrument.settleCcy !== 'USDT') {
     throw new Error(
       `Unsupported settlement currency for ${instrument.instId}: ${instrument.settleCcy}`,
     );
@@ -192,7 +192,7 @@ export class OKXInstrumentClient {
   ) {}
 
   private async fetchByType(
-    instType: SupportedInstType,
+    instType: DerivativeInstType,
   ): Promise<OKXPublicInstrument[]> {
     const url = new URL('/api/v5/public/instruments', this.baseUrl);
 
