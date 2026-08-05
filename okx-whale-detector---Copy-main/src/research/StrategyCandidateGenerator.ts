@@ -141,7 +141,10 @@ const satisfiesConstraints = (input: {
   });
 
 const enumerate = (
-  entries: readonly [string, readonly CandidateParameterValue[]][],
+  entries: readonly (readonly [
+    string,
+    readonly CandidateParameterValue[],
+  ])[],
 ): readonly Readonly<Record<string, CandidateParameterValue>>[] => {
   let candidates: Readonly<Record<string, CandidateParameterValue>>[] = [{}];
   for (const [parameterName, values] of entries) {
