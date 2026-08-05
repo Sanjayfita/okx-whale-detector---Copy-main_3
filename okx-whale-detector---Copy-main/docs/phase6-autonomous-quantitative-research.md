@@ -9,6 +9,8 @@ The laboratory can generate and schedule falsifiable hypotheses, create adaptive
 - access the frozen holdout during discovery;
 - silently truncate a hypothesis family;
 - omit failed or missing distributed work;
+- accept worker metrics whose content fingerprint is invalid;
+- let one independent episode span folds or instruments;
 - treat discovery ranking as strategy validation;
 - claim profitability from simulated examples;
 - promote a strategy;
@@ -30,6 +32,7 @@ Immutable point-in-time discovery dataset
   -> dependency-aware experiment scheduler
   -> deterministic distributed backtest work units
   -> workers execute existing depth/cost-aware backtest engine
+  -> result-content and exact-coverage verification
   -> complete-result aggregation
   -> existing statistical, walk-forward, robustness and Monte Carlo gates
   -> uncertainty-aware research-priority ranking
@@ -54,6 +57,8 @@ Properties:
 - unsupported and cyclic values are rejected.
 
 Cycle, hypothesis, feature, candidate, backtest-plan, work-unit, result, scheduler, and report identities can therefore be compared across machines without relying on insertion order.
+
+A cycle fingerprint binds not only upstream family IDs, but also hypothesis/feature readiness, blocking reasons, candidate status, backtest-plan status, exact work units, scheduling policy, task specifications, creation time, and final cycle status. A change in scientific readiness or execution policy therefore produces a different cycle identity.
 
 ## Automated hypothesis generation
 
@@ -139,7 +144,7 @@ The scheduler provides:
 - idempotent completion by result fingerprint;
 - cycle and dependency validation.
 
-A completed task cannot be overwritten with a different result fingerprint. A failed dependency blocks downstream tasks.
+A completed task cannot be overwritten with a different result fingerprint. A failed dependency blocks downstream tasks. Scheduler policy—including lease duration, attempts, and resource requirements—is part of the cycle fingerprint.
 
 ## Distributed backtesting
 
@@ -151,7 +156,7 @@ A completed task cannot be overwritten with a different result fingerprint. A fa
 - instruments;
 - deterministic episode shards.
 
-Episode IDs, rather than individual observations, determine shard assignment. This prevents one independent episode from being split among workers in a way that would complicate independence accounting.
+Episode IDs, rather than individual observations, determine shard assignment. A single episode is rejected if it appears in more than one fold or instrument. This preserves the independence contract used by walk-forward and statistical validation.
 
 Every work unit binds:
 
@@ -164,11 +169,26 @@ Every work unit binds:
 - shard index and count;
 - exact observation and episode IDs.
 
+Worker result fingerprints bind the complete result payload:
+
+- work-unit identity;
+- worker identity;
+- start and completion times;
+- observation and independent-episode counts;
+- trade count;
+- net PnL, gross profit, and gross loss;
+- maximum drawdown;
+- completion/failure status and reason;
+- live-execution-disabled state.
+
+The aggregator verifies the result fingerprint and requires completed workers to report exactly the observation and episode coverage declared by the work unit. Changing a metric while retaining an old fingerprint is rejected before persistence or aggregation.
+
 Aggregation rejects or marks incomplete:
 
 - duplicate results;
 - unexpected work units;
-- result/work-unit fingerprint mismatch;
+- work-unit or result-content fingerprint mismatch;
+- observation/episode coverage mismatch;
 - missing work units;
 - failed workers;
 - results from a rejected plan.
@@ -180,12 +200,14 @@ Aggregated expectancy and profit factor are descriptive discovery metrics only. 
 `AutonomousResearchLaboratory` binds one complete cycle to:
 
 - dataset, commit, and configuration;
-- hypothesis-family fingerprint;
-- adaptive feature-family fingerprint;
-- candidate-family fingerprints;
-- distributed backtest-plan fingerprint;
+- hypothesis-family fingerprint and per-hypothesis readiness;
+- adaptive feature-family fingerprint and per-feature readiness;
+- candidate-family fingerprints, status, and hypothesis counts;
+- distributed backtest-plan fingerprint, status, and exact work units;
 - full effective hypothesis count;
-- exact scheduler task graph.
+- scheduling policy;
+- exact scheduler task graph;
+- blocking reasons and final cycle state.
 
 The cycle is blocked if any upstream family is rejected, fingerprints disagree, a backtest references an unregistered candidate, task IDs collide, or the task budget is exceeded.
 
@@ -202,6 +224,8 @@ Structural requirements include:
 - minimum independent episodes;
 - minimum trades;
 - complete confidence, adjusted p-value, drawdown, expected-shortfall, and ruin evidence.
+
+Ranking inputs are validated before scoring. Adjusted p-values, drawdowns, and ruin probabilities must be in `[0, 1]`; profit factor must be non-negative; completed scenarios cannot exceed required scenarios; and hypothesis-family size and complexity must be positive.
 
 The conservative score favors a positive lower confidence bound and profit factor while penalizing:
 
@@ -257,9 +281,19 @@ Migration `006_autonomous_quantitative_research.sql` adds:
 - `research.autonomous_candidate_rankings`;
 - `research.continuous_research_reports`.
 
-Database checks enforce discovery-only evidence and prevent promotion/live flags from becoming true.
+Database checks enforce:
 
-`PostgresAutonomousResearchStore` persists the cycle, hypotheses, features, initial tasks, and backtest work units in one transaction. Task state, worker results, rankings, and continuous reports have explicit parameterized writes.
+- discovery-only evidence;
+- false holdout, promotion, profitability, and live-execution flags;
+- ready counts not exceeding generated counts;
+- replication-priority counts not exceeding ranked counts;
+- positive hypothesis-family and complexity counts;
+- valid task attempts and lease state;
+- non-empty work-unit observation/episode arrays;
+- valid JSON object/array shapes;
+- valid timestamps, drawdowns, and count relationships.
+
+`PostgresAutonomousResearchStore` persists the cycle, hypotheses, features, initial tasks, and backtest work units in one transaction. Task state, rankings, and continuous reports have explicit parameterized writes. A worker result is fingerprint-verified before its SQL insert is issued.
 
 ## Deterministic simulation
 
@@ -285,8 +319,10 @@ The simulation is an engineering test, not trading evidence.
 | Feature discovery | Feature formulas implemented individually | Generated candidate count, lineage, lookback, complexity, prior-test status, and capability blockers |
 | Experiment execution | Primarily single-process orchestration | Task count, dependency state, lease owner/expiry, attempts, resource units, result fingerprint |
 | Backtest scaling | No immutable worker protocol | Exact work-unit count, shard identity, expected/received/missing/duplicate/failed results |
-| Ranking | Metrics could be viewed without search burden | Lower-confidence, tail-risk, complexity, and hypothesis-family penalties |
-| Reporting | Multiple reports required manual reconstruction | One cycle fingerprint with blockers, progress, coverage, and next actions |
+| Worker integrity | Metrics could be reported independently of result identity | Canonical content fingerprint plus exact observation/episode coverage verification |
+| Independence | Episode identity could be inconsistently assigned | Planning rejection when one episode spans a fold or instrument boundary |
+| Ranking | Metrics could be viewed without search burden | Lower-confidence, tail-risk, complexity, hypothesis-family penalties, and bounded evidence inputs |
+| Reporting | Multiple reports required manual reconstruction | One cycle fingerprint with blockers, progress, coverage, scheduling policy, and next actions |
 | Restart durability | Scheduler state could be transient | Normalized PostgreSQL cycle/task/work/result/ranking/report evidence |
 
 ## Intentionally unchanged
@@ -311,7 +347,7 @@ Phase 6 coordinates these components. It does not create parallel weaker version
 
 - The scheduler is deterministic and persistable, but no production worker transport or queue broker is selected.
 - PostgreSQL task claiming still needs an operational repository using `FOR UPDATE SKIP LOCKED` before multiple real workers are started.
-- The distributed protocol defines immutable units and aggregation, but workers still need deployment packaging, resource telemetry, and artifact storage.
+- The distributed protocol defines immutable units and aggregation, but workers still need deployment packaging, resource telemetry, artifact signing, and large-artifact storage.
 - Adaptive feature discovery generates specifications, not executable feature code. Each operation needs a reviewed point-in-time implementation or a safe expression runtime.
 - Automated hypothesis templates still require human-approved economic rationale and falsification language.
 - No corrected 180-day, three-instrument, all-regime dataset exists yet.
@@ -324,7 +360,7 @@ Phase 6 coordinates these components. It does not create parallel weaker version
 1. Keep sequence-complete OKX derivatives collection running continuously.
 2. Add collector completeness and freshness inputs directly to the autonomous evidence inventory.
 3. Implement PostgreSQL atomic task claiming and heartbeat renewal for multi-worker operation.
-4. Package a stateless backtest worker that consumes one immutable work unit and emits one signed result bundle.
+4. Package a stateless backtest worker that consumes one immutable work unit and emits one signed, content-addressed result bundle.
 5. Add content-addressed storage for large result artifacts and execution traces.
 6. Implement reviewed point-in-time executors for adaptive lag, change, z-score, ratio, and interaction specifications.
 7. Connect the cycle scheduler to the existing purged walk-forward, feature-ablation, robustness, Monte Carlo, and strategy-comparison modules.
