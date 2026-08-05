@@ -2,8 +2,8 @@ import type { MarketInstrumentConfig } from '../types/instrument';
 import type { OrderBook, OrderBookLevel, OrderLevel } from '../types/orderbook';
 
 const DEFAULT_INSTRUMENT: MarketInstrumentConfig = {
-  instId: 'UNKNOWN-USDT',
-  instType: 'SPOT',
+  instId: 'UNKNOWN-USDT-SWAP',
+  instType: 'SWAP',
   quoteCurrency: 'USDT',
   baseUnitsPerSize: 1,
 };
