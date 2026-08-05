@@ -122,26 +122,112 @@ describe('OKXHistoricalDataClient', () => {
       instrumentType: 'SWAP',
       instrumentId: 'BTC-USDT-SWAP',
     });
-    const book = await client.fetchOrderBookSnapshot({
+    const orderBook = await client.fetchOrderBookSnapshot({
       instrumentId: 'BTC-USDT-SWAP',
     });
 
     expect(openInterest[0]?.contracts).toBe(1_000);
-    expect(book.sequenceId).toBe(99);
-    expect(book.bids[0]).toEqual({
+    expect(orderBook.sequenceId).toBe(99);
+    expect(orderBook.bids[0]).toEqual({
       price: 99.9,
       contracts: 10,
       orderCount: 2,
     });
   });
 
-  it('rejects non-zero OKX response codes', async () => {
+  it('fetches independent synchronized mark and index prices', async () => {
+    const requested: string[] = [];
     const client = new OKXHistoricalDataClient({
-      loader: async () => ({ code: '50011', msg: 'rate limit', data: [] }),
+      baseUrl: 'https://example.test',
+      now: () => now,
+      loader: async (url) => {
+        requested.push(url);
+        return url.includes('mark-price')
+          ? envelope([
+              {
+                instId: 'BTC-USDT-SWAP',
+                markPx: '100.2',
+                ts: '1700000000000',
+              },
+            ])
+          : envelope([
+              {
+                instId: 'BTC-USDT',
+                idxPx: '100',
+                ts: '1700000000100',
+              },
+            ]);
+      },
+    });
+
+    const record = await client.fetchMarkIndexSnapshot({
+      instrumentType: 'SWAP',
+      instrumentId: 'BTC-USDT-SWAP',
+    });
+
+    expect(requested.some((url) => url.includes('/api/v5/public/mark-price'))).toBe(
+      true,
+    );
+    expect(
+      requested.some(
+        (url) =>
+          url.includes('/api/v5/market/index-tickers') &&
+          url.includes('instId=BTC-USDT'),
+      ),
+    ).toBe(true);
+    expect(record).toEqual({
+      kind: 'MARK_INDEX',
+      instrumentId: 'BTC-USDT-SWAP',
+      observedAt: 1_700_000_000_100,
+      receivedAt: now,
+      source: 'OKX_REST',
+      markPrice: 100.2,
+      indexPrice: 100,
+    });
+  });
+
+  it('rejects unsynchronized mark and index prices', async () => {
+    const client = new OKXHistoricalDataClient({
+      loader: async (url) =>
+        url.includes('mark-price')
+          ? envelope([{ markPx: '100', ts: '1700000000000' }])
+          : envelope([{ idxPx: '100', ts: '1700000010000' }]),
     });
 
     await expect(
-      client.fetchTradesPage({ instrumentId: 'BTC-USDT-SWAP' }),
+      client.fetchMarkIndexSnapshot({
+        instrumentType: 'SWAP',
+        instrumentId: 'BTC-USDT-SWAP',
+        maximumTimestampSkewMs: 1_000,
+      }),
+    ).rejects.toThrow(
+      'OKX mark and index timestamps exceed synchronization policy',
+    );
+  });
+
+  it('rejects non-zero OKX response codes and unknown trade sides', async () => {
+    const rateLimitClient = new OKXHistoricalDataClient({
+      loader: async () => ({ code: '50011', msg: 'rate limit', data: [] }),
+    });
+    const invalidSideClient = new OKXHistoricalDataClient({
+      loader: async () =>
+        envelope([
+          {
+            instId: 'BTC-USDT-SWAP',
+            tradeId: '1',
+            side: 'unknown',
+            px: '100',
+            sz: '1',
+            ts: '1700000000000',
+          },
+        ]),
+    });
+
+    await expect(
+      rateLimitClient.fetchTradesPage({ instrumentId: 'BTC-USDT-SWAP' }),
     ).rejects.toThrow('OKX API error 50011: rate limit');
+    await expect(
+      invalidSideClient.fetchTradesPage({ instrumentId: 'BTC-USDT-SWAP' }),
+    ).rejects.toThrow('data[0].side must be buy or sell');
   });
 });
