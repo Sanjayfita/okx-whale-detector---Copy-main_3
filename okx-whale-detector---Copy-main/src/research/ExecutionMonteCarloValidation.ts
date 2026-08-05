@@ -271,6 +271,8 @@ export const runExecutionMonteCarlo = (input: {
     let equity = policy.initialEquity;
     let peak = equity;
     let maximumDrawdown = 0;
+    let ruined = false;
+    const ruinThreshold = policy.initialEquity * policy.ruinEquityFraction;
     const systemicFee = sampleRange(policy.feeMultiplierRange, random);
     const systemicFunding = sampleRange(policy.fundingMultiplierRange, random);
     const systemicSlippage = sampleRange(
@@ -354,6 +356,9 @@ export const runExecutionMonteCarlo = (input: {
           maximumDrawdown,
           peak <= 0 ? 1 : Math.max(0, (peak - equity) / peak),
         );
+        if (equity <= ruinThreshold) {
+          ruined = true;
+        }
       }
     }
 
@@ -361,7 +366,7 @@ export const runExecutionMonteCarlo = (input: {
     const netReturn = (equity - policy.initialEquity) / policy.initialEquity;
     returns.push(netReturn);
     drawdowns.push(maximumDrawdown);
-    if (equity <= policy.initialEquity * policy.ruinEquityFraction) {
+    if (ruined) {
       ruinCount += 1;
     }
     if (equity > policy.initialEquity) {
