@@ -1,4 +1,4 @@
-import type { BacktestStatisticsReport } from '../backtest/BacktestStatistics';
+import type { BacktestStatistics } from '../backtest/BacktestStatistics';
 import type { ResearchMarketDataRecord } from '../data/ResearchMarketData';
 
 export interface StoredFeatureValue {
@@ -36,7 +36,7 @@ export interface StoredBacktest {
   readonly trainingRange: readonly [number, number] | null;
   readonly testRange: readonly [number, number] | null;
   readonly untouchedHoldout: boolean;
-  readonly metrics: BacktestStatisticsReport | null;
+  readonly metrics: BacktestStatistics | null;
   readonly rejectionReasons: readonly string[];
 }
 
