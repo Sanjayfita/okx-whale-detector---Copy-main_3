@@ -2,9 +2,10 @@ import type { AdaptiveFeatureDiscoveryReport } from '../autonomy/AdaptiveFeature
 import type { AutonomousResearchRankingReport } from '../autonomy/AutonomousResearchRanking';
 import type { AutonomousResearchCycleManifest } from '../autonomy/AutonomousResearchLaboratory';
 import type { ContinuousResearchReport } from '../autonomy/ContinuousResearchReport';
-import type {
-  BacktestWorkUnitResult,
-  DistributedBacktestPlan,
+import {
+  assertBacktestWorkUnitResultIntegrity,
+  type BacktestWorkUnitResult,
+  type DistributedBacktestPlan,
 } from '../autonomy/DistributedBacktest';
 import type { ExperimentTaskSnapshot } from '../autonomy/ExperimentScheduler';
 import type { AutonomousHypothesisGenerationReport } from '../autonomy/ResearchHypothesis';
@@ -248,6 +249,7 @@ export class PostgresAutonomousResearchStore {
   }
 
   public async persistBacktestResult(result: BacktestWorkUnitResult): Promise<void> {
+    assertBacktestWorkUnitResultIntegrity(result);
     await this.pool.query(
       `INSERT INTO research.distributed_backtest_results (
         result_fingerprint, work_unit_id, worker_id, started_at_ms,
