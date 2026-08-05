@@ -10,12 +10,13 @@ const trade = (
   tradeId: string,
   episodeId: string,
   grossPnl: number,
+  fundingPnl = -0.5,
 ): MonteCarloTrade => ({
   tradeId,
   episodeId,
   grossPnl,
   feeCost: 1,
-  fundingPnl: -0.5,
+  fundingPnl,
   slippageCost: 1,
   notional: 1_000,
   latencyMs: 100,
@@ -30,17 +31,23 @@ const deterministicPolicy = (
   ruinEquityFraction: 0.5,
   feeMultiplierRange: [1, 1.5],
   fundingMultiplierRange: [1, 2],
+  positiveFundingReceiptHaircutRange: [0, 0.5],
   slippageMultiplierRange: [1, 2],
   latencyMultiplierRange: [1, 2],
+  systemicShockWeight: 0.7,
   latencyImpactBpsPerSecond: 0.25,
   missedFillProbability: 0.1,
+  favorableTradeMissedFillMultiplier: 2,
   partialFillFractionRange: [0.5, 1],
   confidenceLevel: 0.95,
+  tailConfidenceLevel: 0.95,
+  maximumDrawdownThresholdFraction: 0.1,
+  minimumIndependentEpisodes: 3,
   ...overrides,
 });
 
 describe('runExecutionMonteCarlo', () => {
-  it('is reproducible and reports execution-stressed distributions', () => {
+  it('is reproducible and reports systemic execution-tail risk', () => {
     const trades = [
       trade('a', 'episode-1', 20),
       trade('b', 'episode-1', -10),
@@ -58,14 +65,38 @@ describe('runExecutionMonteCarlo', () => {
 
     expect(first).toEqual(second);
     expect(first.independentEpisodeCount).toBe(3);
-    expect(first.endingEquity.p05).toBeLessThanOrEqual(
-      first.endingEquity.p95,
+    expect(first.expectedShortfallReturnFraction).toBeLessThanOrEqual(
+      first.netReturnFraction.p05,
     );
-    expect(first.maximumDrawdownFraction.p95).toBeGreaterThanOrEqual(0);
-    expect(first.averageMissedFills).toBeGreaterThan(0);
-    expect(first.averagePartialFills).toBeGreaterThan(0);
-    expect(first.expectedReturnConfidenceInterval.level).toBe(0.95);
+    expect(first.averageFavorableMissedFills).toBeGreaterThan(
+      first.averageUnfavorableMissedFills,
+    );
+    expect(first.averageSystemicCostMultiplier).toBeGreaterThan(1);
+    expect(first.probabilityDrawdownExceedsThreshold).toBeGreaterThanOrEqual(0);
     expect(first.liveExecutionAllowed).toBe(false);
+  });
+
+  it('haircuts positive funding receipts instead of amplifying them', () => {
+    const report = runExecutionMonteCarlo({
+      trades: [
+        trade('a', 'episode-1', 0, 10),
+        trade('b', 'episode-2', 0, 10),
+        trade('c', 'episode-3', 0, 10),
+      ],
+      policy: deterministicPolicy({
+        iterations: 50,
+        feeMultiplierRange: [0, 0],
+        fundingMultiplierRange: [10, 10],
+        positiveFundingReceiptHaircutRange: [0.5, 0.5],
+        slippageMultiplierRange: [0, 0],
+        latencyMultiplierRange: [1, 1],
+        latencyImpactBpsPerSecond: 0,
+        missedFillProbability: 0,
+        partialFillFractionRange: [1, 1],
+      }),
+    });
+
+    expect(report.endingEquity.p50).toBeCloseTo(10_015, 8);
   });
 
   it('detects ruin under persistently losing paths', () => {
@@ -81,9 +112,10 @@ describe('runExecutionMonteCarlo', () => {
       policy: deterministicPolicy({
         iterations: 100,
         initialEquity: 1_000,
-        ruinEquityFraction: 0.5,
+        minimumIndependentEpisodes: 10,
         feeMultiplierRange: [1, 1],
         fundingMultiplierRange: [1, 1],
+        positiveFundingReceiptHaircutRange: [0, 0],
         slippageMultiplierRange: [1, 1],
         latencyMultiplierRange: [1, 1],
         latencyImpactBpsPerSecond: 0,
@@ -95,5 +127,51 @@ describe('runExecutionMonteCarlo', () => {
     expect(report.probabilityOfRuin).toBe(1);
     expect(report.probabilityOfPositiveReturn).toBe(0);
     expect(report.netReturnFraction.p50).toBeLessThan(0);
+  });
+
+  it('counts temporary ruin even when the path later recovers', () => {
+    const report = runExecutionMonteCarlo({
+      trades: [
+        {
+          ...trade('loss', 'episode-1', -600, 0),
+          feeCost: 0,
+          slippageCost: 0,
+          latencyMs: 0,
+        },
+        {
+          ...trade('recovery', 'episode-1', 700, 0),
+          feeCost: 0,
+          slippageCost: 0,
+          latencyMs: 0,
+        },
+      ],
+      policy: deterministicPolicy({
+        iterations: 20,
+        initialEquity: 1_000,
+        ruinEquityFraction: 0.5,
+        minimumIndependentEpisodes: 1,
+        feeMultiplierRange: [0, 0],
+        fundingMultiplierRange: [0, 0],
+        positiveFundingReceiptHaircutRange: [0, 0],
+        slippageMultiplierRange: [0, 0],
+        latencyMultiplierRange: [1, 1],
+        latencyImpactBpsPerSecond: 0,
+        missedFillProbability: 0,
+        partialFillFractionRange: [1, 1],
+      }),
+    });
+
+    expect(report.endingEquity.p50).toBe(1_100);
+    expect(report.probabilityOfPositiveReturn).toBe(1);
+    expect(report.probabilityOfRuin).toBe(1);
+  });
+
+  it('rejects underpowered episode samples', () => {
+    expect(() =>
+      runExecutionMonteCarlo({
+        trades: [trade('a', 'episode-1', 1)],
+        policy: deterministicPolicy({ minimumIndependentEpisodes: 3 }),
+      }),
+    ).toThrow('independent episodes');
   });
 });

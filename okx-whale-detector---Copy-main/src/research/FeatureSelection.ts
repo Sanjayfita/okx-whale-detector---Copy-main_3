@@ -9,6 +9,7 @@ export type FeatureRole =
 export interface FeatureImportanceObservation {
   readonly fold: number;
   readonly importance: number;
+  readonly permutationScope?: 'GLOBAL' | 'WITHIN_BLOCK';
 }
 
 export interface FeatureSelectionCandidate {
@@ -33,6 +34,9 @@ export interface FeatureSelectionPolicy {
   readonly maximumImportanceCoefficientOfVariation: number;
   readonly maximumAbsoluteCorrelation: number;
   readonly maximumRetainedResearchFeatures: number;
+  readonly requireBlockAwareImportance: boolean;
+  readonly requireCompleteCorrelationEvidence: boolean;
+  readonly maximumFamilywiseAblationPValue: number;
 }
 
 export const DEFAULT_FEATURE_SELECTION_POLICY: FeatureSelectionPolicy = {
@@ -42,6 +46,9 @@ export const DEFAULT_FEATURE_SELECTION_POLICY: FeatureSelectionPolicy = {
   maximumImportanceCoefficientOfVariation: 2,
   maximumAbsoluteCorrelation: 0.9,
   maximumRetainedResearchFeatures: 8,
+  requireBlockAwareImportance: true,
+  requireCompleteCorrelationEvidence: true,
+  maximumFamilywiseAblationPValue: 0.05,
 };
 
 export type FeatureSelectionRejectionReason =
@@ -49,8 +56,11 @@ export type FeatureSelectionRejectionReason =
   | 'IMPORTANCE_NOT_POSITIVE_ACROSS_FOLDS'
   | 'MEDIAN_IMPORTANCE_NOT_POSITIVE'
   | 'IMPORTANCE_UNSTABLE'
+  | 'BLOCK_AWARE_IMPORTANCE_REQUIRED'
   | 'PAIRED_ABLATION_REQUIRED'
   | 'PAIRED_ABLATION_REJECTED'
+  | 'FAMILYWISE_ABLATION_NOT_SIGNIFICANT'
+  | 'INCOMPLETE_CORRELATION_EVIDENCE'
   | 'SAFETY_ROLE_REQUIRED_FOR_SAFETY_FEATURE'
   | 'COMPLEXITY_BUDGET_EXCEEDED'
   | `REDUNDANT_WITH:${string}`;
@@ -75,6 +85,7 @@ export interface FeatureSelectionReport {
   readonly retainedSafetyFeatures: readonly string[];
   readonly decisions: readonly FeatureSelectionDecision[];
   readonly rejectionReasons: readonly string[];
+  readonly correlationEvidenceComplete: boolean;
   readonly liveExecutionAllowed: false;
 }
 
@@ -104,11 +115,9 @@ const median = (values: readonly number[]): number | null => {
   if (upper === undefined) {
     return null;
   }
-  if (sorted.length % 2 === 1) {
-    return upper;
-  }
-  const lower = sorted[middle - 1];
-  return lower === undefined ? null : (lower + upper) / 2;
+  return sorted.length % 2 === 1
+    ? upper
+    : ((sorted[middle - 1] ?? upper) + upper) / 2;
 };
 
 const sampleStandardDeviation = (values: readonly number[]): number => {
@@ -116,51 +125,36 @@ const sampleStandardDeviation = (values: readonly number[]): number => {
     return 0;
   }
   const average = mean(values);
-  const variance =
-    values.reduce((sum, value) => sum + (value - average) ** 2, 0) /
-    (values.length - 1);
-  return Math.sqrt(Math.max(0, variance));
+  return Math.sqrt(
+    Math.max(
+      0,
+      values.reduce((sum, value) => sum + (value - average) ** 2, 0) /
+        (values.length - 1),
+    ),
+  );
 };
 
 const validatePolicy = (policy: FeatureSelectionPolicy): void => {
   if (
     !Number.isSafeInteger(policy.minimumImportanceFoldCount) ||
-    policy.minimumImportanceFoldCount <= 0
-  ) {
-    throw new Error('minimumImportanceFoldCount must be a positive integer');
-  }
-  if (
-    !Number.isFinite(policy.minimumPositiveImportanceFraction) ||
-    policy.minimumPositiveImportanceFraction <= 0.5 ||
-    policy.minimumPositiveImportanceFraction > 1
-  ) {
-    throw new Error('minimumPositiveImportanceFraction must be in (0.5, 1]');
-  }
-  if (!Number.isFinite(policy.minimumMedianImportance)) {
-    throw new Error('minimumMedianImportance must be finite');
-  }
-  if (
-    !Number.isFinite(policy.maximumImportanceCoefficientOfVariation) ||
-    policy.maximumImportanceCoefficientOfVariation < 0
-  ) {
-    throw new Error(
-      'maximumImportanceCoefficientOfVariation must be finite and non-negative',
-    );
-  }
-  if (
-    !Number.isFinite(policy.maximumAbsoluteCorrelation) ||
-    policy.maximumAbsoluteCorrelation <= 0 ||
-    policy.maximumAbsoluteCorrelation > 1
-  ) {
-    throw new Error('maximumAbsoluteCorrelation must be in (0, 1]');
-  }
-  if (
+    policy.minimumImportanceFoldCount <= 0 ||
     !Number.isSafeInteger(policy.maximumRetainedResearchFeatures) ||
     policy.maximumRetainedResearchFeatures <= 0
   ) {
-    throw new Error(
-      'maximumRetainedResearchFeatures must be a positive integer',
-    );
+    throw new Error('feature selection integer policy is invalid');
+  }
+  if (
+    policy.minimumPositiveImportanceFraction <= 0.5 ||
+    policy.minimumPositiveImportanceFraction > 1 ||
+    !Number.isFinite(policy.minimumMedianImportance) ||
+    policy.maximumImportanceCoefficientOfVariation < 0 ||
+    !Number.isFinite(policy.maximumImportanceCoefficientOfVariation) ||
+    policy.maximumAbsoluteCorrelation <= 0 ||
+    policy.maximumAbsoluteCorrelation > 1 ||
+    policy.maximumFamilywiseAblationPValue <= 0 ||
+    policy.maximumFamilywiseAblationPValue >= 1
+  ) {
+    throw new Error('feature selection threshold policy is invalid');
   }
 };
 
@@ -181,23 +175,6 @@ const evaluateCandidate = (input: {
   if (candidate.documentedPurpose.trim().length === 0) {
     throw new Error(`documentedPurpose is required for ${candidate.featureName}`);
   }
-
-  const foldIds = new Set<number>();
-  for (const observation of candidate.importanceByFold) {
-    if (!Number.isSafeInteger(observation.fold) || observation.fold < 0) {
-      throw new Error(`invalid fold for ${candidate.featureName}`);
-    }
-    if (foldIds.has(observation.fold)) {
-      throw new Error(
-        `duplicate importance fold ${observation.fold} for ${candidate.featureName}`,
-      );
-    }
-    foldIds.add(observation.fold);
-    if (!Number.isFinite(observation.importance)) {
-      throw new Error(`non-finite importance for ${candidate.featureName}`);
-    }
-  }
-
   const rationale: string[] = [];
   const rejectionReasons: FeatureSelectionRejectionReason[] = [];
   if (candidate.requiredForSafety) {
@@ -218,6 +195,19 @@ const evaluateCandidate = (input: {
     };
   }
 
+  const foldIds = new Set<number>();
+  for (const observation of candidate.importanceByFold) {
+    if (!Number.isSafeInteger(observation.fold) || observation.fold < 0) {
+      throw new Error(`invalid fold for ${candidate.featureName}`);
+    }
+    if (foldIds.has(observation.fold)) {
+      throw new Error(`duplicate importance fold ${observation.fold} for ${candidate.featureName}`);
+    }
+    foldIds.add(observation.fold);
+    if (!Number.isFinite(observation.importance)) {
+      throw new Error(`non-finite importance for ${candidate.featureName}`);
+    }
+  }
   const importances = candidate.importanceByFold.map(
     (observation) => observation.importance,
   );
@@ -228,7 +218,7 @@ const evaluateCandidate = (input: {
       : importances.filter((importance) => importance > 0).length /
         importances.length;
   const averageImportance = mean(importances);
-  const importanceCoefficientOfVariation =
+  const coefficient =
     importances.length === 0 || averageImportance === 0
       ? Number.POSITIVE_INFINITY
       : sampleStandardDeviation(importances) / Math.abs(averageImportance);
@@ -236,9 +226,7 @@ const evaluateCandidate = (input: {
   if (importances.length < policy.minimumImportanceFoldCount) {
     rejectionReasons.push('INSUFFICIENT_IMPORTANCE_FOLDS');
   }
-  if (
-    positiveImportanceFraction < policy.minimumPositiveImportanceFraction
-  ) {
+  if (positiveImportanceFraction < policy.minimumPositiveImportanceFraction) {
     rejectionReasons.push('IMPORTANCE_NOT_POSITIVE_ACROSS_FOLDS');
   }
   if (
@@ -247,39 +235,48 @@ const evaluateCandidate = (input: {
   ) {
     rejectionReasons.push('MEDIAN_IMPORTANCE_NOT_POSITIVE');
   }
-  if (
-    !Number.isFinite(importanceCoefficientOfVariation) ||
-    importanceCoefficientOfVariation >
-      policy.maximumImportanceCoefficientOfVariation
-  ) {
+  if (!Number.isFinite(coefficient) || coefficient > policy.maximumImportanceCoefficientOfVariation) {
     rejectionReasons.push('IMPORTANCE_UNSTABLE');
+  }
+  if (
+    policy.requireBlockAwareImportance &&
+    candidate.importanceByFold.some(
+      (observation) => observation.permutationScope !== 'WITHIN_BLOCK',
+    )
+  ) {
+    rejectionReasons.push('BLOCK_AWARE_IMPORTANCE_REQUIRED');
   }
   if (candidate.ablation === null) {
     rejectionReasons.push('PAIRED_ABLATION_REQUIRED');
-  } else if (
-    candidate.ablation.status !== 'FEATURE_JUSTIFIED_FOR_FROZEN_CANDIDATE'
-  ) {
-    rejectionReasons.push('PAIRED_ABLATION_REJECTED');
+  } else {
+    if (
+      candidate.ablation.status !==
+      'FEATURE_JUSTIFIED_FOR_FROZEN_CANDIDATE'
+    ) {
+      rejectionReasons.push('PAIRED_ABLATION_REJECTED');
+    }
+    if (
+      candidate.ablation.adjustedPValue === null ||
+      candidate.ablation.adjustedPValue >
+        policy.maximumFamilywiseAblationPValue
+    ) {
+      rejectionReasons.push('FAMILYWISE_ABLATION_NOT_SIGNIFICANT');
+    }
   }
-
   const selectionScore =
-    medianImportance === null ||
-    !Number.isFinite(importanceCoefficientOfVariation)
+    medianImportance === null || !Number.isFinite(coefficient)
       ? null
-      : (medianImportance * positiveImportanceFraction) /
-        (1 + importanceCoefficientOfVariation);
+      : (medianImportance * positiveImportanceFraction) / (1 + coefficient);
   if (rejectionReasons.length === 0) {
-    rationale.push('STABLE_IMPORTANCE_AND_PAIRED_ABLATION_SUPPORTED');
+    rationale.push('BLOCK_AWARE_IMPORTANCE_AND_FAMILYWISE_ABLATION_SUPPORTED');
   }
-
   return {
     candidate,
     medianImportance,
     positiveImportanceFraction,
-    importanceCoefficientOfVariation:
-      Number.isFinite(importanceCoefficientOfVariation)
-        ? importanceCoefficientOfVariation
-        : null,
+    importanceCoefficientOfVariation: Number.isFinite(coefficient)
+      ? coefficient
+      : null,
     selectionScore,
     rationale,
     rejectionReasons,
@@ -290,14 +287,16 @@ const evaluateCandidate = (input: {
 export const selectFeatures = (input: {
   readonly candidates: readonly FeatureSelectionCandidate[];
   readonly correlations: readonly FeatureCorrelationEvidence[];
-  readonly policy?: FeatureSelectionPolicy;
+  readonly policy?: Partial<FeatureSelectionPolicy>;
 }): FeatureSelectionReport => {
-  const policy = input.policy ?? DEFAULT_FEATURE_SELECTION_POLICY;
+  const policy: FeatureSelectionPolicy = {
+    ...DEFAULT_FEATURE_SELECTION_POLICY,
+    ...input.policy,
+  };
   validatePolicy(policy);
   if (input.candidates.length === 0) {
     throw new Error('feature selection requires candidates');
   }
-
   const candidateNames = new Set<string>();
   const evaluations = input.candidates.map((candidate) => {
     if (candidateNames.has(candidate.featureName)) {
@@ -311,12 +310,10 @@ export const selectFeatures = (input: {
   for (const evidence of input.correlations) {
     if (
       !candidateNames.has(evidence.leftFeature) ||
-      !candidateNames.has(evidence.rightFeature)
+      !candidateNames.has(evidence.rightFeature) ||
+      evidence.leftFeature === evidence.rightFeature
     ) {
-      throw new Error('correlation references an unknown feature');
-    }
-    if (evidence.leftFeature === evidence.rightFeature) {
-      throw new Error('correlation must reference two different features');
+      throw new Error('correlation references invalid features');
     }
     if (
       !Number.isFinite(evidence.absoluteCorrelation) ||
@@ -326,10 +323,47 @@ export const selectFeatures = (input: {
       throw new Error('absoluteCorrelation must be in [0, 1]');
     }
     const key = correlationKey(evidence.leftFeature, evidence.rightFeature);
-    correlations.set(
-      key,
-      Math.max(correlations.get(key) ?? 0, evidence.absoluteCorrelation),
-    );
+    const previous = correlations.get(key);
+    if (
+      previous !== undefined &&
+      Math.abs(previous - evidence.absoluteCorrelation) > 1e-12
+    ) {
+      throw new Error(`conflicting correlation evidence for ${key}`);
+    }
+    correlations.set(key, evidence.absoluteCorrelation);
+  }
+
+  const otherwiseEligible = evaluations.filter(
+    (evaluation) =>
+      !evaluation.candidate.requiredForSafety &&
+      evaluation.rejectionReasons.length === 0,
+  );
+  const globalRejectionReasons: string[] = [];
+  if (policy.requireCompleteCorrelationEvidence) {
+    for (let leftIndex = 0; leftIndex < otherwiseEligible.length; leftIndex += 1) {
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < otherwiseEligible.length;
+        rightIndex += 1
+      ) {
+        const left = otherwiseEligible[leftIndex];
+        const right = otherwiseEligible[rightIndex];
+        if (left === undefined || right === undefined) {
+          continue;
+        }
+        const key = correlationKey(
+          left.candidate.featureName,
+          right.candidate.featureName,
+        );
+        if (!correlations.has(key)) {
+          left.rejectionReasons.push('INCOMPLETE_CORRELATION_EVIDENCE');
+          right.rejectionReasons.push('INCOMPLETE_CORRELATION_EVIDENCE');
+          globalRejectionReasons.push(
+            `MISSING_CORRELATION_EVIDENCE:${left.candidate.featureName}:${right.candidate.featureName}`,
+          );
+        }
+      }
+    }
   }
 
   const retainedResearch: MutableFeatureEvaluation[] = [];
@@ -345,24 +379,19 @@ export const selectFeatures = (input: {
           (left.selectionScore ?? Number.NEGATIVE_INFINITY) ||
         left.candidate.featureName.localeCompare(right.candidate.featureName),
     );
-
   for (const evaluation of eligibleResearch) {
-    if (
-      retainedResearch.length >= policy.maximumRetainedResearchFeatures
-    ) {
+    if (retainedResearch.length >= policy.maximumRetainedResearchFeatures) {
       evaluation.rejectionReasons.push('COMPLEXITY_BUDGET_EXCEEDED');
       continue;
     }
-    const redundantWith = retainedResearch.find((retained) => {
-      const correlation =
-        correlations.get(
-          correlationKey(
-            evaluation.candidate.featureName,
-            retained.candidate.featureName,
-          ),
-        ) ?? 0;
-      return correlation >= policy.maximumAbsoluteCorrelation;
-    });
+    const redundantWith = retainedResearch.find((retained) =>
+      (correlations.get(
+        correlationKey(
+          evaluation.candidate.featureName,
+          retained.candidate.featureName,
+        ),
+      ) ?? 0) >= policy.maximumAbsoluteCorrelation,
+    );
     if (redundantWith !== undefined) {
       evaluation.rejectionReasons.push(
         `REDUNDANT_WITH:${redundantWith.candidate.featureName}`,
@@ -384,7 +413,7 @@ export const selectFeatures = (input: {
       evaluation.importanceCoefficientOfVariation,
     selectionScore: evaluation.selectionScore,
     rationale: evaluation.rationale,
-    rejectionReasons: evaluation.rejectionReasons,
+    rejectionReasons: [...new Set(evaluation.rejectionReasons)],
   }));
   const retainedSafetyFeatures = decisions
     .filter(
@@ -400,14 +429,12 @@ export const selectFeatures = (input: {
     )
     .map((decision) => decision.featureName)
     .sort();
-  const rejectionReasons =
-    retainedResearchFeatures.length === 0
-      ? ['NO_RESEARCH_FEATURE_RETAINED']
-      : [];
-
+  if (retainedResearchFeatures.length === 0) {
+    globalRejectionReasons.push('NO_RESEARCH_FEATURE_RETAINED');
+  }
+  const rejectionReasons = [...new Set(globalRejectionReasons)];
   return {
-    status:
-      rejectionReasons.length === 0 ? 'SELECTION_PASSED' : 'REJECTED',
+    status: rejectionReasons.length === 0 ? 'SELECTION_PASSED' : 'REJECTED',
     selectedFeatures: [
       ...retainedResearchFeatures,
       ...retainedSafetyFeatures,
@@ -416,6 +443,9 @@ export const selectFeatures = (input: {
     retainedSafetyFeatures,
     decisions,
     rejectionReasons,
+    correlationEvidenceComplete: !rejectionReasons.some((reason) =>
+      reason.startsWith('MISSING_CORRELATION_EVIDENCE:'),
+    ),
     liveExecutionAllowed: false,
   };
 };

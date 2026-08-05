@@ -14,6 +14,13 @@ describe('FeaturePipeline funding chronology', () => {
     const result = calculateResearchFeatures({
       instrumentId: shared.instrumentId,
       asOf: timestamp + 60_000,
+      policy: {
+        maximumTradeAgeMs: 60_000,
+        maximumBookAgeMs: 60_000,
+        maximumCandleAgeMs: 60_000,
+        maximumOpenInterestAgeMs: 60_000,
+        maximumMarkIndexAgeMs: 60_000,
+      },
       trades: [
         {
           ...shared,

@@ -93,9 +93,9 @@ const funding: FundingRateRecord[] = [
 ];
 
 describe('calculateAdvancedOrderFlowFeatures', () => {
-  it('calculates multi-level flow, OI, funding, and absorption features', () => {
+  it('calculates point-in-time multi-level flow, OI, funding, and absorption', () => {
     const vector = calculateAdvancedOrderFlowFeatures({
-      asOf: 3_601_000,
+      asOf: 3_601_001,
       trades: [
         trade(1_100, 'BUY', 10),
         trade(1_200, 'BUY', 10),
@@ -105,6 +105,13 @@ describe('calculateAdvancedOrderFlowFeatures', () => {
       openInterest,
       funding,
       priorCumulativeVolumeDelta: 5,
+      dataPolicy: {
+        tradeLookbackMs: 4_000_000,
+        bookLookbackMs: 4_000_000,
+        maximumTradeAgeMs: 4_000_000,
+        maximumBookAgeMs: 4_000_000,
+        maximumOpenInterestAgeMs: 4_000_000,
+      },
     });
 
     expect(vector.deltaContracts).toBe(18);
@@ -115,6 +122,8 @@ describe('calculateAdvancedOrderFlowFeatures', () => {
     expect(vector.openInterestChangePercent).toBeCloseTo(10);
     expect(vector.fundingAccelerationPerHour).toBeCloseTo(0.0001);
     expect(vector.absorption).toBe('BUY_ABSORBED');
+    expect(vector.sourceMaxReceivedAt).toBeLessThanOrEqual(vector.observedAt);
+    expect(vector.dataQuality.status).toBe('PASSED');
     expect(vector.directTradingSignalAllowed).toBe(false);
   });
 
@@ -122,7 +131,7 @@ describe('calculateAdvancedOrderFlowFeatures', () => {
     const first = book(1_000, 100, 5);
     const second = book(2_000, 1, 5);
     const vector = calculateAdvancedOrderFlowFeatures({
-      asOf: 2_000,
+      asOf: 2_001,
       trades: [trade(1_100, 'BUY', 15, 101)],
       books: [first, second],
       openInterest: [],
@@ -153,5 +162,37 @@ describe('calculateAdvancedOrderFlowFeatures', () => {
     );
     expect(vector.hiddenLiquidityInference.side).toBe('SELL');
     expect(vector.liveExecutionAllowed).toBe(false);
+  });
+
+  it('excludes market data that had not arrived by the decision time', () => {
+    const lateTrade = {
+      ...trade(1_900, 'BUY', 1_000),
+      receivedAt: 2_002,
+    };
+    const vector = calculateAdvancedOrderFlowFeatures({
+      asOf: 2_001,
+      trades: [trade(1_100, 'SELL', 5), lateTrade],
+      books: [book(2_000, 10, 10)],
+      openInterest: [],
+      funding: [],
+    });
+
+    expect(vector.deltaContracts).toBe(-5);
+    expect(
+      vector.dataQuality.trades.excludedUnavailableAtDecisionCount,
+    ).toBe(1);
+    expect(vector.sourceMaxReceivedAt).toBeLessThanOrEqual(2_001);
+  });
+
+  it('fails closed when required order-book evidence is stale', () => {
+    expect(() =>
+      calculateAdvancedOrderFlowFeatures({
+        asOf: 20_000,
+        trades: [trade(19_000, 'BUY', 1)],
+        books: [book(1_000, 10, 10)],
+        openInterest: [],
+        funding: [],
+      }),
+    ).toThrow('LATEST_RECORD_TOO_STALE');
   });
 });

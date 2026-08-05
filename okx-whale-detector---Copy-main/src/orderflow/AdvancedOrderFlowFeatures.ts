@@ -1,3 +1,8 @@
+import {
+  requirePointInTimeSelection,
+  selectPointInTimeRecords,
+  type PointInTimeSelectionQuality,
+} from '../data/PointInTimeRecords';
 import type {
   FundingRateRecord,
   HistoricalTradeRecord,
@@ -19,6 +24,17 @@ export interface AdvancedOrderFlowPolicy {
   readonly hiddenLiquidityExecutionMultiple: number;
 }
 
+export interface AdvancedOrderFlowDataPolicy {
+  readonly tradeLookbackMs: number;
+  readonly bookLookbackMs: number;
+  readonly openInterestLookbackMs: number;
+  readonly fundingLookbackMs: number;
+  readonly maximumTradeAgeMs: number;
+  readonly maximumBookAgeMs: number;
+  readonly maximumOpenInterestAgeMs: number;
+  readonly maximumFundingAgeMs: number;
+}
+
 export const DEFAULT_ADVANCED_ORDER_FLOW_POLICY: AdvancedOrderFlowPolicy = {
   depthLevels: 10,
   nearTouchWeightDecay: 0.75,
@@ -32,6 +48,17 @@ export const DEFAULT_ADVANCED_ORDER_FLOW_POLICY: AdvancedOrderFlowPolicy = {
   hiddenLiquidityExecutionMultiple: 2,
 };
 
+export const DEFAULT_ADVANCED_ORDER_FLOW_DATA_POLICY: AdvancedOrderFlowDataPolicy = {
+  tradeLookbackMs: 15 * 60_000,
+  bookLookbackMs: 60_000,
+  openInterestLookbackMs: 24 * 60 * 60_000,
+  fundingLookbackMs: 72 * 60 * 60_000,
+  maximumTradeAgeMs: 5 * 60_000,
+  maximumBookAgeMs: 5_000,
+  maximumOpenInterestAgeMs: 30 * 60_000,
+  maximumFundingAgeMs: 12 * 60 * 60_000,
+};
+
 export interface ResearchOnlyInference {
   readonly status: 'NOT_DETECTED' | 'INFERRED_WITH_LIMITATIONS';
   readonly side: 'BUY' | 'SELL' | null;
@@ -40,8 +67,18 @@ export interface ResearchOnlyInference {
   readonly limitations: readonly string[];
 }
 
+export interface AdvancedOrderFlowDataQuality {
+  readonly status: 'PASSED';
+  readonly trades: PointInTimeSelectionQuality;
+  readonly books: PointInTimeSelectionQuality;
+  readonly openInterest: PointInTimeSelectionQuality;
+  readonly funding: PointInTimeSelectionQuality;
+}
+
 export interface AdvancedOrderFlowVector {
   readonly observedAt: number;
+  readonly sourceMaxObservedAt: number;
+  readonly sourceMaxReceivedAt: number;
   readonly multiLevelOrderBookImbalance: number;
   readonly queueImbalance: number | null;
   readonly liquidityImbalance: number;
@@ -58,6 +95,7 @@ export interface AdvancedOrderFlowVector {
   readonly exhaustion: 'BUY_EXHAUSTION' | 'SELL_EXHAUSTION' | 'NONE';
   readonly spoofingInference: ResearchOnlyInference;
   readonly hiddenLiquidityInference: ResearchOnlyInference;
+  readonly dataQuality: AdvancedOrderFlowDataQuality;
   readonly directTradingSignalAllowed: false;
   readonly liveExecutionAllowed: false;
 }
@@ -149,7 +187,8 @@ const inferSpoofing = (input: {
           continue;
         }
         const remaining = after.find((candidate) => candidate.price === level.price);
-        const disappeared = remaining === undefined || remaining.contracts < level.contracts * 0.2;
+        const disappeared =
+          remaining === undefined || remaining.contracts < level.contracts * 0.2;
         const executed = input.trades
           .filter(
             (trade) =>
@@ -206,13 +245,17 @@ const inferHiddenLiquidity = (input: {
     const displayedAsk = Math.max(
       0,
       ...input.books.flatMap((book) =>
-        book.asks.filter((level) => level.price === price).map((level) => level.contracts),
+        book.asks
+          .filter((level) => level.price === price)
+          .map((level) => level.contracts),
       ),
     );
     const displayedBid = Math.max(
       0,
       ...input.books.flatMap((book) =>
-        book.bids.filter((level) => level.price === price).map((level) => level.contracts),
+        book.bids
+          .filter((level) => level.price === price)
+          .map((level) => level.contracts),
       ),
     );
     if (
@@ -261,8 +304,13 @@ export const calculateAdvancedOrderFlowFeatures = (input: {
   readonly funding: readonly FundingRateRecord[];
   readonly priorCumulativeVolumeDelta?: number;
   readonly policy?: AdvancedOrderFlowPolicy;
+  readonly dataPolicy?: Partial<AdvancedOrderFlowDataPolicy>;
 }): AdvancedOrderFlowVector => {
   const policy = input.policy ?? DEFAULT_ADVANCED_ORDER_FLOW_POLICY;
+  const dataPolicy: AdvancedOrderFlowDataPolicy = {
+    ...DEFAULT_ADVANCED_ORDER_FLOW_DATA_POLICY,
+    ...input.dataPolicy,
+  };
   if (!Number.isSafeInteger(input.asOf) || input.asOf < 0) {
     throw new Error('asOf must be a non-negative safe integer');
   }
@@ -274,14 +322,64 @@ export const calculateAdvancedOrderFlowFeatures = (input: {
   ) {
     throw new Error('invalid order-flow depth policy');
   }
-  const trades = input.trades
-    .filter((record) => record.observedAt <= input.asOf)
-    .slice()
-    .sort((left, right) => left.observedAt - right.observedAt);
-  const books = input.books
-    .filter((record) => record.observedAt <= input.asOf)
-    .slice()
-    .sort((left, right) => left.observedAt - right.observedAt);
+  const firstRecord = [
+    ...input.trades,
+    ...input.books,
+    ...input.openInterest,
+    ...input.funding,
+  ][0];
+  if (firstRecord === undefined) {
+    throw new Error('advanced order flow requires market data');
+  }
+  const instrumentId = firstRecord.instrumentId;
+  const tradeSelection = selectPointInTimeRecords({
+    sourceName: 'advanced order flow trades',
+    instrumentId,
+    asOf: input.asOf,
+    records: input.trades,
+    policy: {
+      lookbackMs: dataPolicy.tradeLookbackMs,
+      maximumAgeMs: dataPolicy.maximumTradeAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const bookSelection = selectPointInTimeRecords({
+    sourceName: 'advanced order flow books',
+    instrumentId,
+    asOf: input.asOf,
+    records: input.books,
+    policy: {
+      lookbackMs: dataPolicy.bookLookbackMs,
+      maximumAgeMs: dataPolicy.maximumBookAgeMs,
+      minimumRecords: 1,
+    },
+  });
+  const openInterestSelection = selectPointInTimeRecords({
+    sourceName: 'advanced order flow open interest',
+    instrumentId,
+    asOf: input.asOf,
+    records: input.openInterest,
+    policy: {
+      lookbackMs: dataPolicy.openInterestLookbackMs,
+      maximumAgeMs: dataPolicy.maximumOpenInterestAgeMs,
+      minimumRecords: 0,
+    },
+  });
+  const fundingSelection = selectPointInTimeRecords({
+    sourceName: 'advanced order flow funding',
+    instrumentId,
+    asOf: input.asOf,
+    records: input.funding.filter((record) => record.fundingTime <= input.asOf),
+    policy: {
+      lookbackMs: dataPolicy.fundingLookbackMs,
+      maximumAgeMs: dataPolicy.maximumFundingAgeMs,
+      minimumRecords: 0,
+    },
+  });
+  const trades = requirePointInTimeSelection(tradeSelection);
+  const books = requirePointInTimeSelection(bookSelection);
+  const openInterest = requirePointInTimeSelection(openInterestSelection);
+  const funding = requirePointInTimeSelection(fundingSelection);
   const currentBook = books.at(-1);
   if (currentBook === undefined) {
     throw new Error('advanced order flow requires at least one order book');
@@ -317,9 +415,7 @@ export const calculateAdvancedOrderFlowFeatures = (input: {
       : normalizedDelta <= -policy.deltaDivergenceThreshold && priceChange > 0
         ? 'BULLISH'
         : 'NONE';
-  const oi = openInterestChange(
-    input.openInterest.filter((record) => record.observedAt <= input.asOf),
-  );
+  const oi = openInterestChange(openInterest);
   const openInterestState =
     oi > 0.1 ? 'EXPANSION' : oi < -0.1 ? 'CONTRACTION' : 'STABLE';
 
@@ -373,9 +469,23 @@ export const calculateAdvancedOrderFlowFeatures = (input: {
       : earlySell > 0 && lateSell <= earlySell * policy.exhaustionVolumeFraction
         ? 'SELL_EXHAUSTION'
         : 'NONE';
+  const selectedRecords = [
+    ...trades,
+    ...books,
+    ...openInterest,
+    ...funding,
+  ];
+  const sourceMaxObservedAt = Math.max(
+    ...selectedRecords.map((record) => record.observedAt),
+  );
+  const sourceMaxReceivedAt = Math.max(
+    ...selectedRecords.map((record) => record.receivedAt),
+  );
 
   return {
     observedAt: input.asOf,
+    sourceMaxObservedAt,
+    sourceMaxReceivedAt,
     multiLevelOrderBookImbalance: imbalance(bidDepth, askDepth),
     queueImbalance:
       bidOrders.length === bids.length && askOrders.length === asks.length
@@ -394,13 +504,18 @@ export const calculateAdvancedOrderFlowFeatures = (input: {
     deltaDivergence,
     openInterestChangePercent: oi,
     openInterestState,
-    fundingAccelerationPerHour: fundingAcceleration(
-      input.funding.filter((record) => record.observedAt <= input.asOf),
-    ),
+    fundingAccelerationPerHour: fundingAcceleration(funding),
     absorption,
     exhaustion,
     spoofingInference: inferSpoofing({ books, trades, policy }),
     hiddenLiquidityInference: inferHiddenLiquidity({ books, trades, policy }),
+    dataQuality: {
+      status: 'PASSED',
+      trades: tradeSelection.quality,
+      books: bookSelection.quality,
+      openInterest: openInterestSelection.quality,
+      funding: fundingSelection.quality,
+    },
     directTradingSignalAllowed: false,
     liveExecutionAllowed: false,
   };
