@@ -1,8 +1,8 @@
-import type { SupportedInstType } from '../types/instrument';
+import type { DerivativeInstType } from '../types/instrument';
 
 export interface MarketDiscoveryConfig {
   enabled: boolean;
-  instrumentTypes: readonly SupportedInstType[];
+  instrumentTypes: readonly DerivativeInstType[];
   minimum24hQuoteVolume: number;
   maximumSymbols: number;
   excludedSymbols: readonly string[];
@@ -10,7 +10,7 @@ export interface MarketDiscoveryConfig {
 
 export const marketDiscoveryConfig: MarketDiscoveryConfig = {
   enabled: true,
-  instrumentTypes: ['SPOT', 'SWAP'],
+  instrumentTypes: ['SWAP', 'FUTURES'],
   minimum24hQuoteVolume: 100_000_000,
   maximumSymbols: 12,
   excludedSymbols: [],
@@ -27,6 +27,15 @@ export const validateMarketDiscoveryConfig = (
 
   if (new Set(config.instrumentTypes).size !== config.instrumentTypes.length) {
     errors.push('instrumentTypes must not contain duplicates');
+  }
+
+  if (
+    config.instrumentTypes.some(
+      (instrumentType) =>
+        instrumentType !== 'SWAP' && instrumentType !== 'FUTURES',
+    )
+  ) {
+    errors.push('instrumentTypes may contain only SWAP and FUTURES');
   }
 
   if (

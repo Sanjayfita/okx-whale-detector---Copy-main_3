@@ -1,11 +1,11 @@
 import type { MarketDiscoveryConfig } from '../../config/marketDiscoveryConfig';
 import type { SymbolProfile } from '../../config/symbolProfiles';
-import type { SupportedInstType } from '../../types/instrument';
+import type { DerivativeInstType } from '../../types/instrument';
 import type { JsonLoader } from './OKXInstrumentClient';
 
 interface OKXTicker {
   instId: string;
-  instType: SupportedInstType;
+  instType: DerivativeInstType;
   last: number;
   volumeQuote24h: number;
 }
@@ -38,7 +38,7 @@ const parseTicker = (value: unknown): OKXTicker | null => {
 
   const instType = readString(value, 'instType');
 
-  if (instType !== 'SPOT' && instType !== 'SWAP') {
+  if (instType !== 'SWAP' && instType !== 'FUTURES') {
     throw new Error(
       `Unsupported OKX ticker instrument type: ${instType || 'missing'}`,
     );
@@ -46,14 +46,14 @@ const parseTicker = (value: unknown): OKXTicker | null => {
 
   const instId = readString(value, 'instId');
   const last = Number(readString(value, 'last'));
-  const volumeCurrency24h = Number(readString(value, 'volCcy24h'));
+  const volumeBase24h = Number(readString(value, 'volCcy24h'));
 
   if (
     !instId ||
     !Number.isFinite(last) ||
     last <= 0 ||
-    !Number.isFinite(volumeCurrency24h) ||
-    volumeCurrency24h < 0
+    !Number.isFinite(volumeBase24h) ||
+    volumeBase24h < 0
   ) {
     return null;
   }
@@ -62,8 +62,7 @@ const parseTicker = (value: unknown): OKXTicker | null => {
     instId,
     instType,
     last,
-    volumeQuote24h:
-      instType === 'SPOT' ? volumeCurrency24h : volumeCurrency24h * last,
+    volumeQuote24h: volumeBase24h * last,
   };
 };
 
@@ -90,10 +89,19 @@ const parseResponse = (value: unknown): OKXTicker[] => {
     .filter((ticker): ticker is OKXTicker => ticker !== null);
 };
 
-const isUsdtMarket = (ticker: OKXTicker): boolean =>
-  ticker.instType === 'SPOT'
-    ? ticker.instId.endsWith('-USDT')
-    : ticker.instId.endsWith('-USDT-SWAP');
+const isUsdtMarket = (ticker: OKXTicker): boolean => {
+  if (ticker.instType === 'SWAP') {
+    return ticker.instId.endsWith('-USDT-SWAP');
+  }
+
+  const parts = ticker.instId.split('-');
+  return (
+    parts.length >= 3 &&
+    parts[0] !== '' &&
+    parts[1] === 'USDT' &&
+    parts[parts.length - 1] !== 'SWAP'
+  );
+};
 
 export class OKXMarketDiscoveryClient {
   public constructor(
@@ -102,7 +110,7 @@ export class OKXMarketDiscoveryClient {
   ) {}
 
   private async fetchTickers(
-    instType: SupportedInstType,
+    instType: DerivativeInstType,
   ): Promise<OKXTicker[]> {
     const url = new URL('/api/v5/market/tickers', this.baseUrl);
 

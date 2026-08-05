@@ -1,30 +1,46 @@
 import type { QuoteCurrency } from './orderbook';
 
+/**
+ * Raw OKX instrument taxonomy used by adapters and historical-record readers.
+ * The live application scope is intentionally narrower; see
+ * DerivativeInstType and DerivativeMarketInstrumentConfig below.
+ */
 export enum InstType {
   SPOT = 'SPOT',
-  FUTURE = 'FUTURE',
+  FUTURES = 'FUTURES',
   SWAP = 'SWAP',
   OPTION = 'OPTION',
 }
 
-export type SupportedInstType = 'SPOT' | 'SWAP';
+/** Instrument types that public market-data and legacy replay records can identify. */
+export type SupportedInstType = 'SPOT' | 'FUTURES' | 'SWAP';
 
+/** The only instrument types permitted for new live collection and strategy research. */
+export type DerivativeInstType = 'FUTURES' | 'SWAP';
+
+/**
+ * Generic recorded instrument metadata.
+ *
+ * SPOT remains representable only so historical recordings, deterministic
+ * benchmarks, and legacy audit tools can still be parsed. New live discovery,
+ * configured symbols, and OKX instrument loading use the derivative subtype.
+ */
 export interface MarketInstrumentConfig {
   instId: string;
   instType: SupportedInstType;
   quoteCurrency: QuoteCurrency;
-
-  /*
-   * Order-book size is base-asset quantity for SPOT.
-   * For linear SWAP, it is a contract count, so this value is
-   * the amount of base asset represented by one contract.
-   */
   baseUnitsPerSize: number;
+}
+
+/** Instrument metadata accepted by the live futures/perpetual application. */
+export interface DerivativeMarketInstrumentConfig
+  extends MarketInstrumentConfig {
+  instType: DerivativeInstType;
 }
 
 export interface OKXPublicInstrument {
   instId: string;
-  instType: SupportedInstType;
+  instType: DerivativeInstType;
   state: string;
   baseCcy: string;
   quoteCcy: string;

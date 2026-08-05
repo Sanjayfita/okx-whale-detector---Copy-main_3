@@ -6,29 +6,29 @@ import {
 } from '../src/clients/okx/OKXInstrumentClient';
 import type { SymbolProfile } from '../src/config/symbolProfiles';
 
-const spotInstrument = {
-  instId: 'BTC-USDT',
-  instType: 'SPOT',
+const swapInstrument = {
+  instId: 'BTC-USDT-SWAP',
+  instType: 'SWAP',
   state: 'live',
   baseCcy: 'BTC',
   quoteCcy: 'USDT',
-  settleCcy: '',
-  ctType: '',
-  ctVal: '',
-  ctValCcy: '',
-  ctMult: '',
-};
-
-const swapInstrument = {
-  instId: 'XAU-USDT-SWAP',
-  instType: 'SWAP',
-  state: 'live',
-  baseCcy: '',
-  quoteCcy: '',
   settleCcy: 'USDT',
   ctType: 'linear',
-  ctVal: '0.001',
-  ctValCcy: 'XAU',
+  ctVal: '0.01',
+  ctValCcy: 'BTC',
+  ctMult: '1',
+};
+
+const futuresInstrument = {
+  instId: 'ETH-USDT-260925',
+  instType: 'FUTURES',
+  state: 'live',
+  baseCcy: 'ETH',
+  quoteCcy: 'USDT',
+  settleCcy: 'USDT',
+  ctType: 'linear',
+  ctVal: '0.1',
+  ctValCcy: 'ETH',
   ctMult: '1',
 };
 
@@ -39,19 +39,21 @@ const response = (data: unknown[]) => ({
 });
 
 const profiles: readonly SymbolProfile[] = [
-  { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
-  { symbol: 'XAU-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
+  { symbol: 'ETH-USDT-260925', instrumentType: 'FUTURES' },
 ];
 
 const createLoader = (): JsonLoader =>
   vi.fn(async (url: string) => {
     const instType = new URL(url).searchParams.get('instType');
 
-    return response(instType === 'SPOT' ? [spotInstrument] : [swapInstrument]);
+    return response(
+      instType === 'SWAP' ? [swapInstrument] : [futuresInstrument],
+    );
   });
 
 describe('OKXInstrumentClient', () => {
-  it('fetches once per configured instrument type', async () => {
+  it('fetches once per configured derivative instrument type', async () => {
     const loader = createLoader();
     const client = new OKXInstrumentClient(loader);
 
@@ -59,48 +61,48 @@ describe('OKXInstrumentClient', () => {
 
     expect(loader).toHaveBeenCalledTimes(2);
     expect(loader).toHaveBeenCalledWith(
-      expect.stringContaining('instType=SPOT'),
+      expect.stringContaining('instType=SWAP'),
     );
     expect(loader).toHaveBeenCalledWith(
-      expect.stringContaining('instType=SWAP'),
+      expect.stringContaining('instType=FUTURES'),
     );
   });
 
-  it('resolves spot order-book size as base-asset units', async () => {
+  it('derives linear perpetual base units from ctVal and ctMult', async () => {
     const client = new OKXInstrumentClient(createLoader());
     const instruments = await client.loadMarketInstruments(profiles);
 
-    expect(instruments.get('BTC-USDT')).toEqual({
-      instId: 'BTC-USDT',
-      instType: 'SPOT',
-      quoteCurrency: 'USDT',
-      baseUnitsPerSize: 1,
-    });
-  });
-
-  it('derives linear swap base units from ctVal and ctMult', async () => {
-    const loader: JsonLoader = async (url) => {
-      const instType = new URL(url).searchParams.get('instType');
-
-      return response(
-        instType === 'SPOT'
-          ? [spotInstrument]
-          : [{ ...swapInstrument, ctVal: '0.001', ctMult: '10' }],
-      );
-    };
-    const client = new OKXInstrumentClient(loader);
-    const instruments = await client.loadMarketInstruments(profiles);
-
-    expect(instruments.get('XAU-USDT-SWAP')).toEqual({
-      instId: 'XAU-USDT-SWAP',
+    expect(instruments.get('BTC-USDT-SWAP')).toEqual({
+      instId: 'BTC-USDT-SWAP',
       instType: 'SWAP',
       quoteCurrency: 'USDT',
       baseUnitsPerSize: 0.01,
     });
   });
 
+  it('derives linear expiry-futures base units from ctVal and ctMult', async () => {
+    const loader: JsonLoader = async (url) => {
+      const instType = new URL(url).searchParams.get('instType');
+
+      return response(
+        instType === 'SWAP'
+          ? [swapInstrument]
+          : [{ ...futuresInstrument, ctVal: '0.1', ctMult: '10' }],
+      );
+    };
+    const client = new OKXInstrumentClient(loader);
+    const instruments = await client.loadMarketInstruments(profiles);
+
+    expect(instruments.get('ETH-USDT-260925')).toEqual({
+      instId: 'ETH-USDT-260925',
+      instType: 'FUTURES',
+      quoteCurrency: 'USDT',
+      baseUnitsPerSize: 1,
+    });
+  });
+
   it.each(['', '0', '-1', 'not-a-number'])(
-    'rejects an invalid swap contract multiplier %j',
+    'rejects an invalid contract multiplier %j',
     async (ctMult) => {
       const client = new OKXInstrumentClient(async () =>
         response([{ ...swapInstrument, ctMult }]),
@@ -108,7 +110,7 @@ describe('OKXInstrumentClient', () => {
 
       await expect(
         client.loadMarketInstruments([
-          { symbol: 'XAU-USDT-SWAP', instrumentType: 'SWAP' },
+          { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
         ]),
       ).rejects.toThrow('Invalid contract value metadata');
     },
@@ -118,12 +120,12 @@ describe('OKXInstrumentClient', () => {
     const loader = createLoader();
     const client = new OKXInstrumentClient(loader);
     const duplicates: readonly SymbolProfile[] = [
-      { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
-      { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
+      { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
+      { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
     ];
 
     await expect(client.loadMarketInstruments(duplicates)).rejects.toThrow(
-      'Duplicate symbol profile: BTC-USDT',
+      'Duplicate symbol profile: BTC-USDT-SWAP',
     );
     expect(loader).not.toHaveBeenCalled();
   });
@@ -133,55 +135,57 @@ describe('OKXInstrumentClient', () => {
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'MISSING-USDT', instrumentType: 'SPOT' },
+        { symbol: 'MISSING-USDT-SWAP', instrumentType: 'SWAP' },
       ]),
-    ).rejects.toThrow('OKX did not return configured instrument MISSING-USDT');
+    ).rejects.toThrow(
+      'OKX did not return configured instrument MISSING-USDT-SWAP',
+    );
   });
 
   it('rejects an instrument that is not live', async () => {
     const client = new OKXInstrumentClient(async () =>
-      response([{ ...spotInstrument, state: 'suspend' }]),
+      response([{ ...swapInstrument, state: 'suspend' }]),
     );
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
+        { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
       ]),
-    ).rejects.toThrow('BTC-USDT is not live');
+    ).rejects.toThrow('BTC-USDT-SWAP is not live');
   });
 
   it('rejects a profile and exchange instrument type mismatch', async () => {
     const client = new OKXInstrumentClient(async () =>
-      response([{ ...spotInstrument, instType: 'SWAP' }]),
+      response([{ ...futuresInstrument, instType: 'SWAP' }]),
     );
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
+        { symbol: 'ETH-USDT-260925', instrumentType: 'FUTURES' },
       ]),
-    ).rejects.toThrow('Instrument type mismatch for BTC-USDT');
+    ).rejects.toThrow('Instrument type mismatch for ETH-USDT-260925');
   });
 
-  it('rejects inverse swaps because their notional formula differs', async () => {
+  it('rejects inverse contracts because their notional formula differs', async () => {
     const client = new OKXInstrumentClient(async () =>
       response([{ ...swapInstrument, ctType: 'inverse' }]),
     );
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'XAU-USDT-SWAP', instrumentType: 'SWAP' },
+        { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
       ]),
     ).rejects.toThrow('Unsupported contract type');
   });
 
-  it('rejects swap contract values denominated outside the base asset', async () => {
+  it('rejects contract values denominated outside the base asset', async () => {
     const client = new OKXInstrumentClient(async () =>
       response([{ ...swapInstrument, ctValCcy: 'USDT' }]),
     );
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'XAU-USDT-SWAP', instrumentType: 'SWAP' },
+        { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
       ]),
     ).rejects.toThrow('Unsupported contract value currency');
   });
@@ -195,7 +199,7 @@ describe('OKXInstrumentClient', () => {
 
     await expect(
       client.loadMarketInstruments([
-        { symbol: 'BTC-USDT', instrumentType: 'SPOT' },
+        { symbol: 'BTC-USDT-SWAP', instrumentType: 'SWAP' },
       ]),
     ).rejects.toThrow('Rate limit reached');
   });
