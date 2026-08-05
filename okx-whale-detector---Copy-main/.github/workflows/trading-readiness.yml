@@ -1,0 +1,89 @@
+name: R16-R20 Trading Research Readiness
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/r16-r20-trading-readiness
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/trading-readiness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OKX_SKIP_AUTO_START: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: R16-R20 focused validation
+        run: npm run trading:validate
+
+      - name: Create demonstration evidence
+        shell: bash
+        run: |
+          mkdir -p data/evaluations/eval-r16-r20-ci
+          cat > data/evaluations/eval-r16-r20-ci/qualified-alerts.ndjson <<'EOF'
+          {"schemaVersion":1,"evaluationId":"eval-r16-r20-ci","alertId":"ci-1","instrumentId":"BTC-USDT","detectedAt":1000,"recordedAt":1001,"direction":"BULLISH","signalType":"BUY_PRESSURE","confidence":90,"referencePrice":100,"bestBid":99.9,"bestAsk":100.1,"spreadPercent":0.2,"sourceCommit":"ci","configurationFingerprint":"ci","qualified":true,"liveOrderExecutionAllowed":false}
+          EOF
+          cat > data/evaluations/eval-r16-r20-ci/outcomes.ndjson <<'EOF'
+          {"schemaVersion":1,"evaluationId":"eval-r16-r20-ci","alertId":"ci-1","instrumentId":"BTC-USDT","detectedAt":1000,"horizonMinutes":1,"observedAt":61000,"referencePrice":100,"observedPrice":101,"rawReturnPercent":1,"directionAdjustedReturnPercent":1,"maximumFavorableExcursionPercent":1.2,"maximumAdverseExcursionPercent":0.3,"complete":true,"liveOrderExecutionAllowed":false}
+          EOF
+
+      - name: Generate profitability and statistical reports
+        run: |
+          npm run evidence:profitability -- eval-r16-r20-ci | tee profitability.txt
+          npm run evidence:statistics -- eval-r16-r20-ci --bootstrap-iterations 100 | tee statistics.txt
+
+      - name: Verify read-only dashboard
+        shell: bash
+        run: |
+          npm run evidence:dashboard -- eval-r16-r20-ci > dashboard-server.txt 2>&1 &
+          DASHBOARD_PID=$!
+          trap 'kill $DASHBOARD_PID || true' EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:4173/health > dashboard-health.json; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:4173/ > evidence-dashboard.html
+          grep -q 'READ ONLY · EXECUTION DISABLED' evidence-dashboard.html
+          grep -q 'Statistical validation' evidence-dashboard.html
+          grep -q '"liveOrderExecutionAllowed":false' dashboard-health.json
+          grep -q '"orderExecutionAuthorized":false' dashboard-health.json
+
+      - name: Upload research artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: r16-r20-research-readiness
+          retention-days: 30
+          path: |
+            profitability.txt
+            statistics.txt
+            dashboard-server.txt
+            dashboard-health.json
+            evidence-dashboard.html
+            data/evaluations/eval-r16-r20-ci/reports/*.json

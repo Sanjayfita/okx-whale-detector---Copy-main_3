@@ -1,0 +1,138 @@
+name: Profitability and Dashboard Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/r15-browser-profitability-dashboard
+      - 'research/**'
+    paths:
+      - 'src/research/evidenceEvaluationDefinition.ts'
+      - 'src/research/evidenceIndependence.ts'
+      - 'src/research/evidenceProfitability.ts'
+      - 'src/research/statisticalValidation.ts'
+      - 'src/tools/generateEvidenceProfitability.ts'
+      - 'src/tools/generateStatisticalValidation.ts'
+      - 'src/tools/serveEvidenceDashboard.ts'
+      - 'src/tools/smokeTestEvidencePipeline.ts'
+      - 'test/EvidenceEvaluationDefinition.test.ts'
+      - 'test/EvidenceIndependence.test.ts'
+      - 'test/EvidenceProfitability.test.ts'
+      - 'test/StatisticalValidation.test.ts'
+      - 'test/EvidenceDashboard.test.ts'
+      - 'package.json'
+      - '.github/workflows/profitability-dashboard.yml'
+  pull_request:
+    paths:
+      - 'src/research/evidenceEvaluationDefinition.ts'
+      - 'src/research/evidenceIndependence.ts'
+      - 'src/research/evidenceProfitability.ts'
+      - 'src/research/statisticalValidation.ts'
+      - 'src/tools/generateEvidenceProfitability.ts'
+      - 'src/tools/generateStatisticalValidation.ts'
+      - 'src/tools/serveEvidenceDashboard.ts'
+      - 'src/tools/smokeTestEvidencePipeline.ts'
+      - 'test/EvidenceEvaluationDefinition.test.ts'
+      - 'test/EvidenceIndependence.test.ts'
+      - 'test/EvidenceProfitability.test.ts'
+      - 'test/StatisticalValidation.test.ts'
+      - 'test/EvidenceDashboard.test.ts'
+      - 'package.json'
+      - '.github/workflows/profitability-dashboard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and lint
+        run: |
+          npm run typecheck
+          npm run lint
+
+      - name: Focused evidence tests
+        run: >-
+          npm test --
+          test/EvidenceEvaluationDefinition.test.ts
+          test/EvidenceIndependence.test.ts
+          test/EvidenceProfitability.test.ts
+          test/StatisticalValidation.test.ts
+          test/EvidenceDashboard.test.ts
+
+      - name: Paper trading simulation
+        run: npm run paper:simulate | tee paper-simulation.txt
+
+      - name: Evidence pipeline smoke test
+        run: npm run evidence:smoke | tee evidence-smoke.txt
+
+      - name: Research dashboard simulation
+        run: npm run dashboard:simulate | tee dashboard-simulation.txt
+
+      - name: Create demonstration evidence data
+        shell: bash
+        run: |
+          mkdir -p data/evaluations/eval-ci-demo
+          cat > data/evaluations/eval-ci-demo/qualified-alerts.ndjson <<'EOF'
+          {"schemaVersion":1,"evaluationId":"eval-ci-demo","alertId":"ci-1","instrumentId":"BTC-USDT","detectedAt":1000,"recordedAt":1001,"direction":"BULLISH","signalType":"BUY_PRESSURE","confidence":90,"referencePrice":100,"bestBid":99.9,"bestAsk":100.1,"spreadPercent":0.2,"sourceCommit":"ci","configurationFingerprint":"ci","qualified":true,"liveOrderExecutionAllowed":false}
+          EOF
+          cat > data/evaluations/eval-ci-demo/outcomes.ndjson <<'EOF'
+          {"schemaVersion":1,"evaluationId":"eval-ci-demo","alertId":"ci-1","instrumentId":"BTC-USDT","detectedAt":1000,"horizonMinutes":15,"observedAt":901000,"referencePrice":100,"observedPrice":101,"rawReturnPercent":1,"directionAdjustedReturnPercent":1,"maximumFavorableExcursionPercent":1.2,"maximumAdverseExcursionPercent":0.3,"complete":true,"liveOrderExecutionAllowed":false}
+          EOF
+
+      - name: Generate profitability report
+        run: npm run evidence:profitability -- eval-ci-demo | tee profitability.txt
+
+      - name: Generate statistical validation report
+        run: npm run evidence:statistics -- eval-ci-demo | tee statistical-validation.txt
+
+      - name: Verify browser dashboard health
+        shell: bash
+        run: |
+          npm run evidence:dashboard -- eval-ci-demo > dashboard-server.txt 2>&1 &
+          DASHBOARD_PID=$!
+          trap 'kill $DASHBOARD_PID || true' EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:4173/health > dashboard-health.json; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q '"liveOrderExecutionAllowed":false' dashboard-health.json
+          grep -q '"orderExecutionAuthorized":false' dashboard-health.json
+          curl --fail --silent http://127.0.0.1:4173/ > evidence-dashboard.html
+          grep -q 'READ ONLY · EXECUTION DISABLED' evidence-dashboard.html
+          grep -q 'Descriptive performance by horizon' evidence-dashboard.html
+          grep -q 'Independent episodes' evidence-dashboard.html
+          grep -q 'Primary 15m performance by instrument' evidence-dashboard.html
+
+      - name: Upload profitability artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: profitability-dashboard-results
+          retention-days: 30
+          path: |
+            paper-simulation.txt
+            evidence-smoke.txt
+            dashboard-simulation.txt
+            profitability.txt
+            statistical-validation.txt
+            dashboard-server.txt
+            dashboard-health.json
+            evidence-dashboard.html
+            data/evaluations/eval-ci-demo/reports/profitability-report.json
+            data/evaluations/eval-ci-demo/reports/statistical-validation-report.json

@@ -1,0 +1,101 @@
+[1mdiff --git a/src/external/providers/polymarket/PolymarketPublicClient.ts b/src/external/providers/polymarket/PolymarketPublicClient.ts[m
+[1mindex d8e3200..4662ae9 100644[m
+[1m--- a/src/external/providers/polymarket/PolymarketPublicClient.ts[m
+[1m+++ b/src/external/providers/polymarket/PolymarketPublicClient.ts[m
+[36m@@ -66,8 +66,7 @@[m [mconst parseMarkets = (payload: readonly unknown[]): PolymarketMarket[] =>[m
+         slug: String(value.slug ?? ''),[m
+         liquidity: toFiniteNumber(value.liquidityNum ?? value.liquidity),[m
+         volume: toFiniteNumber(value.volumeNum ?? value.volume),[m
+[31m-        endDate:[m
+[31m-          typeof value.endDate === 'string' ? value.endDate : undefined,[m
+[32m+[m[32m        endDate: typeof value.endDate === 'string' ? value.endDate : undefined,[m
+         category:[m
+           typeof value.category === 'string' ? value.category : undefined,[m
+       },[m
+[1mdiff --git a/src/external/providers/polymarket/PolymarketWhaleDetector.ts b/src/external/providers/polymarket/PolymarketWhaleDetector.ts[m
+[1mindex 214ce1b..0ea7121 100644[m
+[1m--- a/src/external/providers/polymarket/PolymarketWhaleDetector.ts[m
+[1m+++ b/src/external/providers/polymarket/PolymarketWhaleDetector.ts[m
+[36m@@ -46,11 +46,15 @@[m [mconst MACRO_KEYWORDS = [[m
+ [m
+ const inferAsset = (text: string): string | undefined => {[m
+   const normalized = text.toLowerCase();[m
+[31m-  if (normalized.includes('bitcoin') || normalized.includes('btc')) return 'BTC';[m
+[31m-  if (normalized.includes('ethereum') || normalized.includes('eth')) return 'ETH';[m
+[31m-  if (normalized.includes('solana') || normalized.includes(' sol')) return 'SOL';[m
+[32m+[m[32m  if (normalized.includes('bitcoin') || normalized.includes('btc'))[m
+[32m+[m[32m    return 'BTC';[m
+[32m+[m[32m  if (normalized.includes('ethereum') || normalized.includes('eth'))[m
+[32m+[m[32m    return 'ETH';[m
+[32m+[m[32m  if (normalized.includes('solana') || normalized.includes(' sol'))[m
+[32m+[m[32m    return 'SOL';[m
+   if (normalized.includes('xrp')) return 'XRP';[m
+[31m-  if (normalized.includes('dogecoin') || normalized.includes('doge')) return 'DOGE';[m
+[32m+[m[32m  if (normalized.includes('dogecoin') || normalized.includes('doge'))[m
+[32m+[m[32m    return 'DOGE';[m
+   if (normalized.includes('usdt')) return 'USDT';[m
+   if (normalized.includes('usdc')) return 'USDC';[m
+   return undefined;[m
+[36m@@ -103,7 +107,10 @@[m [mexport class PolymarketWhaleDetector {[m
+       1,[m
+       notionalUsd / Math.max(market.liquidity, 1),[m
+     );[m
+[31m-    const confidence = Math.min(75, 35 + tradeScale * 25 + liquidityImpact * 15);[m
+[32m+[m[32m    const confidence = Math.min([m
+[32m+[m[32m      75,[m
+[32m+[m[32m      35 + tradeScale * 25 + liquidityImpact * 15,[m
+[32m+[m[32m    );[m
+     const asset = inferAsset(`${market.question} ${market.category ?? ''}`);[m
+ [m
+     return {[m
+[1mdiff --git a/src/tools/scanPolymarketWhales.ts b/src/tools/scanPolymarketWhales.ts[m
+[1mindex dc26990..0b2cdfa 100644[m
+[1m--- a/src/tools/scanPolymarketWhales.ts[m
+[1m+++ b/src/tools/scanPolymarketWhales.ts[m
+[36m@@ -13,7 +13,10 @@[m [minterface ScanOptions {[m
+   reportPath?: string;[m
+ }[m
+ [m
+[31m-const parsePositiveNumber = (value: string | undefined, flag: string): number => {[m
+[32m+[m[32mconst parsePositiveNumber = ([m
+[32m+[m[32m  value: string | undefined,[m
+[32m+[m[32m  flag: string,[m
+[32m+[m[32m): number => {[m
+   const parsed = Number(value);[m
+   if (!Number.isFinite(parsed) || parsed <= 0) {[m
+     throw new Error(`${flag} requires a positive number`);[m
+[36m@@ -48,7 +51,7 @@[m [mconst parseOptions = (args: readonly string[]): ScanOptions => {[m
+     } else if (flag === '--report') {[m
+       options.reportPath = value?.startsWith('--')[m
+         ? 'data/reports/polymarket-whale-scan.json'[m
+[31m-        : value ?? 'data/reports/polymarket-whale-scan.json';[m
+[32m+[m[32m        : (value ?? 'data/reports/polymarket-whale-scan.json');[m
+       if (value && !value.startsWith('--')) index += 1;[m
+     } else {[m
+       throw new Error(`Unknown Polymarket scan option: ${flag}`);[m
+[36m@@ -99,7 +102,9 @@[m [mconst main = async (): Promise<void> => {[m
+   for (const signal of signals.slice(0, 20)) {[m
+     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');[m
+     console.log(`${signal.direction} | ${signal.asset ?? 'MACRO'}`);[m
+[31m-    console.log(`Notional: $${(signal.notionalUsd ?? 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}`);[m
+[32m+[m[32m    console.log([m
+[32m+[m[32m      `Notional: $${(signal.notionalUsd ?? 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}`,[m
+[32m+[m[32m    );[m
+     console.log(`Confidence: ${signal.confidence.toFixed(1)}%`);[m
+     console.log(signal.description);[m
+   }[m
+[1mdiff --git a/test/PolymarketWhaleDetector.test.ts b/test/PolymarketWhaleDetector.test.ts[m
+[1mindex ba35ef7..5e0afc8 100644[m
+[1m--- a/test/PolymarketWhaleDetector.test.ts[m
+[1m+++ b/test/PolymarketWhaleDetector.test.ts[m
+[36m@@ -67,9 +67,7 @@[m [mdescribe('PolymarketWhaleDetector', () => {[m
+     expect([m
+       detector.detect({ ...trade, size: 100 }, market, 1_000_000),[m
+     ).toBeUndefined();[m
+[31m-    expect([m
+[31m-      detector.detect(trade, market, 2_100_001),[m
+[31m-    ).toBeUndefined();[m
+[32m+[m[32m    expect(detector.detect(trade, market, 2_100_001)).toBeUndefined();[m
+     expect([m
+       detector.detect(trade, { ...market, liquidity: 100 }, 1_000_000),[m
+     ).toBeUndefined();[m
