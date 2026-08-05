@@ -163,6 +163,9 @@ export const buildAutonomousResearchCycle = (input: {
       payload: {
         familyFingerprint: input.hypothesisReport.familyFingerprint,
         generatedCount: input.hypothesisReport.generatedCount,
+        readyCount: input.hypothesisReport.readyCount,
+        blockedCount: input.hypothesisReport.blockedCount,
+        rejectionReasons: input.hypothesisReport.rejectionReasons,
       },
       policy,
     }),
@@ -177,6 +180,9 @@ export const buildAutonomousResearchCycle = (input: {
       payload: {
         familyFingerprint: input.featureReport.familyFingerprint,
         generatedCount: input.featureReport.generatedCount,
+        readyCount: input.featureReport.readyCount,
+        blockedCount: input.featureReport.blockedCount,
+        rejectionReasons: input.featureReport.rejectionReasons,
       },
       policy,
     }),
@@ -200,6 +206,8 @@ export const buildAutonomousResearchCycle = (input: {
           familyFingerprint: report.familyFingerprint,
           hypothesisFamilyId: report.hypothesisFamilyId,
           effectiveHypothesisCount: report.effectiveHypothesisCount,
+          status: report.status,
+          rejectionReasons: report.rejectionReasons,
         },
         policy,
       }),
@@ -248,7 +256,12 @@ export const buildAutonomousResearchCycle = (input: {
       priority: 40,
       createdAt: input.createdAt,
       resourceUnits: policy.lightweightResourceUnits,
-      payload: { backtestPlanFingerprint: input.backtestPlan.planFingerprint },
+      payload: {
+        backtestPlanFingerprint: input.backtestPlan.planFingerprint,
+        workUnitCount: input.backtestPlan.workUnitCount,
+        status: input.backtestPlan.status,
+        rejectionReasons: input.backtestPlan.rejectionReasons,
+      },
       policy,
     }),
     taskSpec({
@@ -293,16 +306,60 @@ export const buildAutonomousResearchCycle = (input: {
   const candidateFamilyFingerprints = input.candidateReports
     .map((report) => report.familyFingerprint)
     .sort();
+  const uniqueBlockingReasons = [...new Set(blockingReasons)].sort();
+  const status =
+    uniqueBlockingReasons.length === 0 ? 'READY_TO_SCHEDULE' : 'BLOCKED';
   const cycleFingerprint = fingerprintResearchValue({
     cycleId,
     datasetFingerprint,
     codeCommit,
     configurationHash,
-    hypothesisFamilyFingerprint: input.hypothesisReport.familyFingerprint,
-    featureFamilyFingerprint: input.featureReport.familyFingerprint,
-    candidateFamilyFingerprints,
-    backtestPlanFingerprint: input.backtestPlan.planFingerprint,
-    taskPayloadFingerprints: tasks.map((task) => task.payloadFingerprint).sort(),
+    createdAt: input.createdAt,
+    hypothesisReport: {
+      familyFingerprint: input.hypothesisReport.familyFingerprint,
+      status: input.hypothesisReport.status,
+      rejectionReasons: input.hypothesisReport.rejectionReasons,
+      hypotheses: input.hypothesisReport.hypotheses.map((hypothesis) => ({
+        fingerprint: hypothesis.hypothesisFingerprint,
+        status: hypothesis.status,
+        blockingReasons: hypothesis.blockingReasons,
+      })),
+    },
+    featureReport: {
+      familyFingerprint: input.featureReport.familyFingerprint,
+      status: input.featureReport.status,
+      rejectionReasons: input.featureReport.rejectionReasons,
+      candidates: input.featureReport.candidates.map((candidate) => ({
+        fingerprint: candidate.featureFingerprint,
+        status: candidate.status,
+        blockingReasons: candidate.blockingReasons,
+      })),
+    },
+    candidateReports: input.candidateReports
+      .map((report) => ({
+        familyFingerprint: report.familyFingerprint,
+        status: report.status,
+        rejectionReasons: report.rejectionReasons,
+        effectiveHypothesisCount: report.effectiveHypothesisCount,
+        candidateFingerprints: report.candidates.map(
+          (candidate) => candidate.candidateFingerprint,
+        ),
+      }))
+      .sort((left, right) =>
+        left.familyFingerprint.localeCompare(right.familyFingerprint),
+      ),
+    backtestPlan: {
+      planFingerprint: input.backtestPlan.planFingerprint,
+      status: input.backtestPlan.status,
+      rejectionReasons: input.backtestPlan.rejectionReasons,
+      workUnitFingerprints: input.backtestPlan.workUnits.map(
+        (workUnit) => workUnit.workUnitFingerprint,
+      ),
+    },
+    policy,
+    tasks,
+    status,
+    blockingReasons: uniqueBlockingReasons,
   });
   return {
     cycleId,
@@ -324,9 +381,9 @@ export const buildAutonomousResearchCycle = (input: {
     ),
     effectiveHypothesisCount,
     backtestWorkUnitCount: input.backtestPlan.workUnitCount,
-    taskSpecs: blockingReasons.length === 0 ? tasks : [],
-    status: blockingReasons.length === 0 ? 'READY_TO_SCHEDULE' : 'BLOCKED',
-    blockingReasons: [...new Set(blockingReasons)].sort(),
+    taskSpecs: status === 'READY_TO_SCHEDULE' ? tasks : [],
+    status,
+    blockingReasons: uniqueBlockingReasons,
     createdAt: input.createdAt,
     discoveryOnly: true,
     holdoutAccessed: false,
