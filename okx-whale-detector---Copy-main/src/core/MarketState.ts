@@ -15,8 +15,8 @@ import { BehaviorTransitionTracker } from './BehaviorTransitionTracker';
 import { TradeFlowTracker } from './TradeFlowTracker';
 
 const DEFAULT_INSTRUMENT: MarketInstrumentConfig = {
-  instId: 'UNKNOWN-USDT',
-  instType: 'SPOT',
+  instId: 'UNKNOWN-USDT-SWAP',
+  instType: 'SWAP',
   quoteCurrency: 'USDT',
   baseUnitsPerSize: 1,
 };
