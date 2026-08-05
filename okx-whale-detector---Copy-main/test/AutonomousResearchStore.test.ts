@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { discoverAdaptiveFeatures } from '../src/autonomy/AdaptiveFeatureDiscovery';
 import { buildAutonomousResearchCycle } from '../src/autonomy/AutonomousResearchLaboratory';
-import { planDistributedBacktests } from '../src/autonomy/DistributedBacktest';
+import {
+  createBacktestWorkUnitResult,
+  planDistributedBacktests,
+} from '../src/autonomy/DistributedBacktest';
 import { generateAutonomousHypotheses } from '../src/autonomy/ResearchHypothesis';
 import { generateStrategyCandidates } from '../src/research/StrategyCandidateGenerator';
 import { PostgresAutonomousResearchStore } from '../src/storage/AutonomousResearchStore';
@@ -200,7 +203,7 @@ describe('PostgresAutonomousResearchStore', () => {
     expect(pool.connection.calls).toEqual([]);
   });
 
-  it('persists task state and backtest results through parameterized writes', async () => {
+  it('persists task state and verified backtest results through parameterized writes', async () => {
     const pool = new RecordingPool();
     const store = new PostgresAutonomousResearchStore(pool);
     await store.persistTaskSnapshot({
@@ -222,10 +225,38 @@ describe('PostgresAutonomousResearchStore', () => {
       failureReason: null,
       updatedAt: 2,
     });
-    await store.persistBacktestResult({
+    const backtestResult = createBacktestWorkUnitResult({
       workUnitId: 'work-1',
       workUnitFingerprint: 'work-fingerprint',
-      resultFingerprint: 'result-fingerprint',
+      workerId: 'worker',
+      startedAt: 1,
+      completedAt: 2,
+      observationCount: 1,
+      independentEpisodeCount: 1,
+      tradeCount: 1,
+      netPnl: 1,
+      grossProfit: 1,
+      grossLoss: 0,
+      maximumDrawdownFraction: 0,
+      status: 'COMPLETED',
+      failureReason: null,
+      liveExecutionAllowed: false,
+    });
+    await store.persistBacktestResult(backtestResult);
+
+    expect(pool.directCalls).toHaveLength(2);
+    expect(pool.directCalls[0]?.text).toContain('UPDATE');
+    expect(pool.directCalls[1]?.text).toContain(
+      'distributed_backtest_results',
+    );
+  });
+
+  it('rejects tampered backtest results before issuing SQL', async () => {
+    const pool = new RecordingPool();
+    const store = new PostgresAutonomousResearchStore(pool);
+    const result = createBacktestWorkUnitResult({
+      workUnitId: 'work-1',
+      workUnitFingerprint: 'work-fingerprint',
       workerId: 'worker',
       startedAt: 1,
       completedAt: 2,
@@ -241,10 +272,9 @@ describe('PostgresAutonomousResearchStore', () => {
       liveExecutionAllowed: false,
     });
 
-    expect(pool.directCalls).toHaveLength(2);
-    expect(pool.directCalls[0]?.text).toContain('UPDATE');
-    expect(pool.directCalls[1]?.text).toContain(
-      'distributed_backtest_results',
-    );
+    await expect(
+      store.persistBacktestResult({ ...result, netPnl: 2 }),
+    ).rejects.toThrow('fingerprint mismatch');
+    expect(pool.directCalls).toEqual([]);
   });
 });
