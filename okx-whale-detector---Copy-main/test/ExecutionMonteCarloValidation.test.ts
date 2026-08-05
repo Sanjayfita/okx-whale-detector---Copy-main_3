@@ -129,6 +129,43 @@ describe('runExecutionMonteCarlo', () => {
     expect(report.netReturnFraction.p50).toBeLessThan(0);
   });
 
+  it('counts temporary ruin even when the path later recovers', () => {
+    const report = runExecutionMonteCarlo({
+      trades: [
+        {
+          ...trade('loss', 'episode-1', -600, 0),
+          feeCost: 0,
+          slippageCost: 0,
+          latencyMs: 0,
+        },
+        {
+          ...trade('recovery', 'episode-1', 700, 0),
+          feeCost: 0,
+          slippageCost: 0,
+          latencyMs: 0,
+        },
+      ],
+      policy: deterministicPolicy({
+        iterations: 20,
+        initialEquity: 1_000,
+        ruinEquityFraction: 0.5,
+        minimumIndependentEpisodes: 1,
+        feeMultiplierRange: [0, 0],
+        fundingMultiplierRange: [0, 0],
+        positiveFundingReceiptHaircutRange: [0, 0],
+        slippageMultiplierRange: [0, 0],
+        latencyMultiplierRange: [1, 1],
+        latencyImpactBpsPerSecond: 0,
+        missedFillProbability: 0,
+        partialFillFractionRange: [1, 1],
+      }),
+    });
+
+    expect(report.endingEquity.p50).toBe(1_100);
+    expect(report.probabilityOfPositiveReturn).toBe(1);
+    expect(report.probabilityOfRuin).toBe(1);
+  });
+
   it('rejects underpowered episode samples', () => {
     expect(() =>
       runExecutionMonteCarlo({
