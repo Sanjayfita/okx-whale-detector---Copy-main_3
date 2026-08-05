@@ -86,6 +86,11 @@ export interface BacktestWorkUnitResult {
   readonly liveExecutionAllowed: false;
 }
 
+export type BacktestWorkUnitResultPayload = Omit<
+  BacktestWorkUnitResult,
+  'resultFingerprint'
+>;
+
 export interface CandidateScenarioBacktestAggregate {
   readonly candidateId: string;
   readonly scenarioId: string;
@@ -147,6 +152,89 @@ const hashToShard = (value: string, shardCount: number): number => {
 const assertUnique = (values: readonly string[], name: string): void => {
   if (new Set(values).size !== values.length) {
     throw new Error(`${name} must be unique`);
+  }
+};
+
+const resultPayload = (
+  result: BacktestWorkUnitResult | BacktestWorkUnitResultPayload,
+): BacktestWorkUnitResultPayload => ({
+  workUnitId: result.workUnitId,
+  workUnitFingerprint: result.workUnitFingerprint,
+  workerId: result.workerId,
+  startedAt: result.startedAt,
+  completedAt: result.completedAt,
+  observationCount: result.observationCount,
+  independentEpisodeCount: result.independentEpisodeCount,
+  tradeCount: result.tradeCount,
+  netPnl: result.netPnl,
+  grossProfit: result.grossProfit,
+  grossLoss: result.grossLoss,
+  maximumDrawdownFraction: result.maximumDrawdownFraction,
+  status: result.status,
+  failureReason: result.failureReason,
+  liveExecutionAllowed: result.liveExecutionAllowed,
+});
+
+export const fingerprintBacktestWorkUnitResult = (
+  result: BacktestWorkUnitResult | BacktestWorkUnitResultPayload,
+): string => fingerprintResearchValue(resultPayload(result));
+
+export const createBacktestWorkUnitResult = (
+  payload: BacktestWorkUnitResultPayload,
+): BacktestWorkUnitResult => ({
+  ...payload,
+  resultFingerprint: fingerprintBacktestWorkUnitResult(payload),
+});
+
+export const validateBacktestWorkUnitResult = (
+  result: BacktestWorkUnitResult,
+): void => {
+  requireText(result.workUnitId, 'workUnitId');
+  requireText(result.workUnitFingerprint, 'workUnitFingerprint');
+  requireText(result.resultFingerprint, 'resultFingerprint');
+  requireText(result.workerId, 'workerId');
+  requireTimestamp(result.startedAt, 'startedAt');
+  requireTimestamp(result.completedAt, 'completedAt');
+  if (result.completedAt < result.startedAt) {
+    throw new Error('backtest result completed before it started');
+  }
+  for (const [name, value] of [
+    ['observationCount', result.observationCount],
+    ['independentEpisodeCount', result.independentEpisodeCount],
+    ['tradeCount', result.tradeCount],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${name} must be a non-negative safe integer`);
+    }
+  }
+  for (const [name, value] of [
+    ['netPnl', result.netPnl],
+    ['grossProfit', result.grossProfit],
+    ['grossLoss', result.grossLoss],
+    ['maximumDrawdownFraction', result.maximumDrawdownFraction],
+  ] as const) {
+    if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
+  }
+  if (
+    result.grossProfit < 0 ||
+    result.grossLoss < 0 ||
+    result.maximumDrawdownFraction < 0 ||
+    result.maximumDrawdownFraction > 1 ||
+    result.liveExecutionAllowed !== false
+  ) {
+    throw new Error('invalid distributed backtest result metrics');
+  }
+  if ((result.status === 'FAILED') !== (result.failureReason !== null)) {
+    throw new Error('failed result must provide exactly one failure reason');
+  }
+};
+
+export const assertBacktestWorkUnitResultIntegrity = (
+  result: BacktestWorkUnitResult,
+): void => {
+  validateBacktestWorkUnitResult(result);
+  if (result.resultFingerprint !== fingerprintBacktestWorkUnitResult(result)) {
+    throw new Error(`backtest result fingerprint mismatch for ${result.workUnitId}`);
   }
 };
 
@@ -222,6 +310,16 @@ export const planDistributedBacktests = (input: {
   if (candidates.length === 0) rejectionReasons.push('NO_CANDIDATES');
   if (scenarios.length === 0) rejectionReasons.push('NO_SCENARIOS');
   if (observations.length === 0) rejectionReasons.push('NO_OBSERVATIONS');
+
+  const episodeScope = new Map<string, string>();
+  for (const observation of observations) {
+    const scope = `${observation.foldId}\u0000${observation.instrumentId}`;
+    const existing = episodeScope.get(observation.episodeId);
+    if (existing !== undefined && existing !== scope) {
+      rejectionReasons.push('EPISODE_SPANS_FOLD_OR_INSTRUMENT');
+    }
+    episodeScope.set(observation.episodeId, scope);
+  }
 
   const grouped = new Map<string, BacktestObservationReference[]>();
   for (const observation of observations) {
@@ -315,55 +413,15 @@ export const planDistributedBacktests = (input: {
       workUnitFingerprints: visibleWorkUnits.map(
         (workUnit) => workUnit.workUnitFingerprint,
       ),
+      rejectionReasons: [...new Set(rejectionReasons)].sort(),
     }),
     workUnits: visibleWorkUnits,
     status: rejectionReasons.length === 0 ? 'PLANNED' : 'REJECTED',
-    rejectionReasons: [...new Set(rejectionReasons)],
+    rejectionReasons: [...new Set(rejectionReasons)].sort(),
     holdoutAccessed: false,
     strategyPromotionAllowed: false,
     liveExecutionAllowed: false,
   };
-};
-
-const validateResult = (result: BacktestWorkUnitResult): void => {
-  requireText(result.workUnitId, 'workUnitId');
-  requireText(result.workUnitFingerprint, 'workUnitFingerprint');
-  requireText(result.resultFingerprint, 'resultFingerprint');
-  requireText(result.workerId, 'workerId');
-  requireTimestamp(result.startedAt, 'startedAt');
-  requireTimestamp(result.completedAt, 'completedAt');
-  if (result.completedAt < result.startedAt) {
-    throw new Error('backtest result completed before it started');
-  }
-  for (const [name, value] of [
-    ['observationCount', result.observationCount],
-    ['independentEpisodeCount', result.independentEpisodeCount],
-    ['tradeCount', result.tradeCount],
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`${name} must be a non-negative safe integer`);
-    }
-  }
-  for (const [name, value] of [
-    ['netPnl', result.netPnl],
-    ['grossProfit', result.grossProfit],
-    ['grossLoss', result.grossLoss],
-    ['maximumDrawdownFraction', result.maximumDrawdownFraction],
-  ] as const) {
-    if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
-  }
-  if (
-    result.grossProfit < 0 ||
-    result.grossLoss < 0 ||
-    result.maximumDrawdownFraction < 0 ||
-    result.maximumDrawdownFraction > 1 ||
-    result.liveExecutionAllowed !== false
-  ) {
-    throw new Error('invalid distributed backtest result metrics');
-  }
-  if ((result.status === 'FAILED') !== (result.failureReason !== null)) {
-    throw new Error('failed result must provide exactly one failure reason');
-  }
 };
 
 export const aggregateDistributedBacktests = (input: {
@@ -387,7 +445,7 @@ export const aggregateDistributedBacktests = (input: {
       liveExecutionAllowed: false,
     };
   }
-  for (const result of input.results) validateResult(result);
+  for (const result of input.results) validateBacktestWorkUnitResult(result);
   const expectedById = new Map(
     input.plan.workUnits.map((workUnit) => [workUnit.workUnitId, workUnit] as const),
   );
@@ -395,6 +453,7 @@ export const aggregateDistributedBacktests = (input: {
   const duplicateWorkUnitIds: string[] = [];
   const unexpectedWorkUnitIds: string[] = [];
   const invalidFingerprintIds: string[] = [];
+  const invalidCoverageIds: string[] = [];
   for (const result of input.results) {
     if (resultById.has(result.workUnitId)) {
       duplicateWorkUnitIds.push(result.workUnitId);
@@ -405,8 +464,19 @@ export const aggregateDistributedBacktests = (input: {
       unexpectedWorkUnitIds.push(result.workUnitId);
       continue;
     }
-    if (expected.workUnitFingerprint !== result.workUnitFingerprint) {
+    if (
+      expected.workUnitFingerprint !== result.workUnitFingerprint ||
+      result.resultFingerprint !== fingerprintBacktestWorkUnitResult(result)
+    ) {
       invalidFingerprintIds.push(result.workUnitId);
+      continue;
+    }
+    if (
+      result.status === 'COMPLETED' &&
+      (result.observationCount !== expected.observationIds.length ||
+        result.independentEpisodeCount !== expected.episodeIds.length)
+    ) {
+      invalidCoverageIds.push(result.workUnitId);
       continue;
     }
     resultById.set(result.workUnitId, result);
@@ -482,6 +552,7 @@ export const aggregateDistributedBacktests = (input: {
   if (duplicateWorkUnitIds.length > 0) rejectionReasons.push('DUPLICATE_RESULTS');
   if (unexpectedWorkUnitIds.length > 0) rejectionReasons.push('UNEXPECTED_RESULTS');
   if (invalidFingerprintIds.length > 0) rejectionReasons.push('RESULT_FINGERPRINT_MISMATCH');
+  if (invalidCoverageIds.length > 0) rejectionReasons.push('RESULT_COVERAGE_MISMATCH');
   if (input.results.some((result) => result.status === 'FAILED')) {
     rejectionReasons.push('FAILED_WORK_UNITS');
   }
@@ -511,7 +582,7 @@ export const aggregateDistributedBacktests = (input: {
         ...rejectionReasons,
         ...(incomplete ? ['MISSING_RESULTS'] : []),
       ]),
-    ],
+    ].sort(),
     strategyPromotionAllowed: false,
     liveExecutionAllowed: false,
   };
