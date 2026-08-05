@@ -54,8 +54,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d research_test -v ON_ERROR_STOP=1 -f db/migrations/001_research_platform.sql
-          psql -h localhost -U postgres -d research_test -v ON_ERROR_STOP=1 -f db/migrations/002_market_volumes_and_partition_maintenance.sql
+          for migration in db/migrations/*.sql; do
+            echo "Applying ${migration}"
+            psql -h localhost -U postgres -d research_test -v ON_ERROR_STOP=1 -f "${migration}"
+          done
           psql -h localhost -U postgres -d research_test -v ON_ERROR_STOP=1 -c "SELECT version, name FROM research.schema_migrations ORDER BY version"
 
       - name: Install dependencies
