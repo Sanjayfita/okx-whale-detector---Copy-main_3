@@ -155,6 +155,19 @@ const enumerate = (
   return candidates;
 };
 
+const normalizeConstraints = (
+  constraints: readonly CandidateConstraint[],
+): readonly CandidateConstraint[] => {
+  const byIdentity = new Map<string, CandidateConstraint>();
+  for (const constraint of constraints) {
+    const identity = stableStringify(constraint);
+    byIdentity.set(identity, constraint);
+  }
+  return [...byIdentity.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, constraint]) => constraint);
+};
+
 export const generateStrategyCandidates = (input: {
   readonly strategyId: string;
   readonly strategyVersion: number;
@@ -232,6 +245,14 @@ export const generateStrategyCandidates = (input: {
   if (searchSpaceSize > policy.maximumSearchSpaceSize) {
     rejectionReasons.push('SEARCH_SPACE_LIMIT_EXCEEDED');
   }
+
+  const normalizedEntries = entries.map(([name, rawValues]) => [
+    name,
+    [...new Map(
+      rawValues.map((value) => [valueKey(value), value] as const),
+    ).values()].sort((left, right) => valueKey(left).localeCompare(valueKey(right))),
+  ] as const);
+  const normalizedConstraints = normalizeConstraints(input.constraints ?? []);
   const familyIdentity = {
     strategyId: input.strategyId,
     strategyVersion: input.strategyVersion,
@@ -239,8 +260,8 @@ export const generateStrategyCandidates = (input: {
     datasetFingerprint: input.datasetFingerprint,
     codeCommit: input.codeCommit,
     configurationHash: input.configurationHash,
-    parameterSpace: input.parameterSpace,
-    constraints: input.constraints ?? [],
+    parameterSpace: Object.fromEntries(normalizedEntries),
+    constraints: normalizedConstraints,
   };
   const familyFingerprint = fingerprint(familyIdentity);
   if (rejectionReasons.length > 0) {
@@ -260,16 +281,9 @@ export const generateStrategyCandidates = (input: {
     };
   }
 
-  const normalizedEntries = entries.map(([name, rawValues]) => [
-    name,
-    [...new Map(
-      rawValues.map((value) => [valueKey(value), value] as const),
-    ).values()].sort((left, right) => valueKey(left).localeCompare(valueKey(right))),
-  ] as const);
   const enumerated = enumerate(normalizedEntries);
-  const constraints = input.constraints ?? [];
   const accepted = enumerated.filter((parameters) =>
-    satisfiesConstraints({ parameters, constraints }),
+    satisfiesConstraints({ parameters, constraints: normalizedConstraints }),
   );
   if (accepted.length > policy.maximumCandidates) {
     return {
