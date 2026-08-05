@@ -10,6 +10,7 @@ Current status:
 
 - New market scope: OKX `SWAP` and `FUTURES` only.
 - Strategy profitability: **not validated**.
+- Phase 4 release decision: **BLOCKED** because real-market holdout and extended paper evidence are absent.
 - Paper research: available only after data and validation gates.
 - Testnet/live order execution: **disabled**.
 
@@ -61,7 +62,7 @@ npm run build
 node dist/tools/quantResearchDashboard.js serve path/to/report.json 8787
 ```
 
-The root GitHub Actions workflow also starts PostgreSQL 16 and executes every migration with `ON_ERROR_STOP` before running the TypeScript quality gate and production build.
+The root GitHub Actions workflow also starts PostgreSQL 16 and executes every migration in lexical order with `ON_ERROR_STOP` before running the TypeScript quality gate and production build.
 
 ## Watched symbols
 
@@ -79,7 +80,8 @@ Do not mix old spot observations with a new derivatives evaluation. Existing spo
 - `src/data` — canonical research records, integrity validation, pagination, and gap recovery.
 - `src/storage` and `db/migrations` — PostgreSQL persistence contracts and normalized schema.
 - `src/features` — timestamp-bounded feature engineering and importance analysis.
-- `src/strategy` and `src/research` — strategy laboratory, walk-forward optimization, validation, ablation, and comparison.
+- `src/strategy` and `src/research` — strategy laboratory, feature selection, walk-forward optimization, robustness validation, ablation, and comparison.
+- `src/release` — evidence-complete release-candidate gates that never enable live execution.
 - `src/portfolio` and `src/risk` — portfolio allocation and professional risk controls.
 - `src/backtest` and `src/paper` — depth-aware execution simulation and paper trading.
 - `src/analytics` — shared CLI and optional web analytics.
@@ -96,6 +98,7 @@ Historical datasets apply the same principle: sequence-aware depth must come fro
 
 ## Research platform documentation
 
+- [Phase 4 trading edge and release assessment](docs/phase4-trading-edge-release-assessment.md)
 - [Phase 3 quantitative research platform](docs/phase3-quantitative-research-platform.md)
 - [Derivatives strategy refactor and validation audit](docs/derivatives-strategy-refactor.md)
 
@@ -105,11 +108,13 @@ A strategy must pass all of the following on a corrected immutable derivatives d
 
 1. Dataset integrity, chronology, sequence, and gap checks.
 2. Independent-episode analysis.
-3. Purged walk-forward testing using discovery data only.
-4. Observation-specific fee, spread, slippage, latency, funding, and partial-fill stress.
-5. A frozen one-time evaluation on an untouched final holdout.
-6. Stable performance across instruments and market regimes.
-7. Prolonged realistic paper execution and reconciliation.
-8. Exchange-exact operational review before any testnet proposal.
+3. Fold-level feature importance and paired ablation with redundancy removal.
+4. Purged walk-forward testing using discovery data only.
+5. Observation-specific fee, spread, slippage, latency, funding, depth, and partial-fill stress across required market regimes.
+6. A frozen one-time evaluation on an untouched final holdout.
+7. Stable performance across instruments and market regimes.
+8. Prolonged realistic live-market paper execution and reconciliation.
+9. Statistically significant paired improvement over the original whale baseline.
+10. Green database migrations, tests, lint, type checking, build, and GitHub Actions.
 
 A strategy must not be promoted merely because it has a higher in-sample win rate, a better leaderboard score, or a small number of large winning trades.
