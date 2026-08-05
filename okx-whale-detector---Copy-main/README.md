@@ -43,6 +43,12 @@ Start the development runtime:
 npm run dev
 ```
 
+Start the compiled production runtime:
+
+```bash
+npm start
+```
+
 Run the deterministic Phase 6 laboratory simulation:
 
 ```bash
