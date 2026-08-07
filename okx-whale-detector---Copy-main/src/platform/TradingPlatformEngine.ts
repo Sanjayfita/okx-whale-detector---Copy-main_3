@@ -76,12 +76,12 @@ const signalText = (result: StrategySignalResult): 'BUY' | 'SELL' | 'WAIT' => {
 const statusFromDecision = (
   result: StrategySignalResult,
 ): DashboardStrategyStatus => {
-  const fast = result.indicators.fastEma;
-  const previousFast = result.indicators.previousFastEma;
-  const slow = result.indicators.slowEma;
-  const previousSlow = result.indicators.previousSlowEma;
-  const rsi = result.indicators.rsi;
-  const atrPercent = result.indicators.atrPercent;
+  const fast = result.indicators.fastEma ?? null;
+  const previousFast = result.indicators.previousFastEma ?? null;
+  const slow = result.indicators.slowEma ?? null;
+  const previousSlow = result.indicators.previousSlowEma ?? null;
+  const rsi = result.indicators.rsi ?? null;
+  const atrPercent = result.indicators.atrPercent ?? null;
   const crossover =
     fast !== null &&
     previousFast !== null &&
@@ -238,10 +238,10 @@ export class TradingPlatformEngine {
       close: candle.close,
       volume: candle.volume,
       confirmed: true,
-      fastEma: result.indicators.fastEma,
-      slowEma: result.indicators.slowEma,
-      rsi: result.indicators.rsi,
-      atr: result.indicators.atr,
+      fastEma: result.indicators.fastEma ?? null,
+      slowEma: result.indicators.slowEma ?? null,
+      rsi: result.indicators.rsi ?? null,
+      atr: result.indicators.atr ?? null,
     });
     this.store.setStrategyStatus(statusFromDecision(result));
 
