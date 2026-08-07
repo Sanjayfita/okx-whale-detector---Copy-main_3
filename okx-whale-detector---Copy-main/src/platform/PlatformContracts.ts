@@ -1,4 +1,7 @@
-import type { PerformanceAnalyticsReport } from '../analytics/PerformanceAnalytics';
+import type {
+  EquityPoint,
+  PerformanceAnalyticsReport,
+} from '../analytics/PerformanceAnalytics';
 import type { StrategyDescriptor } from '../strategies/StrategyRegistry';
 
 export type PlatformMode = 'PAPER' | 'LIVE';
@@ -111,6 +114,7 @@ export interface TradingPlatformSnapshot {
   readonly overview: DashboardOverview;
   readonly positions: readonly DashboardPosition[];
   readonly trades: readonly DashboardTrade[];
+  readonly equityCurve: readonly EquityPoint[];
   readonly candles: Readonly<Record<string, readonly DashboardCandle[]>>;
   readonly strategyStatus: Readonly<Record<string, DashboardStrategyStatus>>;
   readonly logs: readonly DashboardLogEntry[];
@@ -119,6 +123,9 @@ export interface TradingPlatformSnapshot {
   readonly strategies: readonly StrategyDescriptor[];
   readonly risk: {
     readonly killSwitchActive: boolean;
+    readonly circuitBreakerActive: boolean;
+    readonly consecutiveLosses: number;
+    readonly cooldownUntil: number | null;
     readonly liveExecutionAllowed: false;
   };
   readonly liveExecutionAllowed: false;
