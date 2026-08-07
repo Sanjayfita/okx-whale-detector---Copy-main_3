@@ -18,6 +18,7 @@ const testConfig: TradingStrategyConfig = {
   maximumAtrPercent: 20,
   stopLossPercent: 1,
   takeProfitPercent: 2,
+  riskPerTradePercent: 1,
   trailingStopEnabled: false,
   trailingStopPercent: 1,
 };
