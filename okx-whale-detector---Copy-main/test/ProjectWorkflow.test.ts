@@ -48,15 +48,22 @@ describe('project workflow documentation', () => {
 
   it('defines the required workflow scripts', () => {
     expect(packageJson.scripts).toMatchObject({
-      build: 'tsc',
+      build: 'npm run build:backend && npm run build:dashboard',
 
-      typecheck: 'tsc --noEmit',
+      typecheck: 'tsc --noEmit && tsc -p web/tsconfig.json --noEmit',
 
       test: 'vitest run',
 
-      dev: 'tsx src/index.ts',
+      dev: 'tsx src/tools/startPlatformOrchestrator.ts --dev',
 
-      start: 'node dist/index.js',
+      start: 'tsx src/tools/startPlatformOrchestrator.ts',
+
+      paper: 'tsx src/tools/startPlatformOrchestrator.ts',
+
+      live: 'tsx src/tools/startPlatformOrchestrator.ts --live',
+
+      dashboard:
+        'npm run build:dashboard --silent && tsx src/tools/serveTradingDashboard.ts',
 
       check: 'npm run typecheck && npm run lint && npm test',
     });
