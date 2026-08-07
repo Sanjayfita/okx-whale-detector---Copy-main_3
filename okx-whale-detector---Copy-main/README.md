@@ -4,7 +4,7 @@ A TypeScript/Node.js platform for collecting, validating, replaying, optimizing,
 
 ## Safety and interpretation
 
-Whale and order-book detectors emit **heuristic research telemetry**. They are no longer the maintained primary trading-entry strategy, are not a guarantee of future price direction, and their confidence scores must not be treated as a probability of profit.
+Whale and order-book detectors emit **heuristic research signals** for telemetry and historical research. They are no longer the maintained primary trading-entry strategy, are not a guarantee of future price direction, and their confidence scores must not be treated as a probability of profit.
 
 Current status:
 
