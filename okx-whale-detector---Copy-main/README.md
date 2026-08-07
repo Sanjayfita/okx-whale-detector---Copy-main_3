@@ -4,11 +4,13 @@ A TypeScript/Node.js platform for collecting, validating, replaying, optimizing,
 
 ## Safety and interpretation
 
-The detector emits **heuristic research signals**. They are not a guarantee of future price direction, and confidence scores must not be treated as a probability of profit.
+Whale and order-book detectors emit **heuristic research telemetry**. They are no longer the maintained primary trading-entry strategy, are not a guarantee of future price direction, and their confidence scores must not be treated as a probability of profit.
 
 Current status:
 
 - Market scope: OKX `SWAP` and `FUTURES` only.
+- Primary strategy: `ema-trend-crossover-v1` — EMA 20/50 crossover with RSI momentum confirmation and ATR volatility/risk controls.
+- Historical whale/derivatives-flow rules: retained only as research comparators and baseline evidence.
 - Research architecture: permanent `main`-branch foundation with point-in-time empirical controls and Phase 6 autonomous research operations.
 - Strategy profitability: **not validated**.
 - Strategy release: **BLOCKED** because corrected real-market discovery, frozen holdout, prolonged paper, shadow, and paired-baseline evidence are absent.
@@ -16,6 +18,29 @@ Current status:
 - Testnet/live order execution: **disabled**.
 
 Passing an engineering gate means the software can support controlled experiments. It does not promote a strategy or prove positive expectancy.
+
+## Maintained primary strategy
+
+The primary entry boundary is `createPrimaryStrategyLaboratory()`, which contains only `ema-trend-crossover-v1`.
+
+Entry is intentionally simple:
+
+- bullish/bearish EMA crossover;
+- price and slow-EMA slope trend confirmation;
+- RSI momentum confirmation;
+- ATR low/extreme-volatility filter;
+- no entry while a position is already open.
+
+Risk and exits are explicit:
+
+- planned loss is capped at **1% of current account equity** per trade;
+- stop distance is the greater of configured stop-loss percentage or ATR × multiplier;
+- take-profit distance is always at least two times the actual stop distance;
+- optional percentage trailing stop;
+- opposite EMA crossover also exits an open position;
+- if stop and target are touched in the same candle, research logic assumes the stop occurred first.
+
+Strategy parameters live in `src/config/tradingStrategyConfig.ts`. See [Primary EMA trend strategy](docs/ema-trend-primary-strategy.md) for the complete rule set and rationale.
 
 ## Installation and validation
 
@@ -70,15 +95,15 @@ Do not mix old spot observations with a new derivatives evaluation. Existing spo
 
 - `src/autonomy` — bounded hypothesis generation, adaptive feature specifications, experiment scheduling, distributed backtests, discovery ranking, cycle manifests, and continuous reporting.
 - `src/config/symbols.ts` — legacy watched-symbol configuration.
-- `src/config` — derivatives profiles, discovery, thresholds, and runtime policies.
+- `src/config` — derivatives profiles, discovery, thresholds, runtime policies, and the maintained EMA strategy configuration.
 - `src/clients/okx` — OKX REST and WebSocket adapters.
-- `src/core` — market-state, order-book, and detector orchestration.
+- `src/core` — market-state, order-book, detector, candle-history, and telemetry orchestration.
 - `src/types` — shared TypeScript contracts.
 - `src/data` — canonical records, point-in-time availability, integrity validation, historical recovery, and continuous collection.
 - `src/storage` and `db/migrations` — PostgreSQL persistence contracts and normalized research, autonomous-cycle, task, work-unit, result, ranking, and report schemas.
 - `src/features` and `src/orderflow` — receipt-time-bounded features, block-aware importance, and support-aware advanced order flow.
 - `src/regime` and `src/timeframe` — explainable market classification and top-down timeframe context.
-- `src/strategy` and `src/research` — strategy laboratory, bounded candidate generation, experiment manifests, feature selection, purged optimization, significance, robustness, Monte Carlo, comparison, and audit reporting.
+- `src/strategy` and `src/research` — the maintained EMA entry strategy plus historical research comparators, bounded candidate generation, experiment manifests, feature selection, purged optimization, significance, robustness, Monte Carlo, comparison, and audit reporting.
 - `src/portfolio` and `src/risk` — Kelly/risk-parity research, correlation-complete portfolio controls, and point-in-time event filtering.
 - `src/explainability` — structured machine-readable and human-readable trade explanations.
 - `src/backtest`, `src/paper`, and `src/shadow` — depth-aware execution, paper execution, and live-data shadow evaluation.
@@ -164,6 +189,7 @@ Portfolio exposure is netted by instrument before gross exposure, net exposure, 
 
 ## Documentation
 
+- [Primary EMA trend strategy](docs/ema-trend-primary-strategy.md)
 - [Phase 6 autonomous quantitative research laboratory](docs/phase6-autonomous-quantitative-research.md)
 - [Empirical research hardening audit](docs/empirical-research-hardening.md)
 - [Final foundation technical review](docs/final-foundation-technical-review.md)
@@ -191,7 +217,7 @@ A strategy must pass all of the following on a corrected immutable derivatives d
 13. A frozen one-time evaluation on an untouched final holdout.
 14. Prolonged realistic live-market paper execution and reconciliation.
 15. Prolonged live-data shadow trading with unfilled-quantity, missed-opportunity, and paper-comparison reports.
-16. Statistically significant paired improvement over the Original Whale Strategy after familywise correction.
+16. Statistically significant paired improvement over the Original Whale Strategy baseline after familywise correction.
 17. Green migrations, dependency audit, tests, lint, type checking, production build, and GitHub Actions.
 
 A strategy must not be promoted merely because it has a higher in-sample win rate, a better research-priority score, an optimizer result, an autonomous ranking, or a small number of large winners.
