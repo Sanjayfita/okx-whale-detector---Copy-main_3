@@ -1,10 +1,19 @@
-import { simulateMarketOrder, type ExecutionOrderBook } from '../backtest/ExecutionSimulator';
+import {
+  estimateLinearLiquidationPrice,
+  simulateMarketOrder,
+  type ExecutionOrderBook,
+} from '../backtest/ExecutionSimulator';
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
 import type { MarketState } from '../core/MarketState';
-import { estimateLinearLiquidationPrice } from '../backtest/ExecutionSimulator';
+import type {
+  NotificationService,
+  TradingNotificationType,
+} from '../notifications/NotificationService';
 import type { PaperManagedPosition } from '../paper/PaperAccountLedger';
-import type { NotificationService, TradingNotificationType } from '../notifications/NotificationService';
-import type { EmaTrendCandle, EmaTrendOpenPosition } from '../strategy/EmaTrendStrategy';
+import type {
+  EmaTrendCandle,
+  EmaTrendOpenPosition,
+} from '../strategy/EmaTrendStrategy';
 import type { StrategySignalResult } from '../strategies/TradingStrategy';
 import type { DashboardStrategyStatus } from './PlatformContracts';
 import { PlatformStateStore } from './PlatformStateStore';
@@ -112,9 +121,13 @@ const statusFromDecision = (
       },
       {
         label: 'ATR volatility',
-        passed: !result.reasons.includes('LOW_VOLATILITY') && !result.reasons.includes('EXTREME_VOLATILITY'),
+        passed:
+          !result.reasons.includes('LOW_VOLATILITY') &&
+          !result.reasons.includes('EXTREME_VOLATILITY'),
         detail:
-          atrPercent === null ? 'Waiting for ATR' : `ATR ${atrPercent.toFixed(3)}%`,
+          atrPercent === null
+            ? 'Waiting for ATR'
+            : `ATR ${atrPercent.toFixed(3)}%`,
       },
     ],
     updatedAt: result.observedAt,
@@ -140,7 +153,10 @@ export class TradingPlatformEngine {
     this.notifications = options.notifications;
     this.now = options.now ?? Date.now;
 
-    if (!Number.isSafeInteger(this.maximumStrategyCandles) || this.maximumStrategyCandles <= 0) {
+    if (
+      !Number.isSafeInteger(this.maximumStrategyCandles) ||
+      this.maximumStrategyCandles <= 0
+    ) {
       throw new Error('maximumStrategyCandles must be a positive safe integer');
     }
     if (!Number.isFinite(this.paperLeverage) || this.paperLeverage <= 1) {
@@ -168,13 +184,15 @@ export class TradingPlatformEngine {
       price: midpoint,
       timestamp: book.observedAt,
     });
-    this.evaluateProtectiveExit(marked, book);
+    this.evaluateProtectiveExit(marked);
   }
 
   public onCandle(candle: OKXCandle): void {
     const strategyCandle = toEmaCandle(candle);
     const history = this.candles.get(candle.instId) ?? [];
-    const existing = history.findIndex((value) => value.timestamp === candle.timestamp);
+    const existing = history.findIndex(
+      (value) => value.timestamp === candle.timestamp,
+    );
     if (existing >= 0) history[existing] = strategyCandle;
     else history.push(strategyCandle);
     history.sort((left, right) => left.timestamp - right.timestamp);
@@ -237,17 +255,24 @@ export class TradingPlatformEngine {
         });
       }
       if (result.action === 'EXIT') {
-        this.closePaperPosition(candle.instId, result.reasons[0] ?? 'STRATEGY_EXIT');
+        this.closePaperPosition(
+          candle.instId,
+          result.reasons[0] ?? 'STRATEGY_EXIT',
+        );
       }
       return;
     }
 
     if (result.action !== 'BUY' && result.action !== 'SELL') return;
     if (this.store.getSettings().mode !== 'PAPER') {
-      this.store.log('WARNING', 'Live strategy signal observed; order execution remains disabled', {
-        instrumentId: candle.instId,
-        signal: result.action,
-      });
+      this.store.log(
+        'WARNING',
+        'Live strategy signal observed; order execution remains disabled',
+        {
+          instrumentId: candle.instId,
+          signal: result.action,
+        },
+      );
       return;
     }
     this.openPaperPosition(result);
@@ -263,8 +288,7 @@ export class TradingPlatformEngine {
     if (!Number.isFinite(input.fundingRatePercent)) {
       throw new Error('fundingRatePercent must be finite');
     }
-    const notional =
-      position.currentPrice * position.quantityBaseUnits;
+    const notional = position.currentPrice * position.quantityBaseUnits;
     const fundingPnl =
       notional *
       (input.fundingRatePercent / 100) *
@@ -283,11 +307,18 @@ export class TradingPlatformEngine {
 
   public sendDailySummary(timestamp = this.now()): void {
     const snapshot = this.store.snapshot(timestamp);
-    this.notify('DAILY_SUMMARY', 'Trading platform daily summary', `Equity ${snapshot.overview.accountEquity.toFixed(2)}, PnL today ${snapshot.overview.pnlToday.toFixed(2)}, win rate ${snapshot.overview.winRate.toFixed(2)}%`, {
-      equity: snapshot.overview.accountEquity,
-      pnlToday: snapshot.overview.pnlToday,
-      trades: snapshot.analytics.trades,
-    });
+    this.notify(
+      'DAILY_SUMMARY',
+      'Trading platform daily summary',
+      `Equity ${snapshot.overview.accountEquity.toFixed(2)}, ` +
+        `PnL today ${snapshot.overview.pnlToday.toFixed(2)}, ` +
+        `win rate ${snapshot.overview.winRate.toFixed(2)}%`,
+      {
+        equity: snapshot.overview.accountEquity,
+        pnlToday: snapshot.overview.pnlToday,
+        trades: snapshot.analytics.trades,
+      },
+    );
   }
 
   private openPaperPosition(result: StrategySignalResult): void {
@@ -301,27 +332,27 @@ export class TradingPlatformEngine {
     ) {
       this.store.log('ERROR', 'Strategy emitted incomplete entry details', {
         strategyId: result.strategyId,
+        instrumentId: result.instrumentId,
       });
       return;
     }
-    const book = this.books.get(result.strategyId === '' ? '' : result.strategyId);
-    const executionBook = this.books.get(
-      result.strategyId === '' ? '' : this.findInstrumentForResult(result),
-    );
-    if (book !== undefined) {
-      // The branch is intentionally unreachable; kept out of execution selection.
-      void book;
-    }
+    const executionBook = this.books.get(result.instrumentId);
     if (executionBook === undefined) {
-      this.store.log('WARNING', 'Paper entry missed because no usable order book is available', {
-        strategyId: result.strategyId,
-      });
+      this.store.log(
+        'WARNING',
+        'Paper entry missed because no usable order book is available',
+        {
+          instrumentId: result.instrumentId,
+          strategyId: result.strategyId,
+        },
+      );
       return;
     }
 
-    const instrumentId = this.findInstrumentForResult(result);
     const account = this.store.account.snapshot(executionBook.observedAt);
-    const realizedPnlToday = this.store.account.getRealizedPnlForDay(executionBook.observedAt);
+    const realizedPnlToday = this.store.account.getRealizedPnlForDay(
+      executionBook.observedAt,
+    );
     const startingDayEquity = Math.max(
       Number.EPSILON,
       account.equity - realizedPnlToday - account.unrealizedPnl,
@@ -339,7 +370,7 @@ export class TradingPlatformEngine {
     });
     if (!riskDecision.allowed) {
       this.store.log('WARNING', 'Risk manager blocked paper entry', {
-        instrumentId,
+        instrumentId: result.instrumentId,
         reasons: riskDecision.reasons.join(','),
       });
       return;
@@ -357,7 +388,7 @@ export class TradingPlatformEngine {
       !fill.minimumFillRatioMet
     ) {
       this.store.log('WARNING', 'Paper entry missed or under-filled', {
-        instrumentId,
+        instrumentId: result.instrumentId,
         fillRatio: fill.fillRatio,
         reason: fill.rejectionReasons.join(','),
       });
@@ -376,7 +407,7 @@ export class TradingPlatformEngine {
         : fill.averagePrice - targetDistance;
     const actualRiskAmount = stopDistance * fill.filledQuantity;
     this.store.account.openPosition({
-      instrumentId,
+      instrumentId: result.instrumentId,
       direction: result.direction,
       openedAt: executionBook.observedAt,
       entryPrice: fill.averagePrice,
@@ -389,18 +420,23 @@ export class TradingPlatformEngine {
       entryFee: fill.fee,
     });
     this.store.log('TRADE', 'Paper position opened', {
-      instrumentId,
+      instrumentId: result.instrumentId,
       direction: result.direction,
       price: fill.averagePrice,
       quantity: fill.filledQuantity,
       fee: fill.fee,
       slippageBps: fill.slippageBps,
     });
-    this.notify('TRADE_OPENED', `Paper ${result.direction} opened`, `${instrumentId} @ ${fill.averagePrice.toFixed(8)}`, {
-      instrumentId,
-      quantity: fill.filledQuantity,
-      riskAmount: actualRiskAmount,
-    });
+    this.notify(
+      'TRADE_OPENED',
+      `Paper ${result.direction} opened`,
+      `${result.instrumentId} @ ${fill.averagePrice.toFixed(8)}`,
+      {
+        instrumentId: result.instrumentId,
+        quantity: fill.filledQuantity,
+        riskAmount: actualRiskAmount,
+      },
+    );
   }
 
   private closePaperPosition(instrumentId: string, exitReason: string): void {
@@ -417,10 +453,14 @@ export class TradingPlatformEngine {
       fill.averagePrice === null ||
       fill.filledQuantity < position.quantityBaseUnits - Number.EPSILON
     ) {
-      this.store.log('WARNING', 'Paper exit could not be fully filled; position remains open', {
-        instrumentId,
-        fillRatio: fill.fillRatio,
-      });
+      this.store.log(
+        'WARNING',
+        'Paper exit could not be fully filled; position remains open',
+        {
+          instrumentId,
+          fillRatio: fill.fillRatio,
+        },
+      );
       return;
     }
 
@@ -442,23 +482,24 @@ export class TradingPlatformEngine {
       fees: trade.fees,
       fundingPnl: trade.fundingPnl,
     });
-    const notificationType: TradingNotificationType =
-      exitReason.includes('STOP')
-        ? 'STOP_HIT'
-        : exitReason.includes('TAKE_PROFIT')
-          ? 'TAKE_PROFIT'
-          : 'TRADE_CLOSED';
-    this.notify(notificationType, 'Paper position closed', `${instrumentId}: ${exitReason}, net PnL ${trade.netPnl.toFixed(2)}`, {
-      instrumentId,
-      netPnl: trade.netPnl,
-      rMultiple: trade.rMultiple,
-    });
+    const notificationType: TradingNotificationType = exitReason.includes('STOP')
+      ? 'STOP_HIT'
+      : exitReason.includes('TAKE_PROFIT')
+        ? 'TAKE_PROFIT'
+        : 'TRADE_CLOSED';
+    this.notify(
+      notificationType,
+      'Paper position closed',
+      `${instrumentId}: ${exitReason}, net PnL ${trade.netPnl.toFixed(2)}`,
+      {
+        instrumentId,
+        netPnl: trade.netPnl,
+        rMultiple: trade.rMultiple,
+      },
+    );
   }
 
-  private evaluateProtectiveExit(
-    position: PaperManagedPosition,
-    book: ExecutionOrderBook,
-  ): void {
+  private evaluateProtectiveExit(position: PaperManagedPosition): void {
     const price = position.currentPrice;
     const stopHit =
       position.direction === 'LONG'
@@ -504,18 +545,6 @@ export class TradingPlatformEngine {
       });
       this.closePaperPosition(position.instrumentId, 'LIQUIDATION');
     }
-    void book;
-  }
-
-  private findInstrumentForResult(result: StrategySignalResult): string {
-    const matching = [...this.candles.entries()].find(([, history]) => {
-      const latest = history[history.length - 1];
-      return latest?.timestamp === result.observedAt;
-    });
-    if (matching === undefined) {
-      throw new Error('unable to resolve strategy decision instrument');
-    }
-    return matching[0];
   }
 
   private notify(
