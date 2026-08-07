@@ -17,6 +17,7 @@ export interface StrategyContext {
 
 export interface StrategySignalResult {
   readonly strategyId: string;
+  readonly instrumentId: string;
   readonly action: StrategySignalAction;
   readonly direction: TradeDirection | null;
   readonly observedAt: number | null;
