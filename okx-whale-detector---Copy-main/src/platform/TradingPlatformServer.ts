@@ -1,8 +1,17 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
-import { WebSocketServer } from 'ws';
-import type { DashboardSettings, PlatformLogLevel } from './PlatformContracts';
+import WebSocket, { WebSocketServer } from 'ws';
+import type {
+  DashboardSettings,
+  PlatformLogLevel,
+} from './PlatformContracts';
 import { PlatformSettingsRepository } from './PlatformSettingsRepository';
 import { PlatformStateStore } from './PlatformStateStore';
 import type { TradingPlatformEngine } from './TradingPlatformEngine';
@@ -13,6 +22,10 @@ export interface TradingPlatformServerOptions {
   readonly staticDirectory?: string;
   readonly settingsRepository?: PlatformSettingsRepository;
 }
+
+type MutableSettingsPatch = {
+  -readonly [Key in keyof DashboardSettings]?: DashboardSettings[Key];
+};
 
 const contentTypes: Readonly<Record<string, string>> = {
   '.html': 'text/html; charset=utf-8',
@@ -55,7 +68,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const settingsPatch = (value: unknown): Partial<DashboardSettings> => {
   if (!isRecord(value)) throw new Error('settings body must be a JSON object');
-  const patch: Partial<DashboardSettings> = {};
+  const patch: MutableSettingsPatch = {};
   const numberKeys = [
     'fastEmaLength',
     'slowEmaLength',
@@ -82,7 +95,9 @@ const settingsPatch = (value: unknown): Partial<DashboardSettings> => {
   for (const key of booleanKeys) {
     const candidate = value[key];
     if (candidate !== undefined) {
-      if (typeof candidate !== 'boolean') throw new Error(`${key} must be boolean`);
+      if (typeof candidate !== 'boolean') {
+        throw new Error(`${key} must be boolean`);
+      }
       Object.assign(patch, { [key]: candidate });
     }
   }
@@ -129,13 +144,15 @@ export class TradingPlatformServer {
     this.staticDirectory = resolve(options.staticDirectory ?? 'web');
     this.settingsRepository =
       options.settingsRepository ?? new PlatformSettingsRepository();
-    if (!Number.isSafeInteger(this.port) || this.port <= 0 || this.port > 65_535) {
-      throw new Error('dashboard port must be between 1 and 65535');
+    if (!Number.isSafeInteger(this.port) || this.port < 0 || this.port > 65_535) {
+      throw new Error('dashboard port must be between 0 and 65535');
     }
   }
 
   public async start(): Promise<void> {
-    if (this.server !== null) throw new Error('trading platform server already started');
+    if (this.server !== null) {
+      throw new Error('trading platform server already started');
+    }
     const persisted = await this.settingsRepository.load();
     if (persisted !== null) this.store.updateSettings(persisted);
 
@@ -162,12 +179,14 @@ export class TradingPlatformServer {
       });
     });
     this.websocket.on('connection', (client) => {
-      client.send(JSON.stringify({ type: 'snapshot', data: this.store.snapshot() }));
+      client.send(
+        JSON.stringify({ type: 'snapshot', data: this.store.snapshot() }),
+      );
     });
     this.unsubscribe = this.store.subscribe((snapshot) => {
       const payload = JSON.stringify({ type: 'snapshot', data: snapshot });
       for (const client of this.websocket.clients) {
-        if (client.readyState === client.OPEN) client.send(payload);
+        if (client.readyState === WebSocket.OPEN) client.send(payload);
       }
     });
 
@@ -181,7 +200,7 @@ export class TradingPlatformServer {
     this.server = server;
     this.store.log('INFO', 'Trading dashboard started', {
       host: this.host,
-      port: this.port,
+      port: this.getBoundPort(),
     });
   }
 
@@ -194,12 +213,22 @@ export class TradingPlatformServer {
     this.server = null;
     if (server === null) return;
     await new Promise<void>((resolvePromise, reject) => {
-      server.close((error) => (error === undefined ? resolvePromise() : reject(error)));
+      server.close((error) =>
+        error === undefined ? resolvePromise() : reject(error),
+      );
     });
   }
 
   public getUrl(): string {
-    return `http://${this.host}:${this.port}`;
+    const publicHost = this.host === '0.0.0.0' ? '127.0.0.1' : this.host;
+    return `http://${publicHost}:${this.getBoundPort()}`;
+  }
+
+  private getBoundPort(): number {
+    const address = this.server?.address();
+    return typeof address === 'object' && address !== null
+      ? (address as AddressInfo).port
+      : this.port;
   }
 
   private async handleRequest(
@@ -241,7 +270,9 @@ export class TradingPlatformServer {
       return;
     }
     if (method === 'PATCH' && url.pathname === '/api/settings') {
-      const updated = this.store.updateSettings(settingsPatch(await readJsonBody(request)));
+      const updated = this.store.updateSettings(
+        settingsPatch(await readJsonBody(request)),
+      );
       if (updated.autoSave) await this.settingsRepository.save(updated);
       sendJson(response, 200, updated);
       return;
@@ -253,10 +284,16 @@ export class TradingPlatformServer {
         return;
       }
       this.store.setKillSwitch(body.active);
-      sendJson(response, 200, { active: body.active, liveExecutionAllowed: false });
+      sendJson(response, 200, {
+        active: body.active,
+        liveExecutionAllowed: false,
+      });
       return;
     }
-    if (method === 'POST' && url.pathname === '/api/notifications/daily-summary') {
+    if (
+      method === 'POST' &&
+      url.pathname === '/api/notifications/daily-summary'
+    ) {
       this.engine.sendDailySummary();
       sendJson(response, 202, { accepted: true });
       return;
@@ -268,8 +305,12 @@ export class TradingPlatformServer {
     await this.serveStatic(url.pathname, response);
   }
 
-  private async serveStatic(pathname: string, response: ServerResponse): Promise<void> {
-    const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  private async serveStatic(
+    pathname: string,
+    response: ServerResponse,
+  ): Promise<void> {
+    const relativePath =
+      pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const requestedPath = resolve(this.staticDirectory, relativePath);
     if (
       requestedPath !== this.staticDirectory &&
@@ -282,8 +323,12 @@ export class TradingPlatformServer {
     try {
       const content = await readFile(requestedPath);
       response.writeHead(200, {
-        'content-type': contentTypes[extname(requestedPath)] ?? 'application/octet-stream',
-        'cache-control': extname(requestedPath) === '.html' ? 'no-store' : 'public, max-age=60',
+        'content-type':
+          contentTypes[extname(requestedPath)] ?? 'application/octet-stream',
+        'cache-control':
+          extname(requestedPath) === '.html'
+            ? 'no-store'
+            : 'public, max-age=60',
       });
       response.end(content);
     } catch (error: unknown) {
