@@ -51,6 +51,7 @@ const evaluate = (context: StrategyContext): StrategySignalResult => {
 
   return {
     strategyId: result.strategyId,
+    instrumentId: context.instrumentId,
     action: toAction(result.action),
     direction: result.direction,
     observedAt: result.observedAt,
