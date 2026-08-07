@@ -1,0 +1,70 @@
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { PlatformSettingsRepository } from '../src/platform/PlatformSettingsRepository';
+import { PlatformStateStore } from '../src/platform/PlatformStateStore';
+import { TradingPlatformEngine } from '../src/platform/TradingPlatformEngine';
+import { TradingPlatformServer } from '../src/platform/TradingPlatformServer';
+
+const cleanup: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanup.length > 0) {
+    await cleanup.pop()?.();
+  }
+});
+
+describe('TradingPlatformServer', () => {
+  it('serves health, snapshot, settings, kill switch and static dashboard', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'trading-platform-server-'));
+    cleanup.push(() => rm(directory, { recursive: true, force: true }));
+    const webDirectory = join(directory, 'web');
+    await mkdir(webDirectory, { recursive: true });
+    await writeFile(join(webDirectory, 'index.html'), '<h1>dashboard</h1>', 'utf8');
+
+    const store = new PlatformStateStore({ now: () => 1_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 1_000 });
+    const server = new TradingPlatformServer(store, engine, {
+      port: 0,
+      staticDirectory: webDirectory,
+      settingsRepository: new PlatformSettingsRepository(
+        join(directory, 'settings.json'),
+      ),
+    });
+    await server.start();
+    cleanup.push(() => server.close());
+
+    const health = await fetch(`${server.getUrl()}/api/health`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual(
+      expect.objectContaining({
+        status: 'ok',
+        strategy: 'ema-trend-crossover-v1',
+        liveExecutionAllowed: false,
+      }),
+    );
+
+    const settings = await fetch(`${server.getUrl()}/api/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ riskPerTradePercent: 0.5 }),
+    });
+    expect(settings.status).toBe(200);
+    expect(await settings.json()).toEqual(
+      expect.objectContaining({ riskPerTradePercent: 0.5 }),
+    );
+
+    const kill = await fetch(`${server.getUrl()}/api/risk/kill-switch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ active: true }),
+    });
+    expect(kill.status).toBe(200);
+    expect(store.snapshot(1_000).risk.killSwitchActive).toBe(true);
+
+    const page = await fetch(server.getUrl());
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('dashboard');
+  });
+});
