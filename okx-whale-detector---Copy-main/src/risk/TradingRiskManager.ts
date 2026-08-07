@@ -62,6 +62,15 @@ export interface RiskDecision {
   readonly liveExecutionAllowed: false;
 }
 
+export interface TradingRiskStatus {
+  readonly killSwitchActive: boolean;
+  readonly circuitBreakerActive: boolean;
+  readonly consecutiveLosses: number;
+  readonly lastLossAt: number | null;
+  readonly cooldownUntil: number | null;
+  readonly liveExecutionAllowed: false;
+}
+
 const requirePositiveFinite = (value: number, name: string): void => {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${name} must be positive and finite`);
@@ -108,7 +117,9 @@ const lossPercent = (realizedPnl: number, startingEquity: number): number =>
   realizedPnl < 0 ? (-realizedPnl / startingEquity) * 100 : 0;
 
 const drawdownPercent = (currentEquity: number, peakEquity: number): number =>
-  peakEquity > 0 ? Math.max(0, ((peakEquity - currentEquity) / peakEquity) * 100) : 0;
+  peakEquity > 0
+    ? Math.max(0, ((peakEquity - currentEquity) / peakEquity) * 100)
+    : 0;
 
 export class TradingRiskManager {
   private killSwitchActive = false;
@@ -203,6 +214,21 @@ export class TradingRiskManager {
       killSwitchActive: this.killSwitchActive,
       circuitBreakerActive,
       cooldownUntil,
+      liveExecutionAllowed: false,
+    };
+  }
+
+  public getStatus(): TradingRiskStatus {
+    return {
+      killSwitchActive: this.killSwitchActive,
+      circuitBreakerActive:
+        this.consecutiveLosses >= this.policy.circuitBreakerLossStreak,
+      consecutiveLosses: this.consecutiveLosses,
+      lastLossAt: this.lastLossAt,
+      cooldownUntil:
+        this.lastLossAt === null
+          ? null
+          : this.lastLossAt + this.policy.cooldownAfterLossMs,
       liveExecutionAllowed: false,
     };
   }
