@@ -17,6 +17,8 @@ export interface TradingStrategyConfig {
   readonly stopLossPercent: number;
   /** Minimum configured take-profit distance. Runtime logic always enforces at least 2R. */
   readonly takeProfitPercent: number;
+  /** Planned account-equity risk per trade. Hard-capped at one percent. */
+  readonly riskPerTradePercent: number;
   /** Enables an optional trailing stop after a position has moved favorably. */
   readonly trailingStopEnabled: boolean;
   /** Percentage trail from the highest/lowest price reached after entry. */
@@ -33,6 +35,7 @@ export const tradingStrategyConfig: TradingStrategyConfig = Object.freeze({
   maximumAtrPercent: 5,
   stopLossPercent: 1,
   takeProfitPercent: 2,
+  riskPerTradePercent: 1,
   trailingStopEnabled: true,
   trailingStopPercent: 1,
 });
@@ -61,6 +64,7 @@ export const validateTradingStrategyConfig = (
   requirePositiveFinite(config.maximumAtrPercent, 'maximumAtrPercent');
   requirePositiveFinite(config.stopLossPercent, 'stopLossPercent');
   requirePositiveFinite(config.takeProfitPercent, 'takeProfitPercent');
+  requirePositiveFinite(config.riskPerTradePercent, 'riskPerTradePercent');
   requirePositiveFinite(config.trailingStopPercent, 'trailingStopPercent');
 
   if (config.fastEmaLength >= config.slowEmaLength) {
@@ -71,6 +75,9 @@ export const validateTradingStrategyConfig = (
   }
   if (config.takeProfitPercent < config.stopLossPercent * 2) {
     throw new Error('takeProfitPercent must be at least 2x stopLossPercent');
+  }
+  if (config.riskPerTradePercent > 1) {
+    throw new Error('riskPerTradePercent must not exceed 1% of account equity');
   }
   if (typeof config.trailingStopEnabled !== 'boolean') {
     throw new Error('trailingStopEnabled must be a boolean');
