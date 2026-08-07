@@ -267,7 +267,7 @@ export class PlatformBacktestEngine {
       history.push(candle);
 
       if (position !== null) {
-        const current = position;
+        const current: OpenBacktestPosition = position;
         const stopHit =
           current.direction === 'LONG'
             ? candle.low <= current.stopLossPrice
@@ -294,7 +294,7 @@ export class PlatformBacktestEngine {
       }
 
       if (position !== null && candle.fundingRatePercent !== undefined) {
-        const current = position;
+        const current: OpenBacktestPosition = position;
         if (!Number.isFinite(candle.fundingRatePercent)) {
           throw new Error('fundingRatePercent must be finite when supplied');
         }
@@ -309,7 +309,7 @@ export class PlatformBacktestEngine {
         };
       }
 
-      const currentForSignal = position;
+      const currentForSignal: OpenBacktestPosition | null = position;
       const equityForSignal =
         currentForSignal === null
           ? realizedEquity
@@ -331,7 +331,7 @@ export class PlatformBacktestEngine {
       });
 
       if (position !== null) {
-        const current = position;
+        const current: OpenBacktestPosition = position;
         if (result.action === 'EXIT') {
           finish(
             current,
@@ -388,7 +388,7 @@ export class PlatformBacktestEngine {
         };
       }
 
-      const currentForMark = position;
+      const currentForMark: OpenBacktestPosition | null = position;
       const markEquity =
         currentForMark === null
           ? realizedEquity
