@@ -111,7 +111,9 @@ describe('EMA trend entry strategy', () => {
       accountEquity: 10_000,
       config: {
         ...TEST_CONFIG,
-        minimumAtrPercent: 5,
+        // True range includes close-to-close gaps, so this deliberately high
+        // threshold makes the fixture unambiguously below the configured floor.
+        minimumAtrPercent: 50,
       },
     });
 
