@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appConfig } from '../src/config/appConfig';
+import { resolveSymbolConfig } from '../src/config/symbolProfiles';
 import { MarketState } from '../src/core/MarketState';
 import { PlatformStateStore } from '../src/platform/PlatformStateStore';
 import { TradingPlatformEngine } from '../src/platform/TradingPlatformEngine';
@@ -21,7 +21,7 @@ describe('TradingPlatformEngine', () => {
       entryFee: 0,
     });
 
-    const state = new MarketState(appConfig, {
+    const state = new MarketState(resolveSymbolConfig('BTC-USDT-SWAP'), {
       instId: 'BTC-USDT-SWAP',
       instType: 'SWAP',
       quoteCurrency: 'USDT',
