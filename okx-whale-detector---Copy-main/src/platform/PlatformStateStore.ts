@@ -125,7 +125,10 @@ export class PlatformStateStore {
 
   public setKillSwitch(active: boolean): void {
     this.riskManager.setKillSwitch(active);
-    this.log(active ? 'WARNING' : 'INFO', active ? 'Kill switch activated' : 'Kill switch cleared');
+    this.log(
+      active ? 'WARNING' : 'INFO',
+      active ? 'Kill switch activated' : 'Kill switch cleared',
+    );
     this.publish();
   }
 
@@ -184,6 +187,7 @@ export class PlatformStateStore {
 
   public snapshot(timestamp = this.now()): TradingPlatformSnapshot {
     const account = this.account.snapshot(timestamp);
+    const riskStatus = this.riskManager.getStatus();
     const positions = account.openPositions.map((position) => {
       const stopDistance = Math.abs(position.entryPrice - position.stopLossPrice);
       const targetDistance = Math.abs(
@@ -210,7 +214,11 @@ export class PlatformStateStore {
       instrumentId: trade.instrumentId,
       direction: trade.direction,
       result:
-        trade.netPnl > 0 ? ('WIN' as const) : trade.netPnl < 0 ? ('LOSS' as const) : ('BREAKEVEN' as const),
+        trade.netPnl > 0
+          ? ('WIN' as const)
+          : trade.netPnl < 0
+            ? ('LOSS' as const)
+            : ('BREAKEVEN' as const),
       openedAt: trade.openedAt,
       closedAt: trade.closedAt,
       entryPrice: trade.entryPrice,
@@ -254,6 +262,7 @@ export class PlatformStateStore {
       },
       positions,
       trades,
+      equityCurve: account.equityCurve,
       candles: Object.fromEntries(
         [...this.candles.entries()].map(([instrumentId, history]) => [
           instrumentId,
@@ -266,7 +275,10 @@ export class PlatformStateStore {
       settings: this.getSettings(),
       strategies: this.strategies.list(),
       risk: {
-        killSwitchActive: false,
+        killSwitchActive: riskStatus.killSwitchActive,
+        circuitBreakerActive: riskStatus.circuitBreakerActive,
+        consecutiveLosses: riskStatus.consecutiveLosses,
+        cooldownUntil: riskStatus.cooldownUntil,
         liveExecutionAllowed: false,
       },
       liveExecutionAllowed: false,
