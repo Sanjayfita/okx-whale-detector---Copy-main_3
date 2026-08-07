@@ -62,6 +62,7 @@ describe('primary strategy laboratory', () => {
       atrMultiplier: 1.5,
       minimumAtrPercent: 0.1,
       maximumAtrPercent: 20,
+      riskPerTradePercent: 1,
       stopLossPercent: 1,
       takeProfitPercent: 2,
       trailingStopEnabled: false,
