@@ -68,3 +68,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Validate Docker Compose deployment
+        run: docker compose config --quiet
