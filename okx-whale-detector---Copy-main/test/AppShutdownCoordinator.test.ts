@@ -16,6 +16,7 @@ describe('AppShutdownCoordinator', () => {
       stopThroughputMonitor: () => order.push('throughput'),
       closeSubscriptions: () => order.push('subscriptions'),
       closeAlertRecorder: () => order.push('alerts'),
+      closePlatform: () => order.push('platform'),
       closeMarketRecorder: async (reason) => {
         order.push(`market:${reason}`);
         await marketClose;
@@ -26,6 +27,12 @@ describe('AppShutdownCoordinator', () => {
     const duplicate = coordinator.shutdown('SIGTERM');
 
     expect(duplicate).toBe(first);
+
+    // closePlatform is awaited even when it resolves synchronously, so allow
+    // that microtask boundary before asserting that the market recorder has
+    // started closing.
+    await Promise.resolve();
+
     expect(order).toEqual([
       'beforeClose',
       'polymarket',
@@ -33,6 +40,7 @@ describe('AppShutdownCoordinator', () => {
       'throughput',
       'subscriptions',
       'alerts',
+      'platform',
       'market:SIGINT',
     ]);
 
@@ -52,6 +60,7 @@ describe('AppShutdownCoordinator', () => {
       stopThroughputMonitor: vi.fn(),
       closeSubscriptions: vi.fn(),
       closeAlertRecorder,
+      closePlatform: vi.fn(async () => undefined),
       closeMarketRecorder,
     });
 
