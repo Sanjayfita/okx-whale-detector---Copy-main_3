@@ -12,9 +12,10 @@ describe('tradingStrategyConfig', () => {
     expect(tradingStrategyConfig.slowEmaLength).toBe(50);
     expect(tradingStrategyConfig.stopLossPercent).toBe(1);
     expect(tradingStrategyConfig.takeProfitPercent).toBe(2);
+    expect(tradingStrategyConfig.riskPerTradePercent).toBe(1);
   });
 
-  it('rejects invalid EMA ordering and reward/risk configuration', () => {
+  it('rejects invalid EMA ordering, reward/risk and account-risk configuration', () => {
     expect(() =>
       validateTradingStrategyConfig({
         ...tradingStrategyConfig,
@@ -29,5 +30,12 @@ describe('tradingStrategyConfig', () => {
         takeProfitPercent: 1.5,
       }),
     ).toThrow('takeProfitPercent must be at least 2x stopLossPercent');
+
+    expect(() =>
+      validateTradingStrategyConfig({
+        ...tradingStrategyConfig,
+        riskPerTradePercent: 1.01,
+      }),
+    ).toThrow('riskPerTradePercent must not exceed 1% of account equity');
   });
 });
