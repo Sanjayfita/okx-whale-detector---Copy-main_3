@@ -159,12 +159,62 @@ const csvEscape = (value: string | number): string => {
   return /[",\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 };
 
+const closeTrade = (input: {
+  readonly instrumentId: string;
+  readonly position: OpenBacktestPosition;
+  readonly candle: HistoricalBacktestCandle;
+  readonly referencePrice: number;
+  readonly reason: string;
+  readonly policy: PlatformBacktestPolicy;
+}): PlatformBacktestTrade => {
+  const closingSide = input.position.direction === 'LONG' ? 'SELL' : 'BUY';
+  const exitPrice = adversePrice({
+    referencePrice: input.referencePrice,
+    side: closingSide,
+    policy: input.policy,
+  });
+  const grossPnl = movementPnl({
+    direction: input.position.direction,
+    entryPrice: input.position.entryPrice,
+    exitPrice,
+    quantity: input.position.quantityBaseUnits,
+  });
+  const exitFee =
+    exitPrice * input.position.quantityBaseUnits * (input.policy.feeBps / 10_000);
+  const exitSlippageCost =
+    Math.abs(exitPrice - input.referencePrice) * input.position.quantityBaseUnits;
+  const feeCost = input.position.entryFee + exitFee;
+  const slippageCost = input.position.entrySlippageCost + exitSlippageCost;
+  const netPnl = grossPnl - feeCost + input.position.fundingPnl;
+
+  return {
+    tradeId: `${input.instrumentId}:${input.position.openedAt}:${input.candle.timestamp}`,
+    episodeId: episodeId(input.instrumentId, input.position.openedAt),
+    instrumentId: input.instrumentId,
+    direction: input.position.direction,
+    openedAt: input.position.openedAt,
+    closedAt: input.candle.timestamp,
+    entryPrice: input.position.entryPrice,
+    exitPrice,
+    quantityBaseUnits: input.position.quantityBaseUnits,
+    entryReason: input.position.entryReason,
+    exitReason: input.reason,
+    grossPnl,
+    feeCost,
+    fundingPnl: input.position.fundingPnl,
+    slippageCost,
+    netPnl,
+    riskAmount: input.position.riskAmount,
+    rMultiple:
+      input.position.riskAmount > 0 ? netPnl / input.position.riskAmount : 0,
+    durationMs: input.candle.timestamp - input.position.openedAt,
+  };
+};
+
 /**
  * Candle-close backtester for the dashboard and CLI.
- *
- * It is deliberately conservative: stops are checked before targets when both
- * are touched inside one candle, and a newly calculated trailing stop is not
- * eligible until the following candle. That avoids same-bar path lookahead.
+ * Stops are evaluated before targets on ambiguous OHLC bars. A trailing stop
+ * calculated from a candle becomes eligible only on the following candle.
  */
 export class PlatformBacktestEngine {
   public constructor(
@@ -194,54 +244,22 @@ export class PlatformBacktestEngine {
     ];
     const history: HistoricalBacktestCandle[] = [];
 
-    const closePosition = (
+    const finish = (
+      currentPosition: OpenBacktestPosition,
       candle: HistoricalBacktestCandle,
       referencePrice: number,
       reason: string,
     ): void => {
-      if (position === null) return;
-      const closingSide = position.direction === 'LONG' ? 'SELL' : 'BUY';
-      const exitPrice = adversePrice({
+      const trade = closeTrade({
+        instrumentId: input.instrumentId,
+        position: currentPosition,
+        candle,
         referencePrice,
-        side: closingSide,
+        reason,
         policy: this.policy,
       });
-      const grossPnl = movementPnl({
-        direction: position.direction,
-        entryPrice: position.entryPrice,
-        exitPrice,
-        quantity: position.quantityBaseUnits,
-      });
-      const exitFee =
-        exitPrice * position.quantityBaseUnits * (this.policy.feeBps / 10_000);
-      const exitSlippageCost =
-        Math.abs(exitPrice - referencePrice) * position.quantityBaseUnits;
-      const feeCost = position.entryFee + exitFee;
-      const slippageCost = position.entrySlippageCost + exitSlippageCost;
-      const netPnl = grossPnl - feeCost + position.fundingPnl;
-      const trade: PlatformBacktestTrade = {
-        tradeId: `${input.instrumentId}:${position.openedAt}:${candle.timestamp}`,
-        episodeId: episodeId(input.instrumentId, position.openedAt),
-        instrumentId: input.instrumentId,
-        direction: position.direction,
-        openedAt: position.openedAt,
-        closedAt: candle.timestamp,
-        entryPrice: position.entryPrice,
-        exitPrice,
-        quantityBaseUnits: position.quantityBaseUnits,
-        entryReason: position.entryReason,
-        exitReason: reason,
-        grossPnl,
-        feeCost,
-        fundingPnl: position.fundingPnl,
-        slippageCost,
-        netPnl,
-        riskAmount: position.riskAmount,
-        rMultiple: position.riskAmount > 0 ? netPnl / position.riskAmount : 0,
-        durationMs: candle.timestamp - position.openedAt,
-      };
-      realizedEquity += netPnl;
       trades.push(trade);
+      realizedEquity += trade.netPnl;
       position = null;
     };
 
@@ -249,69 +267,80 @@ export class PlatformBacktestEngine {
       history.push(candle);
 
       if (position !== null) {
-        // Stop-first ordering is intentionally conservative for candle OHLC data.
+        const current = position;
         const stopHit =
-          position.direction === 'LONG'
-            ? candle.low <= position.stopLossPrice
-            : candle.high >= position.stopLossPrice;
+          current.direction === 'LONG'
+            ? candle.low <= current.stopLossPrice
+            : candle.high >= current.stopLossPrice;
         if (stopHit) {
-          closePosition(candle, position.stopLossPrice, 'STOP_LOSS');
+          finish(current, candle, current.stopLossPrice, 'STOP_LOSS');
         } else {
           const targetHit =
-            position.direction === 'LONG'
-              ? candle.high >= position.takeProfitPrice
-              : candle.low <= position.takeProfitPrice;
+            current.direction === 'LONG'
+              ? candle.high >= current.takeProfitPrice
+              : candle.low <= current.takeProfitPrice;
           if (targetHit) {
-            closePosition(candle, position.takeProfitPrice, 'TAKE_PROFIT');
-          } else if (position.trailingStopPrice !== null) {
+            finish(current, candle, current.takeProfitPrice, 'TAKE_PROFIT');
+          } else if (current.trailingStopPrice !== null) {
             const trailingHit =
-              position.direction === 'LONG'
-                ? candle.low <= position.trailingStopPrice
-                : candle.high >= position.trailingStopPrice;
+              current.direction === 'LONG'
+                ? candle.low <= current.trailingStopPrice
+                : candle.high >= current.trailingStopPrice;
             if (trailingHit) {
-              closePosition(candle, position.trailingStopPrice, 'TRAILING_STOP');
+              finish(current, candle, current.trailingStopPrice, 'TRAILING_STOP');
             }
           }
         }
       }
 
       if (position !== null && candle.fundingRatePercent !== undefined) {
+        const current = position;
         if (!Number.isFinite(candle.fundingRatePercent)) {
           throw new Error('fundingRatePercent must be finite when supplied');
         }
-        const notional = candle.close * position.quantityBaseUnits;
-        const fundingPnl =
+        const notional: number = candle.close * current.quantityBaseUnits;
+        const fundingPayment: number =
           notional *
           (candle.fundingRatePercent / 100) *
-          (position.direction === 'LONG' ? -1 : 1);
-        position = { ...position, fundingPnl: position.fundingPnl + fundingPnl };
+          (current.direction === 'LONG' ? -1 : 1);
+        position = {
+          ...current,
+          fundingPnl: current.fundingPnl + fundingPayment,
+        };
       }
 
+      const currentForSignal = position;
       const equityForSignal =
-        position === null
+        currentForSignal === null
           ? realizedEquity
           : realizedEquity +
             movementPnl({
-              direction: position.direction,
-              entryPrice: position.entryPrice,
+              direction: currentForSignal.direction,
+              entryPrice: currentForSignal.entryPrice,
               exitPrice: candle.close,
-              quantity: position.quantityBaseUnits,
+              quantity: currentForSignal.quantityBaseUnits,
             }) +
-            position.fundingPnl;
+            currentForSignal.fundingPnl;
       const result = this.strategy.generateSignal({
         instrumentId: input.instrumentId,
         candles: history,
         accountEquity: Math.max(Number.EPSILON, equityForSignal),
-        openPosition: position === null ? null : toOpenPosition(position),
+        openPosition:
+          currentForSignal === null ? null : toOpenPosition(currentForSignal),
         config: input.config,
       });
 
       if (position !== null) {
+        const current = position;
         if (result.action === 'EXIT') {
-          closePosition(candle, candle.close, result.reasons[0] ?? 'STRATEGY_EXIT');
+          finish(
+            current,
+            candle,
+            candle.close,
+            result.reasons[0] ?? 'STRATEGY_EXIT',
+          );
         } else if (result.trailingStopPrice !== null) {
-          // Becomes active only on the next candle.
-          position = { ...position, trailingStopPrice: result.trailingStopPrice };
+          position = { ...current, trailingStopPrice: result.trailingStopPrice };
         }
       } else if (
         (result.action === 'BUY' || result.action === 'SELL') &&
@@ -343,7 +372,6 @@ export class PlatformBacktestEngine {
           (this.policy.feeBps / 10_000);
         const entrySlippageCost =
           Math.abs(fillPrice - candle.close) * result.positionSizeBaseUnits;
-        const actualRiskAmount = stopDistance * result.positionSizeBaseUnits;
         position = {
           direction: result.direction,
           openedAt: candle.timestamp,
@@ -351,7 +379,7 @@ export class PlatformBacktestEngine {
           quantityBaseUnits: result.positionSizeBaseUnits,
           stopLossPrice,
           takeProfitPrice,
-          riskAmount: actualRiskAmount,
+          riskAmount: stopDistance * result.positionSizeBaseUnits,
           entryReason: result.reasons.join(',') || 'STRATEGY_ENTRY',
           entryFee,
           entrySlippageCost,
@@ -360,24 +388,25 @@ export class PlatformBacktestEngine {
         };
       }
 
+      const currentForMark = position;
       const markEquity =
-        position === null
+        currentForMark === null
           ? realizedEquity
           : realizedEquity +
             movementPnl({
-              direction: position.direction,
-              entryPrice: position.entryPrice,
+              direction: currentForMark.direction,
+              entryPrice: currentForMark.entryPrice,
               exitPrice: candle.close,
-              quantity: position.quantityBaseUnits,
+              quantity: currentForMark.quantityBaseUnits,
             }) +
-            position.fundingPnl -
-            position.entryFee;
+            currentForMark.fundingPnl -
+            currentForMark.entryFee;
       equityCurve.push({ timestamp: candle.timestamp, equity: markEquity });
     }
 
     const last = candles[candles.length - 1];
     if (position !== null && last !== undefined) {
-      closePosition(last, last.close, 'END_OF_BACKTEST');
+      finish(position, last, last.close, 'END_OF_BACKTEST');
       equityCurve.push({ timestamp: last.timestamp, equity: realizedEquity });
     }
 
@@ -430,7 +459,10 @@ export class PlatformBacktestEngine {
       throw new Error('candidate comparison requires between 1 and 25 candidates');
     }
     return input.candidates.map((candidate) => {
-      if (candidate.candidateId.trim().length === 0 || ids.has(candidate.candidateId)) {
+      if (
+        candidate.candidateId.trim().length === 0 ||
+        ids.has(candidate.candidateId)
+      ) {
         throw new Error('candidate IDs must be non-empty and unique');
       }
       ids.add(candidate.candidateId);
