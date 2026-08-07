@@ -7,7 +7,9 @@ const skipDatabase = argumentsSet.has('--skip-database');
 const noBrowser = argumentsSet.has('--no-browser');
 
 const executable = (name: string): string =>
-  process.platform === 'win32' && name === 'npm' ? 'npm.cmd' : name;
+  process.platform === 'win32' && (name === 'npm' || name === 'npx')
+    ? `${name}.cmd`
+    : name;
 
 const run = (command: string, args: readonly string[]): void => {
   const result = spawnSync(executable(command), args, {
@@ -16,7 +18,9 @@ const run = (command: string, args: readonly string[]): void => {
   });
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(' ')} failed with exit code ${String(result.status)}`);
+    throw new Error(
+      `${command} ${args.join(' ')} failed with exit code ${String(result.status)}`,
+    );
   }
 };
 
