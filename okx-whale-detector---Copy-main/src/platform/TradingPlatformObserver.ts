@@ -9,5 +9,6 @@ import type { MarketState } from '../core/MarketState';
 export interface TradingPlatformObserver {
   onOrderBook(instrumentId: string, state: MarketState): void;
   onCandle(candle: OKXCandle): void;
+  resetSymbols?(symbols: readonly string[]): void;
   close?(): Promise<void> | void;
 }
