@@ -5,6 +5,7 @@ import {
   createDerivativesFlowStrategyAdapter,
   createMeanReversionCandidate,
   createOriginalWhaleStrategyAdapter,
+  createPrimaryStrategyLaboratory,
   createTrendFollowingCandidate,
   StrategyLaboratory,
 } from '../src/strategy/StrategyLaboratory';
@@ -37,7 +38,7 @@ const bullishSnapshot = (
 });
 
 describe('StrategyLaboratory', () => {
-  it('evaluates competing strategies through one deterministic interface', () => {
+  it('keeps legacy strategies available only for explicit research comparison', () => {
     const laboratory = new StrategyLaboratory([
       createOriginalWhaleStrategyAdapter(),
       createDerivativesFlowStrategyAdapter(),
@@ -56,20 +57,28 @@ describe('StrategyLaboratory', () => {
       'original-whale-baseline',
       'trend-following-v1',
     ]);
-    expect(
-      result.decisions.find(
-        (decision) => decision.strategyId === 'derivatives-flow-v1',
-      )?.status,
-    ).toBe('SIGNAL');
-    expect(
-      result.decisions.find(
-        (decision) => decision.strategyId === 'mean-reversion-v1',
-      )?.status,
-    ).toBe('NO_SIGNAL');
     expect(result.liveExecutionAllowed).toBe(false);
     expect(result.decisions.every((decision) => !decision.liveExecutionAllowed)).toBe(
       true,
     );
+  });
+
+  it('selects only EMA trend logic as the canonical primary entry strategy', () => {
+    const laboratory = createPrimaryStrategyLaboratory();
+    const result = laboratory.evaluate({
+      snapshot: bullishSnapshot(),
+      episodeId: 'primary-1',
+      accountEquity: 10_000,
+    });
+
+    expect(result.decisions).toHaveLength(1);
+    expect(result.decisions[0]).toMatchObject({
+      strategyId: 'ema-trend-v1',
+      status: 'NO_SIGNAL',
+      direction: 'FLAT',
+      reasons: ['CANDLE_HISTORY_REQUIRED'],
+      liveExecutionAllowed: false,
+    });
   });
 
   it('supports a range mean-reversion candidate without promoting it', () => {

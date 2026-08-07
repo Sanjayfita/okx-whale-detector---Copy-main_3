@@ -1,14 +1,26 @@
+import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
+import type { EmaTrendStrategyConfig } from '../config/strategyConfig';
 import type { DerivativeMarketSnapshot } from '../derivatives/DerivativeMarketSnapshot';
 import {
   evaluateDerivativesFlowStrategy,
   type DerivativesFlowStrategyPolicy,
 } from './DerivativesFlowStrategy';
+import {
+  evaluateEmaTrendEntry,
+  type EmaTrendOpenPositionSummary,
+} from './EmaTrendStrategy';
 
 export type LaboratoryDirection = 'LONG' | 'SHORT' | 'FLAT';
 
 export interface StrategyObservation {
   readonly snapshot: DerivativeMarketSnapshot;
   readonly episodeId: string;
+  /** Confirmed candle history is required only by candle-based strategies. */
+  readonly candles?: readonly OKXCandle[];
+  /** Account equity is required only when a strategy creates a risk-sized plan. */
+  readonly accountEquity?: number;
+  /** Current exposure allows the primary strategy to reject duplicate direction risk. */
+  readonly openPositions?: readonly EmaTrendOpenPositionSummary[];
 }
 
 export interface LaboratoryDecision {
@@ -53,6 +65,12 @@ const decision = (input: Omit<LaboratoryDecision, 'liveExecutionAllowed'>): Labo
   liveExecutionAllowed: false,
 });
 
+/**
+ * Frozen research comparator only. This adapter is intentionally retained so
+ * new strategies can be compared against the historical whale baseline. It is
+ * not returned by createPrimaryStrategyLaboratory and is no longer an active
+ * paper-entry strategy.
+ */
 export const createOriginalWhaleStrategyAdapter = (input: {
   readonly minimumAuthenticity?: number;
   readonly minimumDirectionalBias?: number;
@@ -62,7 +80,7 @@ export const createOriginalWhaleStrategyAdapter = (input: {
   return {
     strategyId: 'original-whale-baseline',
     strategyVersion: 1,
-    label: 'Original whale-only baseline',
+    label: 'Original whale-only research baseline',
     evaluate(observation) {
       const snapshot = observation.snapshot;
       if (
@@ -127,12 +145,16 @@ export const createOriginalWhaleStrategyAdapter = (input: {
   };
 };
 
+/**
+ * Legacy research comparator only. The primary strategy factory below no
+ * longer selects derivatives-flow/whale confirmation for entries.
+ */
 export const createDerivativesFlowStrategyAdapter = (
   policy?: DerivativesFlowStrategyPolicy,
 ): ResearchStrategy => ({
   strategyId: 'derivatives-flow-v1',
   strategyVersion: 1,
-  label: 'Derivatives flow-confirmed structure',
+  label: 'Legacy derivatives-flow research comparator',
   evaluate(observation) {
     const result = evaluateDerivativesFlowStrategy({
       snapshot: observation.snapshot,
@@ -154,6 +176,77 @@ export const createDerivativesFlowStrategyAdapter = (
               .map((confirmation) => confirmation.name)
           : result.rejectionReasons,
       parameters: policy === undefined ? { policy: 'DEFAULT' } : { policy: 'CUSTOM' },
+    });
+  },
+});
+
+/**
+ * Adapter for the new primary rules-based strategy. Unlike the frozen whale
+ * baseline, the EMA strategy consumes candle history and account equity so it
+ * can produce deterministic, one-percent-risk entry plans.
+ */
+export const createEmaTrendStrategyAdapter = (
+  config?: EmaTrendStrategyConfig,
+): ResearchStrategy => ({
+  strategyId: 'ema-trend-v1',
+  strategyVersion: 1,
+  label: 'EMA 20/50 crossover with trend, RSI, ATR and 1% risk controls',
+  evaluate(observation) {
+    const snapshot = observation.snapshot;
+    if (observation.candles === undefined) {
+      return decision({
+        strategyId: 'ema-trend-v1',
+        strategyVersion: 1,
+        instrumentId: snapshot.instrumentId,
+        observedAt: snapshot.observedAt,
+        episodeId: observation.episodeId,
+        status: 'NO_SIGNAL',
+        direction: 'FLAT',
+        score: 0,
+        reasons: ['CANDLE_HISTORY_REQUIRED'],
+        parameters: { policy: config === undefined ? 'DEFAULT' : 'CUSTOM' },
+      });
+    }
+    if (observation.accountEquity === undefined) {
+      return decision({
+        strategyId: 'ema-trend-v1',
+        strategyVersion: 1,
+        instrumentId: snapshot.instrumentId,
+        observedAt: snapshot.observedAt,
+        episodeId: observation.episodeId,
+        status: 'REJECTED',
+        direction: 'FLAT',
+        score: 0,
+        reasons: ['ACCOUNT_EQUITY_REQUIRED'],
+        parameters: { policy: config === undefined ? 'DEFAULT' : 'CUSTOM' },
+      });
+    }
+
+    const result = evaluateEmaTrendEntry({
+      candles: observation.candles,
+      accountEquity: observation.accountEquity,
+      openPositions: observation.openPositions,
+      config,
+    });
+
+    const trendStrength = result.indicators
+      ? Math.min(1, Math.abs(result.indicators.slowEmaSlopePercent) / 0.5)
+      : 0;
+    return decision({
+      strategyId: 'ema-trend-v1',
+      strategyVersion: 1,
+      instrumentId: result.instrumentId ?? snapshot.instrumentId,
+      observedAt: result.observedAt ?? snapshot.observedAt,
+      episodeId: observation.episodeId,
+      status: result.status,
+      direction: result.direction ?? 'FLAT',
+      score: result.status === 'SIGNAL' ? Math.max(0.5, trendStrength) : 0,
+      reasons: result.reasons,
+      parameters: {
+        policy: config === undefined ? 'DEFAULT' : 'CUSTOM',
+        riskPerTradePercent: result.tradePlan?.riskPercent ?? 1,
+        minimumRewardRiskRatio: result.tradePlan?.rewardRiskRatio ?? 2,
+      },
     });
   },
 });
@@ -277,3 +370,12 @@ export class StrategyLaboratory {
     };
   }
 }
+
+/**
+ * Canonical active strategy selection. Whale and derivatives-flow strategies
+ * remain available only as explicit research comparators; callers asking for
+ * the primary entry strategy receive EMA trend logic and nothing else.
+ */
+export const createPrimaryStrategyLaboratory = (
+  config?: EmaTrendStrategyConfig,
+): StrategyLaboratory => new StrategyLaboratory([createEmaTrendStrategyAdapter(config)]);
