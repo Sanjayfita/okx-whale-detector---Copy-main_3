@@ -39,6 +39,7 @@ import {
 } from './market/MarketEngine';
 import { ExternalSignalCorrelationService } from './external/core/ExternalSignalCorrelationService';
 import { PolymarketLiveSignalRuntime } from './external/providers/polymarket/PolymarketLiveSignalRuntime';
+import type { TradingPlatformObserver } from './platform/TradingPlatformObserver';
 import { BoundedRecorderQueue } from './recording/BoundedRecorderQueue';
 import { MarketDataRecorder } from './recording/MarketDataRecorder';
 import { CorrelatedAlertRecorder } from './recording/CorrelatedAlertRecorder';
@@ -65,6 +66,7 @@ export interface AppRuntimeDependencies {
   correlatedAlertReporter?: CorrelatedAlertReporter;
   correlatedAlertRecorder?: CorrelatedAlertRecorder;
   alphaMarketContextObserver?: AlphaMarketContextObserver;
+  tradingPlatformObserver?: TradingPlatformObserver;
   polymarketRuntime?: PolymarketLiveSignalRuntime;
   marketDataRecorderFactory?: (
     directory: string,
@@ -334,6 +336,13 @@ export const createAppRuntime = async (
       healthMonitor.recordOrderBook(update.instId);
       throughputMonitor.record(update.instId, 'orderBook');
       marketEngine.processOrderBookUpdate(update, messagePerformance);
+      const platformState = marketStates.get(update.instId);
+      if (platformState !== undefined) {
+        dependencies.tradingPlatformObserver?.onOrderBook(
+          update.instId,
+          platformState,
+        );
+      }
     },
     onTrade: (trade) => {
       if (isShuttingDown) {
@@ -375,6 +384,7 @@ export const createAppRuntime = async (
       throughputMonitor.record(candle.instId, 'candle');
       const startedAt = performance.now();
       candleUpdateHandler.handle(candle);
+      dependencies.tradingPlatformObserver?.onCandle(candle);
       pipelineProfiler.record(
         'candle.handler.total',
         performance.now() - startedAt,
@@ -394,6 +404,7 @@ export const createAppRuntime = async (
       marketEngine.resetSymbols(symbols);
       healthMonitor.resetSymbols(symbols);
       throughputMonitor.resetSymbols(symbols);
+      dependencies.tradingPlatformObserver?.resetSymbols?.(symbols);
 
       console.log(
         `✅ Reset ${symbols.length} markets. Waiting for fresh snapshots...`,
@@ -457,6 +468,7 @@ export const createAppRuntime = async (
     stopThroughputMonitor: () => throughputMonitor.stop(),
     closeSubscriptions: () => subscriptionManager.close(),
     closeAlertRecorder: () => correlatedAlertRecorder.close(),
+    closePlatform: () => dependencies.tradingPlatformObserver?.close?.(),
     closeMarketRecorder:
       recorder === undefined
         ? undefined
