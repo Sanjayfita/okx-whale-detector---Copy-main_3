@@ -1,14 +1,29 @@
+import {
+  tradingStrategyConfig,
+  type TradingStrategyConfig,
+} from '../config/tradingStrategyConfig';
 import type { DerivativeMarketSnapshot } from '../derivatives/DerivativeMarketSnapshot';
 import {
   evaluateDerivativesFlowStrategy,
   type DerivativesFlowStrategyPolicy,
 } from './DerivativesFlowStrategy';
+import {
+  evaluateEmaTrendStrategy,
+  type EmaTrendCandle,
+  type EmaTrendOpenPosition,
+} from './EmaTrendStrategy';
 
 export type LaboratoryDirection = 'LONG' | 'SHORT' | 'FLAT';
 
 export interface StrategyObservation {
   readonly snapshot: DerivativeMarketSnapshot;
   readonly episodeId: string;
+  /** Confirmed candle history is required by the primary EMA strategy. */
+  readonly candles?: readonly EmaTrendCandle[];
+  /** Current paper/research equity is used for the strategy's fixed 1% risk sizing. */
+  readonly accountEquity?: number;
+  /** An existing position prevents duplicate entries and enables deterministic exits. */
+  readonly openPosition?: EmaTrendOpenPosition | null;
 }
 
 export interface LaboratoryDecision {
@@ -47,22 +62,107 @@ const requireScore = (score: number): number => {
   return score;
 };
 
-const decision = (input: Omit<LaboratoryDecision, 'liveExecutionAllowed'>): LaboratoryDecision => ({
+const decision = (
+  input: Omit<LaboratoryDecision, 'liveExecutionAllowed'>,
+): LaboratoryDecision => ({
   ...input,
   score: requireScore(input.score),
   liveExecutionAllowed: false,
 });
 
-export const createOriginalWhaleStrategyAdapter = (input: {
-  readonly minimumAuthenticity?: number;
-  readonly minimumDirectionalBias?: number;
-} = {}): ResearchStrategy => {
+/**
+ * Primary trading-strategy adapter.
+ *
+ * Whale evidence is deliberately not consulted here. The strategy operates only
+ * on confirmed candle history, current equity, and position state.
+ */
+export const createEmaTrendStrategyAdapter = (
+  config: TradingStrategyConfig = tradingStrategyConfig,
+): ResearchStrategy => ({
+  strategyId: 'ema-trend-crossover-v1',
+  strategyVersion: 1,
+  label: 'EMA 20/50 crossover with RSI and ATR filters',
+  evaluate(observation) {
+    if (observation.candles === undefined || observation.accountEquity === undefined) {
+      return decision({
+        strategyId: 'ema-trend-crossover-v1',
+        strategyVersion: 1,
+        instrumentId: observation.snapshot.instrumentId,
+        observedAt: observation.snapshot.observedAt,
+        episodeId: observation.episodeId,
+        status: 'NO_SIGNAL',
+        direction: 'FLAT',
+        score: 0,
+        reasons: ['EMA_CANDLES_OR_EQUITY_MISSING'],
+        parameters: {
+          fastEmaLength: config.fastEmaLength,
+          slowEmaLength: config.slowEmaLength,
+          rsiPeriod: config.rsiPeriod,
+          atrPeriod: config.atrPeriod,
+          atrMultiplier: config.atrMultiplier,
+          minimumAtrPercent: config.minimumAtrPercent,
+          maximumAtrPercent: config.maximumAtrPercent,
+          stopLossPercent: config.stopLossPercent,
+          takeProfitPercent: config.takeProfitPercent,
+          trailingStopEnabled: config.trailingStopEnabled,
+          trailingStopPercent: config.trailingStopPercent,
+        },
+      });
+    }
+
+    const result = evaluateEmaTrendStrategy({
+      instrumentId: observation.snapshot.instrumentId,
+      candles: observation.candles,
+      accountEquity: observation.accountEquity,
+      openPosition: observation.openPosition,
+      config,
+    });
+    const entrySignal =
+      result.action === 'ENTER_LONG' || result.action === 'ENTER_SHORT';
+
+    return decision({
+      strategyId: 'ema-trend-crossover-v1',
+      strategyVersion: 1,
+      instrumentId: observation.snapshot.instrumentId,
+      observedAt: result.observedAt ?? observation.snapshot.observedAt,
+      episodeId: observation.episodeId,
+      status: entrySignal ? 'SIGNAL' : 'NO_SIGNAL',
+      direction: entrySignal ? (result.direction ?? 'FLAT') : 'FLAT',
+      score: entrySignal ? 1 : 0,
+      reasons: result.reasons,
+      parameters: {
+        fastEmaLength: config.fastEmaLength,
+        slowEmaLength: config.slowEmaLength,
+        rsiPeriod: config.rsiPeriod,
+        atrPeriod: config.atrPeriod,
+        atrMultiplier: config.atrMultiplier,
+        minimumAtrPercent: config.minimumAtrPercent,
+        maximumAtrPercent: config.maximumAtrPercent,
+        stopLossPercent: config.stopLossPercent,
+        takeProfitPercent: config.takeProfitPercent,
+        trailingStopEnabled: config.trailingStopEnabled,
+        trailingStopPercent: config.trailingStopPercent,
+      },
+    });
+  },
+});
+
+/**
+ * Historical research baseline only. Do not use this adapter as the primary
+ * trading-entry strategy.
+ */
+export const createOriginalWhaleStrategyAdapter = (
+  input: {
+    readonly minimumAuthenticity?: number;
+    readonly minimumDirectionalBias?: number;
+  } = {},
+): ResearchStrategy => {
   const minimumAuthenticity = input.minimumAuthenticity ?? 0.65;
   const minimumDirectionalBias = input.minimumDirectionalBias ?? 0.2;
   return {
     strategyId: 'original-whale-baseline',
     strategyVersion: 1,
-    label: 'Original whale-only baseline',
+    label: 'Historical whale-only research baseline',
     evaluate(observation) {
       const snapshot = observation.snapshot;
       if (
@@ -127,12 +227,13 @@ export const createOriginalWhaleStrategyAdapter = (input: {
   };
 };
 
+/** Research-only comparator retained for historical Phase 5/6 reproducibility. */
 export const createDerivativesFlowStrategyAdapter = (
   policy?: DerivativesFlowStrategyPolicy,
 ): ResearchStrategy => ({
   strategyId: 'derivatives-flow-v1',
   strategyVersion: 1,
-  label: 'Derivatives flow-confirmed structure',
+  label: 'Historical derivatives-flow research comparator',
   evaluate(observation) {
     const result = evaluateDerivativesFlowStrategy({
       snapshot: observation.snapshot,
@@ -144,7 +245,8 @@ export const createDerivativesFlowStrategyAdapter = (
       instrumentId: result.instrumentId,
       observedAt: result.observedAt,
       episodeId: observation.episodeId,
-      status: result.status === 'QUALIFIED_FOR_RESEARCH' ? 'SIGNAL' : 'REJECTED',
+      status:
+        result.status === 'QUALIFIED_FOR_RESEARCH' ? 'SIGNAL' : 'REJECTED',
       direction: result.direction ?? 'FLAT',
       score: result.weightedScore,
       reasons:
@@ -153,27 +255,31 @@ export const createDerivativesFlowStrategyAdapter = (
               .filter((confirmation) => confirmation.passed)
               .map((confirmation) => confirmation.name)
           : result.rejectionReasons,
-      parameters: policy === undefined ? { policy: 'DEFAULT' } : { policy: 'CUSTOM' },
+      parameters:
+        policy === undefined ? { policy: 'DEFAULT' } : { policy: 'CUSTOM' },
     });
   },
 });
 
-export const createTrendFollowingCandidate = (input: {
-  readonly minimumTrendEfficiency?: number;
-  readonly minimumTrendAlignment?: number;
-  readonly maximumSpreadBps?: number;
-} = {}): ResearchStrategy => {
+export const createTrendFollowingCandidate = (
+  input: {
+    readonly minimumTrendEfficiency?: number;
+    readonly minimumTrendAlignment?: number;
+    readonly maximumSpreadBps?: number;
+  } = {},
+): ResearchStrategy => {
   const minimumTrendEfficiency = input.minimumTrendEfficiency ?? 0.4;
   const minimumTrendAlignment = input.minimumTrendAlignment ?? 0.35;
   const maximumSpreadBps = input.maximumSpreadBps ?? 8;
   return {
     strategyId: 'trend-following-v1',
     strategyVersion: 1,
-    label: 'Simple derivatives trend following',
+    label: 'Historical simple derivatives trend comparator',
     evaluate(observation) {
       const snapshot = observation.snapshot;
       const midpoint = (snapshot.bestBid + snapshot.bestAsk) / 2;
-      const spreadBps = ((snapshot.bestAsk - snapshot.bestBid) / midpoint) * 10_000;
+      const spreadBps =
+        ((snapshot.bestAsk - snapshot.bestBid) / midpoint) * 10_000;
       const direction = snapshot.trendAlignment > 0 ? 'LONG' : 'SHORT';
       const passed =
         snapshot.trendEfficiency >= minimumTrendEfficiency &&
@@ -189,9 +295,14 @@ export const createTrendFollowingCandidate = (input: {
         status: passed ? 'SIGNAL' : 'NO_SIGNAL',
         direction: passed ? direction : 'FLAT',
         score: passed
-          ? Math.min(1, (snapshot.trendEfficiency + Math.abs(snapshot.trendAlignment)) / 2)
+          ? Math.min(
+              1,
+              (snapshot.trendEfficiency + Math.abs(snapshot.trendAlignment)) / 2,
+            )
           : 0,
-        reasons: passed ? ['TREND_AND_STRUCTURE_ALIGNED'] : ['TREND_FILTER_NOT_MET'],
+        reasons: passed
+          ? ['TREND_AND_STRUCTURE_ALIGNED']
+          : ['TREND_FILTER_NOT_MET'],
         parameters: {
           minimumTrendEfficiency,
           minimumTrendAlignment,
@@ -202,11 +313,13 @@ export const createTrendFollowingCandidate = (input: {
   };
 };
 
-export const createMeanReversionCandidate = (input: {
-  readonly minimumAbsoluteVwapDeviationAtr?: number;
-  readonly maximumTrendEfficiency?: number;
-  readonly maximumAbsoluteBasisBps?: number;
-} = {}): ResearchStrategy => {
+export const createMeanReversionCandidate = (
+  input: {
+    readonly minimumAbsoluteVwapDeviationAtr?: number;
+    readonly maximumTrendEfficiency?: number;
+    readonly maximumAbsoluteBasisBps?: number;
+  } = {},
+): ResearchStrategy => {
   const minimumAbsoluteVwapDeviationAtr =
     input.minimumAbsoluteVwapDeviationAtr ?? 1.5;
   const maximumTrendEfficiency = input.maximumTrendEfficiency ?? 0.3;
@@ -214,15 +327,17 @@ export const createMeanReversionCandidate = (input: {
   return {
     strategyId: 'mean-reversion-v1',
     strategyVersion: 1,
-    label: 'VWAP mean reversion in range regimes',
+    label: 'Historical VWAP mean-reversion research comparator',
     evaluate(observation) {
       const snapshot = observation.snapshot;
       const basisBps =
-        ((snapshot.markPrice - snapshot.indexPrice) / snapshot.indexPrice) * 10_000;
+        ((snapshot.markPrice - snapshot.indexPrice) / snapshot.indexPrice) *
+        10_000;
       const passed =
         snapshot.marketStructure === 'RANGE' &&
         snapshot.trendEfficiency <= maximumTrendEfficiency &&
-        Math.abs(snapshot.vwapDeviationAtr) >= minimumAbsoluteVwapDeviationAtr &&
+        Math.abs(snapshot.vwapDeviationAtr) >=
+          minimumAbsoluteVwapDeviationAtr &&
         Math.abs(basisBps) <= maximumAbsoluteBasisBps;
       const direction: LaboratoryDirection =
         snapshot.vwapDeviationAtr > 0 ? 'SHORT' : 'LONG';
@@ -237,7 +352,9 @@ export const createMeanReversionCandidate = (input: {
         score: passed
           ? Math.min(1, Math.abs(snapshot.vwapDeviationAtr) / 3)
           : 0,
-        reasons: passed ? ['RANGE_VWAP_DISLOCATION'] : ['MEAN_REVERSION_FILTER_NOT_MET'],
+        reasons: passed
+          ? ['RANGE_VWAP_DISLOCATION']
+          : ['MEAN_REVERSION_FILTER_NOT_MET'],
         parameters: {
           minimumAbsoluteVwapDeviationAtr,
           maximumTrendEfficiency,
@@ -272,8 +389,19 @@ export class StrategyLaboratory {
       instrumentId: observation.snapshot.instrumentId,
       observedAt: observation.snapshot.observedAt,
       episodeId: observation.episodeId,
-      decisions: this.strategies.map((strategy) => strategy.evaluate(observation)),
+      decisions: this.strategies.map((strategy) =>
+        strategy.evaluate(observation),
+      ),
       liveExecutionAllowed: false,
     };
   }
 }
+
+/**
+ * The maintained trading strategy boundary. New paper/shadow integrations should
+ * use this factory rather than whale or multi-confirmation research comparators.
+ */
+export const createPrimaryStrategyLaboratory = (
+  config: TradingStrategyConfig = tradingStrategyConfig,
+): StrategyLaboratory =>
+  new StrategyLaboratory([createEmaTrendStrategyAdapter(config)]);
