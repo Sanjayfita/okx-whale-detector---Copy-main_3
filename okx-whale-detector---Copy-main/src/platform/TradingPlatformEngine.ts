@@ -139,6 +139,7 @@ export class TradingPlatformEngine {
   private readonly books = new Map<string, ExecutionOrderBook>();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
   private readonly executionResumeAfter = new Map<string, number>();
+  private readonly lastEvaluatedConfirmedCandle = new Map<string, string>();
   private readonly maximumStrategyCandles: number;
   private readonly paperLeverage: number;
   private readonly maintenanceMarginRate: number;
@@ -178,6 +179,7 @@ export class TradingPlatformEngine {
     this.rebuildingTimeframe = true;
     this.candles.clear();
     this.executionResumeAfter.clear();
+    this.lastEvaluatedConfirmedCandle.clear();
     this.store.clearStrategyMarketState();
     this.store.setTimeframeState(
       'REBUILDING',
@@ -287,18 +289,30 @@ export class TradingPlatformEngine {
     });
     this.store.setStrategyStatus(statusFromDecision(result));
 
+    const evaluationId = `${selectedTimeframe}:${candle.timestamp}`;
+    if (this.lastEvaluatedConfirmedCandle.get(candle.instId) === evaluationId) {
+      return;
+    }
+    this.lastEvaluatedConfirmedCandle.set(candle.instId, evaluationId);
+
     if (this.rebuildingTimeframe) return;
     const resumeAfter = this.executionResumeAfter.get(candle.instId);
     if (resumeAfter !== undefined && candle.timestamp <= resumeAfter) return;
 
     if (position !== undefined) {
       if (result.trailingStopPrice !== null) {
+        const trailingChanged =
+          result.trailingStopPrice !== position.trailingStopPrice;
         this.store.account.markPosition({
           instrumentId: candle.instId,
           price: candle.close,
           timestamp: candle.timestamp,
           trailingStopPrice: result.trailingStopPrice,
+          auditEventId: trailingChanged
+            ? `trailing:${position.tradeId}:${candle.timestamp}:${result.trailingStopPrice}`
+            : undefined,
         });
+        if (trailingChanged) this.store.persistPaperState(candle.timestamp);
       }
       if (result.action === 'EXIT') {
         this.closePaperPosition(
@@ -328,6 +342,7 @@ export class TradingPlatformEngine {
     readonly instrumentId: string;
     readonly fundingRatePercent: number;
     readonly timestamp: number;
+    readonly fundingEventId?: string;
   }): void {
     const position = this.store.account.getOpenPosition(input.instrumentId);
     if (position === undefined) return;
@@ -339,11 +354,19 @@ export class TradingPlatformEngine {
       notional *
       (input.fundingRatePercent / 100) *
       (position.direction === 'LONG' ? -1 : 1);
-    this.store.account.applyFunding({
+    const fundingId =
+      input.fundingEventId ??
+      `paper-funding:${input.instrumentId}:${input.timestamp}`;
+    const applied = this.store.account.applyFundingEvent({
+      fundingId,
       instrumentId: input.instrumentId,
       fundingPnl,
+      fundingRatePercent: input.fundingRatePercent,
+      positionNotional: notional,
       timestamp: input.timestamp,
     });
+    if (!applied.applied) return;
+    this.store.persistPaperState(input.timestamp);
     this.store.log('TRADE', 'Paper funding applied', {
       instrumentId: input.instrumentId,
       fundingPnl,
@@ -452,7 +475,14 @@ export class TradingPlatformEngine {
         ? fill.averagePrice + targetDistance
         : fill.averagePrice - targetDistance;
     const actualRiskAmount = stopDistance * fill.filledQuantity;
-    this.store.account.openPosition({
+    const timeframe = this.store.getSettings().timeframe;
+    const tradeId =
+      `paper:${result.strategyId}:${result.instrumentId}:` +
+      `${timeframe}:${result.observedAt}`;
+    const fillId = `${tradeId}:entry:${executionBook.observedAt}`;
+    const opened = this.store.account.openPositionFromFill({
+      fillId,
+      tradeId,
       instrumentId: result.instrumentId,
       direction: result.direction,
       openedAt: executionBook.observedAt,
@@ -464,7 +494,12 @@ export class TradingPlatformEngine {
       riskAmount: actualRiskAmount,
       entryReason: result.reasons.join(',') || 'STRATEGY_ENTRY',
       entryFee: fill.fee,
+      slippageBps: fill.slippageBps,
+      strategyId: result.strategyId,
+      timeframe,
     });
+    if (!opened.applied) return;
+    this.store.persistPaperState(executionBook.observedAt);
     this.store.log('TRADE', 'Paper position opened', {
       instrumentId: result.instrumentId,
       direction: result.direction,
@@ -510,17 +545,36 @@ export class TradingPlatformEngine {
       return;
     }
 
-    const trade = this.store.account.closePosition({
+    const fillId = `${position.tradeId}:exit:${book.observedAt}:${exitReason}`;
+    const closed = this.store.account.closePositionFromFill({
+      fillId,
       instrumentId,
       exitPrice: fill.averagePrice,
+      quantityBaseUnits: fill.filledQuantity,
       closedAt: book.observedAt,
       exitReason,
       exitFee: fill.fee,
+      slippageBps: fill.slippageBps,
     });
+    if (!closed.applied || closed.trade === null) return;
+    const trade = closed.trade;
     this.store.riskManager.recordClosedTrade({
       closedAt: trade.closedAt,
       netPnl: trade.netPnl,
     });
+    const risk = this.store.riskManager.getStatus();
+    this.store.account.recordAuditEvent({
+      eventId: `risk-close:${trade.tradeId}:${trade.closedAt}`,
+      type: 'RISK_STATE_UPDATE',
+      timestamp: trade.closedAt,
+      instrumentId,
+      details: {
+        consecutiveLosses: risk.consecutiveLosses,
+        circuitBreakerActive: risk.circuitBreakerActive,
+        cooldownUntil: risk.cooldownUntil,
+      },
+    });
+    this.store.persistPaperState(trade.closedAt);
     this.store.log('TRADE', 'Paper position closed', {
       instrumentId,
       exitReason,
