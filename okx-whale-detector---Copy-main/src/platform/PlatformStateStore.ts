@@ -3,13 +3,17 @@ import {
   type TradingStrategyConfig,
   validateTradingStrategyConfig,
 } from '../config/tradingStrategyConfig';
-import type { TimeframeLoadState } from './PlatformContracts';
 import { PaperAccountLedger } from '../paper/PaperAccountLedger';
+import {
+  PaperStateRepository,
+  type PaperRecoveryContext,
+} from '../paper/PaperStateRepository';
 import { TradingRiskManager } from '../risk/TradingRiskManager';
 import {
   createDefaultStrategyRegistry,
   type StrategyRegistry,
 } from '../strategies/StrategyRegistry';
+import type { TimeframeLoadState } from './PlatformContracts';
 import type {
   DashboardCandle,
   DashboardLogEntry,
@@ -27,7 +31,20 @@ export interface PlatformStateStoreOptions {
   readonly maximumLogs?: number;
   readonly strategyRegistry?: StrategyRegistry;
   readonly riskManager?: TradingRiskManager;
+  readonly paperStateRepository?: PaperStateRepository;
   readonly now?: () => number;
+}
+
+export interface PaperAccountReconciliationReport {
+  readonly stateLoaded: boolean;
+  readonly ledgerIntegrity: 'PASS' | 'WARN';
+  readonly positionsRestored: number;
+  readonly riskStateRestored: boolean;
+  readonly equityRestored: boolean;
+  readonly fundingEventsRestored: number;
+  readonly duplicateEvents: number;
+  readonly warnings: readonly string[];
+  readonly result: 'PASS' | 'WARN';
 }
 
 type SnapshotSubscriber = (snapshot: TradingPlatformSnapshot) => void;
@@ -66,6 +83,16 @@ const toStrategyConfig = (settings: DashboardSettings): TradingStrategyConfig =>
   trailingStopPercent: settings.trailingStopPercent,
 });
 
+const cloneRecoveryContext = (
+  context: PaperRecoveryContext,
+): PaperRecoveryContext => ({
+  activeStrategyId: context.activeStrategyId,
+  timeframe: context.timeframe,
+  lastConfirmedCandleByInstrument: {
+    ...context.lastConfirmedCandleByInstrument,
+  },
+});
+
 export class PlatformStateStore {
   public readonly account: PaperAccountLedger;
   public readonly riskManager: TradingRiskManager;
@@ -76,6 +103,9 @@ export class PlatformStateStore {
   private readonly status = new Map<string, DashboardStrategyStatus>();
   private readonly logs: DashboardLogEntry[] = [];
   private readonly subscribers = new Set<SnapshotSubscriber>();
+  private readonly lastConfirmedCandleByInstrument = new Map<string, number>();
+  private readonly paperStateRepository?: PaperStateRepository;
+  private restoredRecoveryContext: PaperRecoveryContext | null = null;
   private logSequence = 0;
   private readonly maximumCandlesPerInstrument: number;
   private readonly maximumLogs: number;
@@ -90,6 +120,7 @@ export class PlatformStateStore {
     this.settings = defaultSettings(options.mode ?? 'PAPER');
     this.maximumCandlesPerInstrument = options.maximumCandlesPerInstrument ?? 500;
     this.maximumLogs = options.maximumLogs ?? 1_000;
+    this.paperStateRepository = options.paperStateRepository;
     this.now = options.now ?? Date.now;
 
     if (
@@ -128,6 +159,121 @@ export class PlatformStateStore {
     return this.getSettings();
   }
 
+  public restorePaperState(): PaperAccountReconciliationReport {
+    const repository = this.paperStateRepository;
+    if (repository === undefined) {
+      return {
+        stateLoaded: false,
+        ledgerIntegrity: 'PASS',
+        positionsRestored: 0,
+        riskStateRestored: false,
+        equityRestored: true,
+        fundingEventsRestored: 0,
+        duplicateEvents: 0,
+        warnings: [],
+        result: 'PASS',
+      };
+    }
+    const persisted = repository.load();
+    if (persisted === null) {
+      this.log('INFO', 'No persisted paper account found; starting fresh', {
+        file: repository.getFilePath(),
+      });
+      return {
+        stateLoaded: false,
+        ledgerIntegrity: 'PASS',
+        positionsRestored: 0,
+        riskStateRestored: false,
+        equityRestored: true,
+        fundingEventsRestored: 0,
+        duplicateEvents: 0,
+        warnings: [],
+        result: 'PASS',
+      };
+    }
+
+    const account = this.account.restoreState(persisted.account);
+    const risk = this.riskManager.restoreState(persisted.risk);
+    this.restoredRecoveryContext = cloneRecoveryContext(persisted.context);
+    const warnings = [...account.warnings, ...risk.warnings];
+    if (persisted.context.timeframe !== this.settings.timeframe) {
+      warnings.push(
+        `Persisted paper context timeframe ${persisted.context.timeframe} differs from selected ${this.settings.timeframe}; candle recovery will use selected settings`,
+      );
+    }
+    if (persisted.context.activeStrategyId !== this.settings.activeStrategyId) {
+      warnings.push(
+        `Persisted paper strategy ${persisted.context.activeStrategyId} differs from selected ${this.settings.activeStrategyId}`,
+      );
+    }
+    for (const warning of warnings) {
+      this.log('WARNING', 'Paper account reconciliation warning', { warning });
+    }
+    const report: PaperAccountReconciliationReport = {
+      stateLoaded: true,
+      ledgerIntegrity: warnings.length === 0 ? 'PASS' : 'WARN',
+      positionsRestored: account.positionsRestored,
+      riskStateRestored: risk.restored,
+      equityRestored: true,
+      fundingEventsRestored: account.fundingEventsRestored,
+      duplicateEvents: account.duplicateEvents,
+      warnings,
+      result: warnings.length === 0 ? 'PASS' : 'WARN',
+    };
+    this.log('INFO', 'Paper account reconciliation completed', {
+      result: report.result,
+      positionsRestored: report.positionsRestored,
+      fundingEventsRestored: report.fundingEventsRestored,
+      duplicateEvents: report.duplicateEvents,
+      savedAt: persisted.savedAt,
+    });
+    return report;
+  }
+
+  public persistPaperState(timestamp = this.now()): void {
+    const repository = this.paperStateRepository;
+    if (repository === undefined) return;
+    const currentTimestamps = Object.fromEntries(
+      [...this.lastConfirmedCandleByInstrument.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
+    const fallback =
+      this.restoredRecoveryContext?.timeframe === this.settings.timeframe
+        ? this.restoredRecoveryContext.lastConfirmedCandleByInstrument
+        : {};
+    const context: PaperRecoveryContext = {
+      activeStrategyId: this.settings.activeStrategyId,
+      timeframe: this.settings.timeframe,
+      lastConfirmedCandleByInstrument:
+        Object.keys(currentTimestamps).length > 0 ? currentTimestamps : { ...fallback },
+    };
+    repository.save({
+      schemaVersion: 1,
+      savedAt: timestamp,
+      account: this.account.exportState(),
+      risk: this.riskManager.exportState(),
+      context,
+    });
+    this.restoredRecoveryContext = cloneRecoveryContext(context);
+  }
+
+  public getRecoveryContext(): PaperRecoveryContext | null {
+    return this.restoredRecoveryContext === null
+      ? null
+      : cloneRecoveryContext(this.restoredRecoveryContext);
+  }
+
+  public getRecoveredCandleTimestamp(
+    instrumentId: string,
+    timeframe: DashboardSettings['timeframe'],
+  ): number | null {
+    const context = this.restoredRecoveryContext;
+    if (context === null || context.timeframe !== timeframe) return null;
+    const timestamp = context.lastConfirmedCandleByInstrument[instrumentId];
+    return timestamp === undefined ? null : timestamp;
+  }
+
   public setTimeframeState(state: TimeframeLoadState, message: string): void {
     this.timeframeState = state;
     this.timeframeMessage = message;
@@ -137,15 +283,24 @@ export class PlatformStateStore {
   public clearStrategyMarketState(): void {
     this.candles.clear();
     this.status.clear();
+    this.lastConfirmedCandleByInstrument.clear();
     this.publish();
   }
 
   public setKillSwitch(active: boolean): void {
     this.riskManager.setKillSwitch(active);
+    this.account.recordAuditEvent({
+      eventId: `risk-kill-switch:${this.now()}:${active}`,
+      type: 'RISK_STATE_UPDATE',
+      timestamp: this.now(),
+      instrumentId: 'PORTFOLIO',
+      details: { killSwitchActive: active },
+    });
     this.log(
       active ? 'WARNING' : 'INFO',
       active ? 'Kill switch activated' : 'Kill switch cleared',
     );
+    this.persistPaperState();
     this.publish();
   }
 
@@ -164,6 +319,15 @@ export class PlatformStateStore {
       history.splice(0, history.length - this.maximumCandlesPerInstrument);
     }
     this.candles.set(candle.instrumentId, history);
+    if (candle.confirmed) {
+      const previous = this.lastConfirmedCandleByInstrument.get(candle.instrumentId);
+      if (previous === undefined || candle.timestamp > previous) {
+        this.lastConfirmedCandleByInstrument.set(
+          candle.instrumentId,
+          candle.timestamp,
+        );
+      }
+    }
     this.publish();
   }
 
