@@ -51,16 +51,15 @@ WebSocket.prototype.addEventListener = function (
     return;
   }
 
-  const socket = this;
   const guardedListener: EventListener = (event) => {
     if (isUserEditing()) {
       // Coalesce high-frequency snapshots while a native input/select is active.
       // Keeping only the newest message prevents unbounded queue growth and avoids
       // replacing the live form control underneath the user's pointer/keyboard.
-      deferredMessages.set(listener, { socket, listener, event });
+      deferredMessages.set(listener, { socket: this, listener, event });
       return;
     }
-    invokeListener(listener, socket, event);
+    invokeListener(listener, this, event);
   };
   originalAddEventListener.call(this, type, guardedListener, options);
 };
