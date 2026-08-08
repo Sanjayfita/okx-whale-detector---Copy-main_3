@@ -23,13 +23,8 @@ services:
     environment:
       PGPASSWORD: postgres
     volumes:
-      - ./db/migrations:/migrations:ro
-    entrypoint: ["/bin/bash", "-ec"]
-    command: >-
-      for migration in /migrations/*.sql; do
-        echo "Applying $${migration}";
-        psql -h database -U postgres -d research -v ON_ERROR_STOP=1 -f "$${migration}";
-      done
+      - ./db:/db:ro
+    entrypoint: ["/bin/sh", "/db/run-migrations.sh"]
 
   platform:
     build:
