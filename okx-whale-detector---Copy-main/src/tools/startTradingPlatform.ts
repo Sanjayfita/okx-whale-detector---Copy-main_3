@@ -67,13 +67,15 @@ export const startTradingPlatform = async (
     );
 
     // The established research runtime keeps its own 1m candle feed. Platform
-    // strategy candles come from the dedicated, configurable client above.
+    // strategy candles come only from the dedicated configurable client above.
     const runtime = await createAppRuntime({
       tradingPlatformObserver: {
         onOrderBook: (instrumentId, state) => platform.onOrderBook(instrumentId, state),
         onCandle: () => undefined,
-        resetSymbols: (reset) => platform.resetSymbols(reset),
-        close: () => platform.close(),
+        close: async () => {
+          candleClient.close();
+          await platform.close();
+        },
       },
     });
     void runtime.polymarketRuntime.start();
