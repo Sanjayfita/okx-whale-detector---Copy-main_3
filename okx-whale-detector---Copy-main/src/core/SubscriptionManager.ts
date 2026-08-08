@@ -11,6 +11,7 @@ import type {
   MarketInstrumentConfig,
   SupportedInstType,
 } from '../types/instrument';
+import type { TradingTimeframe } from '../config/tradingTimeframes';
 import {
   OrderBookResyncCoordinator,
   type OrderBookResyncCoordinatorOptions,
@@ -46,7 +47,8 @@ interface CandleClient {
       performanceContext?: MessagePerformanceContext,
     ) => void,
   ): void;
-  subscribeToCandle(instId: string): void;
+  subscribeToCandle(instId: string, interval?: TradingTimeframe): void;
+  setCandleInterval?(instId: string, interval: TradingTimeframe): void;
   close(): void;
 }
 
@@ -58,6 +60,7 @@ export interface SubscriptionShard {
 export interface SubscriptionManagerOptions {
   maximumSymbolsPerConnection: number;
   profiler?: PipelineProfiler;
+  candleTimeframe?: TradingTimeframe;
   createOrderBookClient?: () => OrderBookClient;
   createCandleClient?: () => CandleClient;
   onOrderBook: (
@@ -88,11 +91,9 @@ interface SymbolSubscription {
 
 const chunk = <T>(values: readonly T[], size: number): T[][] => {
   const chunks: T[][] = [];
-
   for (let index = 0; index < values.length; index += size) {
     chunks.push(values.slice(index, index + size));
   }
-
   return chunks;
 };
 
@@ -101,6 +102,7 @@ export class SubscriptionManager {
   private readonly symbolSubscriptions = new Map<string, SymbolSubscription>();
   private readonly resyncCoordinator: OrderBookResyncCoordinator;
   private started = false;
+  private candleTimeframe: TradingTimeframe;
 
   public constructor(private readonly options: SubscriptionManagerOptions) {
     if (
@@ -109,7 +111,7 @@ export class SubscriptionManager {
     ) {
       throw new Error('maximumSymbolsPerConnection must be a positive integer');
     }
-
+    this.candleTimeframe = options.candleTimeframe ?? '1m';
     this.resyncCoordinator = new OrderBookResyncCoordinator(
       (symbol) => this.resubscribeOrderBook(symbol),
       options.orderBookResync,
@@ -117,22 +119,15 @@ export class SubscriptionManager {
   }
 
   public start(instruments: readonly MarketInstrumentConfig[]): void {
-    if (this.started) {
-      throw new Error('SubscriptionManager has already been started');
-    }
+    if (this.started) throw new Error('SubscriptionManager has already been started');
 
     const seenSymbols = new Set<string>();
-
     for (const instrument of instruments) {
       if (seenSymbols.has(instrument.instId)) {
-        throw new Error(
-          `Duplicate subscription instrument: ${instrument.instId}`,
-        );
+        throw new Error(`Duplicate subscription instrument: ${instrument.instId}`);
       }
-
       seenSymbols.add(instrument.instId);
     }
-
     this.started = true;
 
     const instrumentGroups = chunk(
@@ -150,56 +145,56 @@ export class SubscriptionManager {
       const symbols = group.map((instrument) => instrument.instId);
 
       orderBookClient.onOrderBook((update, performanceContext) => {
-        if (update.action === 'snapshot') {
-          this.resyncCoordinator.complete(update.instId);
-        }
-
-        if (performanceContext === undefined) {
-          this.options.onOrderBook(update);
-        } else {
-          this.options.onOrderBook(update, performanceContext);
-        }
+        if (update.action === 'snapshot') this.resyncCoordinator.complete(update.instId);
+        if (performanceContext === undefined) this.options.onOrderBook(update);
+        else this.options.onOrderBook(update, performanceContext);
       });
-      candleClient.onCandle(this.options.onCandle);
+      candleClient.onCandle((candle, performanceContext) => {
+        if (candle.interval !== this.candleTimeframe) return;
+        if (performanceContext === undefined) this.options.onCandle(candle);
+        else this.options.onCandle(candle, performanceContext);
+      });
       if (this.options.onTrade && orderBookClient.onTrade) {
         orderBookClient.onTrade(this.options.onTrade);
       }
-      orderBookClient.onReconnect(() => {
-        this.options.onShardReconnect(symbols);
-      });
+      orderBookClient.onReconnect(() => this.options.onShardReconnect(symbols));
 
       for (const instrument of group) {
-        orderBookClient.subscribeToOrderBook(
-          instrument.instId,
-          instrument.instType,
-        );
+        orderBookClient.subscribeToOrderBook(instrument.instId, instrument.instType);
         if (this.options.onTrade && orderBookClient.subscribeToTrades) {
-          orderBookClient.subscribeToTrades(
-            instrument.instId,
-            instrument.instType,
-          );
+          orderBookClient.subscribeToTrades(instrument.instId, instrument.instType);
         }
-        candleClient.subscribeToCandle(instrument.instId);
+        candleClient.subscribeToCandle(instrument.instId, this.candleTimeframe);
         this.symbolSubscriptions.set(instrument.instId, {
           instrument,
           client: orderBookClient,
         });
       }
 
-      this.activeShards.push({
-        index,
-        symbols,
-        orderBookClient,
-        candleClient,
-      });
+      this.activeShards.push({ index, symbols, orderBookClient, candleClient });
     }
   }
 
-  public requestOrderBookResync(symbol: string): boolean {
-    if (!this.started || !this.symbolSubscriptions.has(symbol)) {
-      return false;
+  public setCandleTimeframe(timeframe: TradingTimeframe): void {
+    if (this.candleTimeframe === timeframe) return;
+    this.candleTimeframe = timeframe;
+    for (const shard of this.activeShards) {
+      for (const symbol of shard.symbols) {
+        if (shard.candleClient.setCandleInterval) {
+          shard.candleClient.setCandleInterval(symbol, timeframe);
+        } else {
+          shard.candleClient.subscribeToCandle(symbol, timeframe);
+        }
+      }
     }
+  }
 
+  public getCandleTimeframe(): TradingTimeframe {
+    return this.candleTimeframe;
+  }
+
+  public requestOrderBookResync(symbol: string): boolean {
+    if (!this.started || !this.symbolSubscriptions.has(symbol)) return false;
     return this.resyncCoordinator.request(symbol);
   }
 
@@ -213,27 +208,20 @@ export class SubscriptionManager {
 
   public close(): void {
     this.resyncCoordinator.close();
-
     for (const shard of this.activeShards) {
       shard.orderBookClient.close();
       shard.candleClient.close();
     }
-
     this.activeShards.length = 0;
     this.symbolSubscriptions.clear();
   }
 
   private resubscribeOrderBook(symbol: string): void {
     const subscription = this.symbolSubscriptions.get(symbol);
-    if (!subscription) {
-      throw new Error(`No active subscription exists for ${symbol}`);
-    }
+    if (!subscription) throw new Error(`No active subscription exists for ${symbol}`);
     if (!subscription.client.resubscribeOrderBook) {
-      throw new Error(
-        `Order-book client does not support per-symbol resync for ${symbol}`,
-      );
+      throw new Error(`Order-book client does not support per-symbol resync for ${symbol}`);
     }
-
     subscription.client.resubscribeOrderBook(symbol);
   }
 }
