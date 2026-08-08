@@ -104,8 +104,14 @@ const ensureTopControl = (): void => {
     wrapper.id = 'timeframe-control';
     actions.prepend(wrapper);
   }
-  wrapper.className = `timeframe-control ${state === 'REBUILDING' ? 'rebuilding' : state === 'ERROR' ? 'error' : ''}`;
-  wrapper.innerHTML = `<label for="timeframe-select">Timeframe</label><select id="timeframe-select" ${changing ? 'disabled' : ''}>${options()}</select><span class="timeframe-status" title="${statusMessage.replaceAll('"', '&quot;')}">${state === 'REBUILDING' ? `Loading ${selected}…` : state === 'ERROR' ? 'Error' : selected}</span>`;
+  const className = `timeframe-control ${state === 'REBUILDING' ? 'rebuilding' : state === 'ERROR' ? 'error' : ''}`;
+  const html = `<label for="timeframe-select">Timeframe</label><select id="timeframe-select" ${changing ? 'disabled' : ''}>${options()}</select><span class="timeframe-status" title="${statusMessage.replaceAll('"', '&quot;')}">${state === 'REBUILDING' ? `Loading ${selected}…` : state === 'ERROR' ? 'Error' : selected}</span>`;
+  const signature = `${className}|${html}`;
+  if (wrapper.dataset.signature !== signature) {
+    wrapper.className = className;
+    wrapper.innerHTML = html;
+    wrapper.dataset.signature = signature;
+  }
   const select = wrapper.querySelector<HTMLSelectElement>('#timeframe-select');
   if (select) bindSelect(select);
 };
@@ -114,12 +120,19 @@ const ensureSettingsControl = (): void => {
   const strategySelect = document.querySelector<HTMLSelectElement>('#activeStrategyId');
   if (!strategySelect) return;
   const formGrid = strategySelect.closest('.form-grid');
-  if (!formGrid || formGrid.querySelector('#settings-timeframe-field')) return;
-  const field = document.createElement('div');
-  field.className = 'field';
-  field.id = 'settings-timeframe-field';
-  field.innerHTML = `<label for="settings-timeframe-select">Timeframe</label><select id="settings-timeframe-select" ${changing ? 'disabled' : ''}>${options()}</select><small>${statusMessage}</small>`;
-  strategySelect.closest('.field')?.after(field);
+  if (!formGrid) return;
+  let field = formGrid.querySelector<HTMLElement>('#settings-timeframe-field');
+  if (!field) {
+    field = document.createElement('div');
+    field.className = 'field';
+    field.id = 'settings-timeframe-field';
+    strategySelect.closest('.field')?.after(field);
+  }
+  const html = `<label for="settings-timeframe-select">Timeframe</label><select id="settings-timeframe-select" ${changing ? 'disabled' : ''}>${options()}</select><small>${statusMessage}</small>`;
+  if (field.dataset.signature !== html) {
+    field.innerHTML = html;
+    field.dataset.signature = html;
+  }
   const select = field.querySelector<HTMLSelectElement>('#settings-timeframe-select');
   if (select) bindSelect(select);
 };
