@@ -73,4 +73,74 @@ describe('TradingPlatformEngine', () => {
       store.account.getOpenPosition('ETH-USDT-SWAP')?.fundingPnl,
     ).toBeCloseTo(-0.2);
   });
+
+  it('clears the prior timeframe, ignores stale intervals, and cannot trade during rebuild', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+
+    engine.onCandle({
+      instId: 'BTC-USDT-SWAP',
+      interval: '1m',
+      timestamp: 60_000,
+      open: 100,
+      high: 102,
+      low: 99,
+      close: 101,
+      volume: 1,
+      volumeCurrency: 1,
+      volumeCurrencyQuote: 101,
+      confirm: true,
+    });
+    expect(store.snapshot(2_000).candles['BTC-USDT-SWAP']).toHaveLength(1);
+
+    store.updateSettings({ timeframe: '5m' });
+    engine.beginTimeframeRebuild('5m');
+    expect(store.snapshot(2_000).candles['BTC-USDT-SWAP']).toBeUndefined();
+    expect(store.snapshot(2_000).timeframe.state).toBe('REBUILDING');
+
+    engine.onCandle({
+      instId: 'BTC-USDT-SWAP',
+      interval: '1m',
+      timestamp: 120_000,
+      open: 101,
+      high: 103,
+      low: 100,
+      close: 102,
+      volume: 1,
+      volumeCurrency: 1,
+      volumeCurrencyQuote: 102,
+      confirm: true,
+    });
+    expect(store.snapshot(2_000).candles['BTC-USDT-SWAP']).toBeUndefined();
+
+    for (let index = 0; index < 60; index += 1) {
+      const close = 100 + index * 0.1;
+      engine.onCandle({
+        instId: 'BTC-USDT-SWAP',
+        interval: '5m',
+        timestamp: 300_000 * (index + 1),
+        open: close,
+        high: close + 0.5,
+        low: close - 0.5,
+        close,
+        volume: 1,
+        volumeCurrency: 1,
+        volumeCurrencyQuote: close,
+        confirm: true,
+      });
+    }
+
+    expect(store.snapshot(2_000).candles['BTC-USDT-SWAP']).toHaveLength(60);
+    expect(store.account.snapshot(2_000).openPositions).toHaveLength(0);
+    expect(store.account.snapshot(2_000).trades).toHaveLength(0);
+
+    engine.completeTimeframeRebuild(
+      '5m',
+      new Map([['BTC-USDT-SWAP', 300_000 * 60]]),
+    );
+    expect(store.snapshot(2_000).timeframe).toMatchObject({
+      selected: '5m',
+      state: 'READY',
+    });
+  });
 });
