@@ -72,5 +72,16 @@ jobs:
       - name: Validate dashboard in headless Chrome
         run: npx tsx src/tools/validateTradingDashboardBrowser.ts
 
-      - name: Validate Docker Compose deployment
+      - name: Validate development Docker Compose deployment
         run: docker compose config --quiet
+
+      - name: Validate production Docker Compose deployment
+        run: docker compose --env-file .env.production.example -f docker-compose.production.yml config --quiet
+
+      - name: Validate production operations scripts
+        run: |
+          sh -n ops/backup-production.sh
+          sh -n ops/restore-production.sh
+          sh -n ops/watchdog.sh
+          sh -n ops/verify-backup-restore.sh
+          sh ops/verify-backup-restore.sh
