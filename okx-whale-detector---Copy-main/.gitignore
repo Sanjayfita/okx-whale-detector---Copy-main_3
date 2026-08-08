@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .env
+.env.production
+.env.production.local
+backups/
 data/recordings/
 data/reports/
 data/alerts/*.jsonl
