@@ -1,8 +1,9 @@
-import { OKXHistoricalDataClient } from '../clients/okx/OKXHistoricalDataClient';
 import { SYMBOL_PROFILES } from '../config/symbolProfiles';
 import { createAppRuntime } from '../index';
+import { OkxCandleHistoryBridge } from '../platform/OkxCandleHistoryBridge';
 import { TradingPlatformApplication } from '../platform/TradingPlatformApplication';
 import type { PlatformMode } from '../platform/PlatformContracts';
+import type { TradingPlatformObserver } from '../platform/TradingPlatformObserver';
 
 const parseMode = (value: string | undefined): PlatformMode =>
   value?.trim().toUpperCase() === 'LIVE' ? 'LIVE' : 'PAPER';
@@ -20,65 +21,65 @@ const parsePositiveNumber = (
   return parsed;
 };
 
-const warmPlatformCandleHistory = async (
-  platform: TradingPlatformApplication,
-): Promise<void> => {
-  const historical = new OKXHistoricalDataClient();
+const requiredStrategyHistory = (platform: TradingPlatformApplication): number => {
   const config = platform.store.getStrategyConfig();
-  const requiredHistory = Math.max(
+  return Math.max(
     config.slowEmaLength + 2,
     config.rsiPeriod + 2,
     config.atrPeriod + 2,
   );
-  const requestedHistory = Math.min(100, Math.max(requiredHistory, 75));
+};
 
-  console.log(
-    `Warming strategy with up to ${requestedHistory} confirmed 1m candles per market...`,
-  );
+const syncOkxHistoryMonitoringOnly = async (
+  platform: TradingPlatformApplication,
+  bridge: OkxCandleHistoryBridge,
+  instrumentIds: readonly string[],
+  reason: 'STARTUP' | 'RECONNECT',
+): Promise<void> => {
+  const originalMode = platform.store.getSettings().mode;
+  const requiredHistory = requiredStrategyHistory(platform);
+  const requestedHistory = Math.min(100, Math.max(requiredHistory, 100));
 
-  for (const profile of SYMBOL_PROFILES) {
-    try {
-      const page = await historical.fetchCandlesPage({
-        instrumentId: profile.symbol,
-        interval: '1m',
-        intervalMs: 60_000,
-        limit: requestedHistory,
-      });
-      const records = page.records
-        .filter((record) => record.confirmed)
-        .slice()
-        .sort((left, right) => left.observedAt - right.observedAt);
+  // Historical candles rebuild point-in-time indicators only. Temporarily forcing
+  // monitoring mode prevents an offline crossover from becoming a retroactive
+  // paper trade when the process starts or reconnects.
+  if (originalMode !== 'LIVE') {
+    platform.store.updateSettings({ mode: 'LIVE' });
+  }
 
-      for (const record of records) {
-        platform.onCandle({
-          instId: record.instrumentId,
-          timestamp: record.observedAt,
-          open: record.open,
-          high: record.high,
-          low: record.low,
-          close: record.close,
-          volume: record.contractVolume,
-          volumeCurrency: record.baseVolume ?? 0,
-          volumeCurrencyQuote: record.quoteVolume ?? 0,
-          confirm: true,
+  try {
+    for (const instrumentId of [...new Set(instrumentIds)]) {
+      try {
+        const result = await bridge.syncInstrument(
+          instrumentId,
+          platform,
+          requestedHistory,
+        );
+        platform.store.log('INFO', 'OKX candle history reconciled', {
+          instrumentId,
+          reason,
+          confirmedCandles: result.confirmedCandles,
+          requiredCandles: requiredHistory,
+          firstTimestamp: result.firstTimestamp,
+          lastTimestamp: result.lastTimestamp,
         });
+        console.log(
+          `${reason === 'STARTUP' ? 'History' : 'Gap-fill'} ${instrumentId}: ` +
+            `${result.confirmedCandles} confirmed OKX candles`,
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        platform.store.log('WARNING', 'OKX candle history reconciliation failed', {
+          instrumentId,
+          reason,
+          error: message,
+        });
+        console.warn(`History sync failed for ${instrumentId}: ${message}`);
       }
-
-      platform.store.log('INFO', 'Strategy candle history warmed', {
-        instrumentId: profile.symbol,
-        confirmedCandles: records.length,
-        requiredCandles: requiredHistory,
-      });
-      console.log(
-        `Warm-up ${profile.symbol}: ${records.length} confirmed candles`,
-      );
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      platform.store.log('WARNING', 'Strategy candle warm-up failed', {
-        instrumentId: profile.symbol,
-        error: message,
-      });
-      console.warn(`Warm-up failed for ${profile.symbol}: ${message}`);
+    }
+  } finally {
+    if (platform.store.getSettings().mode !== originalMode) {
+      platform.store.updateSettings({ mode: originalMode });
     }
   }
 };
@@ -87,9 +88,9 @@ export const startTradingPlatform = async (
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<void> => {
   const requestedMode = parseMode(environment.TRADING_MODE);
-  // Warm historical candles in monitoring-only mode. This lets EMA/RSI/ATR become
-  // immediately ready without ever opening a retroactive paper position.
   const platform = new TradingPlatformApplication({
+    // Startup history must never create retroactive trades. PAPER mode is restored
+    // only after the OKX historical series has been attached to the strategy.
     mode: 'LIVE',
     startingEquity: parsePositiveNumber(
       environment.PAPER_STARTING_EQUITY,
@@ -103,8 +104,23 @@ export const startTradingPlatform = async (
     },
     environment,
   });
+  const historyBridge = new OkxCandleHistoryBridge({ maximumCandles: 100 });
+  let historySyncQueue: Promise<void> = Promise.resolve();
 
-  await warmPlatformCandleHistory(platform);
+  const enqueueHistorySync = (
+    instrumentIds: readonly string[],
+    reason: 'STARTUP' | 'RECONNECT',
+  ): Promise<void> => {
+    historySyncQueue = historySyncQueue.then(() =>
+      syncOkxHistoryMonitoringOnly(platform, historyBridge, instrumentIds, reason),
+    );
+    return historySyncQueue;
+  };
+
+  await enqueueHistorySync(
+    SYMBOL_PROFILES.map((profile) => profile.symbol),
+    'STARTUP',
+  );
   if (requestedMode !== 'LIVE') {
     platform.store.updateSettings({ mode: requestedMode });
   }
@@ -115,11 +131,26 @@ export const startTradingPlatform = async (
     `Mode: ${platform.store.getSettings().mode}; live order execution remains disabled.`,
   );
 
+  const platformObserver: TradingPlatformObserver = {
+    onOrderBook: (instrumentId, state) => platform.onOrderBook(instrumentId, state),
+    onCandle: (candle) => platform.onCandle(candle),
+    resetSymbols: (symbols) => {
+      platform.resetSymbols(symbols);
+      void enqueueHistorySync(symbols, 'RECONNECT');
+    },
+    close: async () => {
+      await historySyncQueue;
+      await platform.close();
+    },
+  };
+
   try {
-    const runtime = await createAppRuntime({ tradingPlatformObserver: platform });
+    const runtime = await createAppRuntime({
+      tradingPlatformObserver: platformObserver,
+    });
     void runtime.polymarketRuntime.start();
   } catch (error: unknown) {
-    await platform.close();
+    await platformObserver.close?.();
     throw error;
   }
 };
