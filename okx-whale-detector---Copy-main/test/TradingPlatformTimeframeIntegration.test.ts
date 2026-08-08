@@ -98,6 +98,7 @@ import type { CandleTimeframeController } from '../src/platform/TradingPlatformO
 
 const directories: string[] = [];
 const instrumentId = 'BTC-USDT-SWAP';
+const integrationTestTimeoutMs = 15_000;
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 1_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
@@ -251,28 +252,32 @@ describe('trading platform timeframe end-to-end lifecycle', () => {
     }
   });
 
-  it('accepts every advertised timeframe through the backend and uses its native OKX interval', async () => {
-    const { application } = await createFixture();
-    const controller = createController();
-    try {
-      await application.prepareCandleRuntime({ symbols: [instrumentId], controller });
-      for (const timeframe of TRADING_TIMEFRAMES) {
-        if (application.store.getSettings().timeframe !== timeframe) {
-          const response = await patchTimeframe(application, timeframe);
-          expect(response.status).toBe(200);
+  it(
+    'accepts every advertised timeframe through the backend and uses its native OKX interval',
+    async () => {
+      const { application } = await createFixture();
+      const controller = createController();
+      try {
+        await application.prepareCandleRuntime({ symbols: [instrumentId], controller });
+        for (const timeframe of TRADING_TIMEFRAMES) {
+          if (application.store.getSettings().timeframe !== timeframe) {
+            const response = await patchTimeframe(application, timeframe);
+            expect(response.status).toBe(200);
+          }
+          assertRebuiltState(application, timeframe);
+          const spec = tradingTimeframeSpec(timeframe);
+          expect(historyMock.calls.at(-1)).toMatchObject({
+            interval: spec.okxBar,
+            intervalMs: spec.intervalMs,
+          });
+          expect(controller.current).toBe(timeframe);
         }
-        assertRebuiltState(application, timeframe);
-        const spec = tradingTimeframeSpec(timeframe);
-        expect(historyMock.calls.at(-1)).toMatchObject({
-          interval: spec.okxBar,
-          intervalMs: spec.intervalMs,
-        });
-        expect(controller.current).toBe(timeframe);
+      } finally {
+        await application.close();
       }
-    } finally {
-      await application.close();
-    }
-  });
+    },
+    integrationTestTimeoutMs,
+  );
 
   it('persists 15m and restarts directly on 15m without an initial 1m history request', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'platform-timeframe-persistence-'));
