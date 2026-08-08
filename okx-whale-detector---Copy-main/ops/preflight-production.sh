@@ -7,6 +7,15 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker compose version >/dev/null
 
+if command -v systemctl >/dev/null 2>&1; then
+  docker_enabled="$(systemctl is-enabled docker 2>/dev/null || true)"
+  if [ "$docker_enabled" != "enabled" ]; then
+    echo "Docker service must be enabled at boot for unattended VPS reboot recovery (current: ${docker_enabled:-unknown})." >&2
+    exit 1
+  fi
+  echo "Docker boot service: enabled"
+fi
+
 if [ ! -f "$ENV_FILE" ]; then
   echo "Missing $ENV_FILE. Copy .env.production.example and edit it on the VPS." >&2
   exit 1
