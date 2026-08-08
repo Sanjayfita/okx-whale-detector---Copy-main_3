@@ -1,7 +1,11 @@
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
-import type { TradingTimeframe } from '../config/tradingTimeframes';
+import {
+  tradingTimeframeSpec,
+  type TradingTimeframe,
+} from '../config/tradingTimeframes';
 import type { MarketState } from '../core/MarketState';
 import { createNotificationServiceFromEnvironment } from '../notifications/createNotificationService';
+import type { PaperStateRepository } from '../paper/PaperStateRepository';
 import type { DashboardSettings, PlatformMode } from './PlatformContracts';
 import { OkxCandleHistoryBridge } from './OkxCandleHistoryBridge';
 import { PlatformStateStore } from './PlatformStateStore';
@@ -20,6 +24,8 @@ export interface TradingPlatformApplicationOptions {
   readonly startingEquity?: number;
   readonly server?: TradingPlatformServerOptions;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly paperStateRepository?: PaperStateRepository;
+  readonly paperCheckpointIntervalMs?: number;
   readonly now?: () => number;
 }
 
@@ -32,7 +38,9 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
   public readonly server: TradingPlatformServer;
 
   private readonly now: () => number;
+  private readonly paperCheckpointIntervalMs: number;
   private summaryTimer: NodeJS.Timeout | null = null;
+  private paperCheckpointTimer: NodeJS.Timeout | null = null;
   private summaryDay: string;
   private symbols: readonly string[] = [];
   private candleController: CandleTimeframeController | null = null;
@@ -40,9 +48,17 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
 
   public constructor(options: TradingPlatformApplicationOptions = {}) {
     this.now = options.now ?? Date.now;
+    this.paperCheckpointIntervalMs = options.paperCheckpointIntervalMs ?? 5_000;
+    if (
+      !Number.isSafeInteger(this.paperCheckpointIntervalMs) ||
+      this.paperCheckpointIntervalMs <= 0
+    ) {
+      throw new Error('paperCheckpointIntervalMs must be a positive safe integer');
+    }
     this.store = new PlatformStateStore({
       startingEquity: options.startingEquity,
       mode: options.mode,
+      paperStateRepository: options.paperStateRepository,
       now: this.now,
     });
     this.engine = new TradingPlatformEngine(this.store, {
@@ -62,11 +78,17 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
   }
 
   public async start(): Promise<void> {
+    // Settings must load before paper state so timeframe/strategy context can be
+    // compared deterministically before any live market subscription resumes.
+    await this.server.loadPersistedSettings();
+    const reconciliation = this.store.restorePaperState();
     await this.server.start();
     this.store.log('INFO', 'Trading platform application started', {
       url: this.server.getUrl(),
       mode: this.store.getSettings().mode,
       timeframe: this.store.getSettings().timeframe,
+      paperStateLoaded: reconciliation.stateLoaded,
+      reconciliation: reconciliation.result,
       liveExecutionAllowed: false,
     });
 
@@ -79,6 +101,20 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       }
     }, 60_000);
     this.summaryTimer.unref();
+
+    // High-frequency order-book marks are checkpointed on a bounded cadence;
+    // fills, closes, funding and trailing/risk mutations persist immediately in
+    // TradingPlatformEngine/PlatformStateStore.
+    this.paperCheckpointTimer = setInterval(() => {
+      try {
+        this.store.persistPaperState(this.now());
+      } catch (error: unknown) {
+        this.store.log('ERROR', 'Periodic paper-state checkpoint failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }, this.paperCheckpointIntervalMs);
+    this.paperCheckpointTimer.unref();
   }
 
   public async prepareCandleRuntime(input: {
@@ -121,6 +157,11 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       clearInterval(this.summaryTimer);
       this.summaryTimer = null;
     }
+    if (this.paperCheckpointTimer !== null) {
+      clearInterval(this.paperCheckpointTimer);
+      this.paperCheckpointTimer = null;
+    }
+    this.store.persistPaperState(this.now());
     await this.server.close();
   }
 
@@ -132,17 +173,22 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
     previous: DashboardSettings,
     next: DashboardSettings,
   ): Promise<void> {
-    if (previous.timeframe === next.timeframe) return;
+    if (previous.timeframe === next.timeframe) {
+      this.store.persistPaperState(this.now());
+      return;
+    }
     if (this.candleController === null || this.symbols.length === 0) {
       this.store.setTimeframeState(
         'READY',
         `Selected ${next.timeframe}; live candle runtime not attached yet`,
       );
+      this.store.persistPaperState(this.now());
       return;
     }
 
     try {
       await this.queueRebuild(next.timeframe, this.symbols);
+      this.store.persistPaperState(this.now());
     } catch (error: unknown) {
       // The server restores the settings object after this callback rejects. Restore
       // the actual live subscription and indicator state too, so the runtime cannot
@@ -150,6 +196,7 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       this.store.updateSettings({ timeframe: previous.timeframe });
       try {
         await this.rebuildTimeframe(previous.timeframe, this.symbols);
+        this.store.persistPaperState(this.now());
       } catch (restoreError: unknown) {
         this.store.log('ERROR', 'Previous timeframe restoration also failed', {
           timeframe: previous.timeframe,
@@ -199,23 +246,59 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
         timeframe,
         maximumCandles: 100,
       });
-      const results = await bridge.syncSymbols(
-        symbols,
-        this,
-        Math.min(100, required),
-      );
+      const spec = tradingTimeframeSpec(timeframe);
+      const results = [];
+      for (const instrumentId of [...new Set(symbols)]) {
+        const recoveredTimestamp = this.store.getRecoveredCandleTimestamp(
+          instrumentId,
+          timeframe,
+        );
+        if (recoveredTimestamp === null) {
+          results.push(
+            await bridge.syncInstrument(
+              instrumentId,
+              this,
+              Math.min(100, required),
+            ),
+          );
+          continue;
+        }
+        const oldestRequiredTimestamp = Math.max(
+          0,
+          recoveredTimestamp - required * spec.intervalMs,
+        );
+        results.push(
+          await bridge.syncInstrumentFrom({
+            instrumentId,
+            sink: this,
+            oldestRequiredTimestamp,
+            recoveredAfterTimestamp: recoveredTimestamp,
+          }),
+        );
+      }
+
       const barriers = new Map<string, number>();
+      let recoveredCandles = 0;
       for (const result of results) {
         if (result.lastTimestamp !== null) {
           barriers.set(result.instrumentId, result.lastTimestamp);
         }
+        recoveredCandles += result.recoveredCandles;
         this.store.log('INFO', 'OKX candle history synchronized', {
           instrumentId: result.instrumentId,
           timeframe,
           confirmedCandles: result.confirmedCandles,
+          recoveredCandles: result.recoveredCandles,
+          pagesFetched: result.pagesFetched,
         });
       }
       this.engine.completeTimeframeRebuild(timeframe, barriers);
+      this.store.log('INFO', 'Paper market-data reconciliation completed', {
+        timeframe,
+        recoveredCandles,
+        instruments: results.length,
+      });
+      this.store.persistPaperState(this.now());
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       this.engine.failTimeframeRebuild(timeframe, message);
