@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -34,6 +35,13 @@ export interface PaperStateRepositoryOptions {
   readonly beforeCommit?: () => void;
 }
 
+export interface PaperPersistenceHealth {
+  readonly healthy: boolean;
+  readonly lastSuccessfulSaveAt: number | null;
+  readonly lastError: string | null;
+  readonly fileSizeBytes: number | null;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -60,6 +68,8 @@ const requireTopLevelState = (value: unknown): PersistedPaperRuntimeState => {
 export class PaperStateRepository {
   private readonly filePath: string;
   private readonly beforeCommit?: () => void;
+  private lastSuccessfulSaveAt: number | null = null;
+  private lastError: string | null = null;
 
   public constructor(options: PaperStateRepositoryOptions = {}) {
     this.filePath = options.filePath ?? 'data/platform/paper-state.json';
@@ -67,27 +77,42 @@ export class PaperStateRepository {
   }
 
   public load(): PersistedPaperRuntimeState | null {
-    if (!existsSync(this.filePath)) return null;
-    const parsed = JSON.parse(readFileSync(this.filePath, 'utf8')) as unknown;
-    return requireTopLevelState(parsed);
+    if (!existsSync(this.filePath)) {
+      this.lastError = null;
+      return null;
+    }
+    try {
+      const parsed = requireTopLevelState(
+        JSON.parse(readFileSync(this.filePath, 'utf8')) as unknown,
+      );
+      this.lastSuccessfulSaveAt = parsed.savedAt;
+      this.lastError = null;
+      return parsed;
+    } catch (error: unknown) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
   public save(state: PersistedPaperRuntimeState): void {
     if (state.schemaVersion !== 1) throw new Error('unsupported paper state schema');
     mkdirSync(dirname(this.filePath), { recursive: true });
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-    const descriptor = openSync(temporaryPath, 'w');
     try {
-      writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-      fsyncSync(descriptor);
-    } finally {
-      closeSync(descriptor);
-    }
+      const descriptor = openSync(temporaryPath, 'w');
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
 
-    try {
       this.beforeCommit?.();
       renameSync(temporaryPath, this.filePath);
+      this.lastSuccessfulSaveAt = state.savedAt;
+      this.lastError = null;
     } catch (error: unknown) {
+      this.lastError = error instanceof Error ? error.message : String(error);
       try {
         if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
       } catch {
@@ -99,5 +124,20 @@ export class PaperStateRepository {
 
   public getFilePath(): string {
     return this.filePath;
+  }
+
+  public getHealth(): PaperPersistenceHealth {
+    let fileSizeBytes: number | null = null;
+    try {
+      if (existsSync(this.filePath)) fileSizeBytes = statSync(this.filePath).size;
+    } catch {
+      // File-size telemetry is best effort and does not by itself invalidate state.
+    }
+    return {
+      healthy: this.lastError === null,
+      lastSuccessfulSaveAt: this.lastSuccessfulSaveAt,
+      lastError: this.lastError,
+      fileSizeBytes,
+    };
   }
 }
