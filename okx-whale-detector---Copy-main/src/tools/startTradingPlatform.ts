@@ -2,6 +2,7 @@ import { OKXCandleWebSocketClient } from '../clients/okx/OKXCandleWebSocketClien
 import { SYMBOL_PROFILES } from '../config/symbolProfiles';
 import type { TradingTimeframe } from '../config/tradingTimeframes';
 import { createAppRuntime } from '../index';
+import { PaperStateRepository } from '../paper/PaperStateRepository';
 import { TradingPlatformApplication } from '../platform/TradingPlatformApplication';
 import type { PlatformMode } from '../platform/PlatformContracts';
 import type { CandleTimeframeController } from '../platform/TradingPlatformObserver';
@@ -32,6 +33,10 @@ export const startTradingPlatform = async (
       10_000,
       'PAPER_STARTING_EQUITY',
     ),
+    paperStateRepository: new PaperStateRepository({
+      filePath:
+        environment.PAPER_STATE_PATH?.trim() || 'data/platform/paper-state.json',
+    }),
     server: {
       host: environment.DASHBOARD_HOST?.trim() || '0.0.0.0',
       port: parsePositiveNumber(environment.DASHBOARD_PORT, 4173, 'DASHBOARD_PORT'),
