@@ -1,5 +1,9 @@
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
 import { OKXHistoricalDataClient } from '../clients/okx/OKXHistoricalDataClient';
+import {
+  tradingTimeframeSpec,
+  type TradingTimeframe,
+} from '../config/tradingTimeframes';
 
 export interface HistoricalCandleSink {
   onCandle(candle: OKXCandle): void;
@@ -7,6 +11,7 @@ export interface HistoricalCandleSink {
 
 export interface CandleHistorySyncResult {
   readonly instrumentId: string;
+  readonly timeframe: TradingTimeframe;
   readonly requestedCandles: number;
   readonly confirmedCandles: number;
   readonly firstTimestamp: number | null;
@@ -15,35 +20,25 @@ export interface CandleHistorySyncResult {
 
 export interface OkxCandleHistoryBridgeOptions {
   readonly client?: OKXHistoricalDataClient;
-  readonly interval?: string;
-  readonly intervalMs?: number;
+  readonly timeframe?: TradingTimeframe;
   readonly maximumCandles?: number;
 }
 
 /**
- * Bridges OKX REST candle history into the same candle contract used by the
- * live OKX WebSocket. Keeping both sources on OKX avoids cross-vendor timestamp
- * and price differences (for example, TradingView vs OKX) in strategy inputs.
- *
- * The bridge only transports confirmed historical candles. Whether those
- * candles are allowed to execute trades is controlled by the caller; startup
- * and reconnect reconciliation intentionally run in monitoring-only mode.
+ * Bridges native OKX REST candles into the exact candle contract used by the
+ * live OKX WebSocket. One bridge instance represents one timeframe, preventing
+ * accidental cross-timeframe mixing during strategy initialization/rebuilds.
  */
 export class OkxCandleHistoryBridge {
   private readonly client: OKXHistoricalDataClient;
-  private readonly interval: string;
-  private readonly intervalMs: number;
+  private readonly timeframe: TradingTimeframe;
   private readonly maximumCandles: number;
 
   public constructor(options: OkxCandleHistoryBridgeOptions = {}) {
     this.client = options.client ?? new OKXHistoricalDataClient();
-    this.interval = options.interval ?? '1m';
-    this.intervalMs = options.intervalMs ?? 60_000;
+    this.timeframe = options.timeframe ?? '1m';
     this.maximumCandles = options.maximumCandles ?? 100;
 
-    if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs <= 0) {
-      throw new Error('intervalMs must be a positive safe integer');
-    }
     if (
       !Number.isSafeInteger(this.maximumCandles) ||
       this.maximumCandles <= 0 ||
@@ -51,6 +46,10 @@ export class OkxCandleHistoryBridge {
     ) {
       throw new Error('maximumCandles must be an integer in [1, 100]');
     }
+  }
+
+  public getTimeframe(): TradingTimeframe {
+    return this.timeframe;
   }
 
   public async syncInstrument(
@@ -63,10 +62,11 @@ export class OkxCandleHistoryBridge {
       throw new Error('requestedCandles must be a positive safe integer');
     }
 
+    const spec = tradingTimeframeSpec(this.timeframe);
     const page = await this.client.fetchCandlesPage({
       instrumentId,
-      interval: this.interval,
-      intervalMs: this.intervalMs,
+      interval: spec.okxBar,
+      intervalMs: spec.intervalMs,
       limit,
     });
     const records = page.records
@@ -77,6 +77,7 @@ export class OkxCandleHistoryBridge {
     for (const record of records) {
       sink.onCandle({
         instId: record.instrumentId,
+        interval: this.timeframe,
         timestamp: record.observedAt,
         open: record.open,
         high: record.high,
@@ -91,6 +92,7 @@ export class OkxCandleHistoryBridge {
 
     return {
       instrumentId,
+      timeframe: this.timeframe,
       requestedCandles: limit,
       confirmedCandles: records.length,
       firstTimestamp: records[0]?.observedAt ?? null,
@@ -106,8 +108,6 @@ export class OkxCandleHistoryBridge {
     const uniqueIds = [...new Set(instrumentIds)];
     const results: CandleHistorySyncResult[] = [];
 
-    // Sequential requests deliberately keep startup/reconnect traffic gentle on
-    // the public OKX REST API and make log ordering deterministic.
     for (const instrumentId of uniqueIds) {
       results.push(
         await this.syncInstrument(instrumentId, sink, requestedCandles),
