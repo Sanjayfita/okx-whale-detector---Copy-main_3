@@ -150,7 +150,8 @@ export class SubscriptionManager {
         else this.options.onOrderBook(update, performanceContext);
       });
       candleClient.onCandle((candle, performanceContext) => {
-        if (candle.interval !== this.candleTimeframe) return;
+        const interval = candle.interval ?? '1m';
+        if (interval !== this.candleTimeframe) return;
         if (performanceContext === undefined) this.options.onCandle(candle);
         else this.options.onCandle(candle, performanceContext);
       });
