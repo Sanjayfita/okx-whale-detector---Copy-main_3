@@ -8,6 +8,7 @@ import {
 import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
+import { isTradingTimeframe } from '../config/tradingTimeframes';
 import type {
   DashboardSettings,
   PlatformLogLevel,
@@ -21,6 +22,10 @@ export interface TradingPlatformServerOptions {
   readonly port?: number;
   readonly staticDirectory?: string;
   readonly settingsRepository?: PlatformSettingsRepository;
+  readonly onSettingsChanged?: (
+    previous: DashboardSettings,
+    next: DashboardSettings,
+  ) => Promise<void> | void;
 }
 
 type MutableSettingsPatch = {
@@ -54,9 +59,7 @@ const readJsonBody = async (request: IncomingMessage): Promise<unknown> => {
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 64 * 1024) {
-      throw new Error('request body exceeds 64 KiB');
-    }
+    if (size > 64 * 1024) throw new Error('request body exceeds 64 KiB');
     chunks.push(buffer);
   }
   if (chunks.length === 0) return {};
@@ -95,9 +98,7 @@ const settingsPatch = (value: unknown): Partial<DashboardSettings> => {
   for (const key of booleanKeys) {
     const candidate = value[key];
     if (candidate !== undefined) {
-      if (typeof candidate !== 'boolean') {
-        throw new Error(`${key} must be boolean`);
-      }
+      if (typeof candidate !== 'boolean') throw new Error(`${key} must be boolean`);
       Object.assign(patch, { [key]: candidate });
     }
   }
@@ -106,6 +107,12 @@ const settingsPatch = (value: unknown): Partial<DashboardSettings> => {
       throw new Error('activeStrategyId must be a string');
     }
     patch.activeStrategyId = value.activeStrategyId;
+  }
+  if (value.timeframe !== undefined) {
+    if (!isTradingTimeframe(value.timeframe)) {
+      throw new Error('timeframe must be one of 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H');
+    }
+    patch.timeframe = value.timeframe;
   }
   if (value.mode !== undefined) {
     if (value.mode !== 'PAPER' && value.mode !== 'LIVE') {
@@ -130,9 +137,11 @@ export class TradingPlatformServer {
   private readonly port: number;
   private readonly staticDirectory: string;
   private readonly settingsRepository: PlatformSettingsRepository;
+  private readonly onSettingsChanged?: TradingPlatformServerOptions['onSettingsChanged'];
   private readonly websocket = new WebSocketServer({ noServer: true });
   private server: Server | null = null;
   private unsubscribe?: () => void;
+  private settingsLoaded = false;
 
   public constructor(
     private readonly store: PlatformStateStore,
@@ -144,17 +153,22 @@ export class TradingPlatformServer {
     this.staticDirectory = resolve(options.staticDirectory ?? 'web');
     this.settingsRepository =
       options.settingsRepository ?? new PlatformSettingsRepository();
+    this.onSettingsChanged = options.onSettingsChanged;
     if (!Number.isSafeInteger(this.port) || this.port < 0 || this.port > 65_535) {
       throw new Error('dashboard port must be between 0 and 65535');
     }
   }
 
-  public async start(): Promise<void> {
-    if (this.server !== null) {
-      throw new Error('trading platform server already started');
-    }
+  public async loadPersistedSettings(): Promise<void> {
+    if (this.settingsLoaded) return;
     const persisted = await this.settingsRepository.load();
     if (persisted !== null) this.store.updateSettings(persisted);
+    this.settingsLoaded = true;
+  }
+
+  public async start(): Promise<void> {
+    if (this.server !== null) throw new Error('trading platform server already started');
+    await this.loadPersistedSettings();
 
     const server = createServer((request, response) => {
       void this.handleRequest(request, response).catch((error: unknown) => {
@@ -162,10 +176,8 @@ export class TradingPlatformServer {
           error: error instanceof Error ? error.message : String(error),
         });
         if (!response.headersSent) {
-          sendJson(response, 500, { error: 'INTERNAL_SERVER_ERROR' });
-        } else {
-          response.end();
-        }
+          sendJson(response, 500, { error: error instanceof Error ? error.message : 'INTERNAL_SERVER_ERROR' });
+        } else response.end();
       });
     });
     server.on('upgrade', (request, socket, head) => {
@@ -179,9 +191,7 @@ export class TradingPlatformServer {
       });
     });
     this.websocket.on('connection', (client) => {
-      client.send(
-        JSON.stringify({ type: 'snapshot', data: this.store.snapshot() }),
-      );
+      client.send(JSON.stringify({ type: 'snapshot', data: this.store.snapshot() }));
     });
     this.unsubscribe = this.store.subscribe((snapshot) => {
       const payload = JSON.stringify({ type: 'snapshot', data: snapshot });
@@ -244,6 +254,7 @@ export class TradingPlatformServer {
         status: 'ok',
         strategy: this.store.strategies.getActive().id,
         mode: this.store.getSettings().mode,
+        timeframe: this.store.getSettings().timeframe,
         liveExecutionAllowed: false,
       });
       return;
@@ -270,9 +281,16 @@ export class TradingPlatformServer {
       return;
     }
     if (method === 'PATCH' && url.pathname === '/api/settings') {
+      const previous = this.store.getSettings();
       const updated = this.store.updateSettings(
         settingsPatch(await readJsonBody(request)),
       );
+      try {
+        await this.onSettingsChanged?.(previous, updated);
+      } catch (error: unknown) {
+        this.store.updateSettings(previous);
+        throw error;
+      }
       if (updated.autoSave) await this.settingsRepository.save(updated);
       sendJson(response, 200, updated);
       return;
@@ -309,8 +327,7 @@ export class TradingPlatformServer {
     pathname: string,
     response: ServerResponse,
   ): Promise<void> {
-    const relativePath =
-      pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+    const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const requestedPath = resolve(this.staticDirectory, relativePath);
     if (
       requestedPath !== this.staticDirectory &&
@@ -323,12 +340,9 @@ export class TradingPlatformServer {
     try {
       const content = await readFile(requestedPath);
       response.writeHead(200, {
-        'content-type':
-          contentTypes[extname(requestedPath)] ?? 'application/octet-stream',
+        'content-type': contentTypes[extname(requestedPath)] ?? 'application/octet-stream',
         'cache-control':
-          extname(requestedPath) === '.html'
-            ? 'no-store'
-            : 'public, max-age=60',
+          extname(requestedPath) === '.html' ? 'no-store' : 'public, max-age=60',
       });
       response.end(content);
     } catch (error: unknown) {
