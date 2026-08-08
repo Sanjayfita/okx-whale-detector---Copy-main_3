@@ -140,7 +140,27 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       );
       return;
     }
-    await this.queueRebuild(next.timeframe, this.symbols);
+
+    try {
+      await this.queueRebuild(next.timeframe, this.symbols);
+    } catch (error: unknown) {
+      // The server restores the settings object after this callback rejects. Restore
+      // the actual live subscription and indicator state too, so the runtime cannot
+      // remain half-switched on a timeframe whose history failed to initialize.
+      this.store.updateSettings({ timeframe: previous.timeframe });
+      try {
+        await this.rebuildTimeframe(previous.timeframe, this.symbols);
+      } catch (restoreError: unknown) {
+        this.store.log('ERROR', 'Previous timeframe restoration also failed', {
+          timeframe: previous.timeframe,
+          error:
+            restoreError instanceof Error
+              ? restoreError.message
+              : String(restoreError),
+        });
+      }
+      throw error;
+    }
   }
 
   private queueRebuild(
