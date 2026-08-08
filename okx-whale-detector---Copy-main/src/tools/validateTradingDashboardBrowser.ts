@@ -177,9 +177,9 @@ const startChrome = async (
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let startupError = '';
-  let spawnError: Error | null = null;
+  const spawnState: { error: Error | null } = { error: null };
   child.once('error', (error) => {
-    spawnError = error;
+    spawnState.error = error;
   });
   child.stderr?.on('data', (chunk) => {
     startupError += chunk.toString();
@@ -188,8 +188,9 @@ const startChrome = async (
 
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (spawnError !== null) {
-      throw new Error(`Unable to launch ${executable}: ${spawnError.message}`);
+    const launchError = spawnState.error;
+    if (launchError !== null) {
+      throw new Error(`Unable to launch ${executable}: ${launchError.message}`);
     }
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(
