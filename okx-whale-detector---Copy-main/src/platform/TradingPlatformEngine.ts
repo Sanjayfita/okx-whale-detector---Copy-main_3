@@ -4,6 +4,7 @@ import {
   type ExecutionOrderBook,
 } from '../backtest/ExecutionSimulator';
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
+import type { TradingTimeframe } from '../config/tradingTimeframes';
 import type { MarketState } from '../core/MarketState';
 import type {
   NotificationService,
@@ -137,11 +138,13 @@ const statusFromDecision = (
 export class TradingPlatformEngine {
   private readonly books = new Map<string, ExecutionOrderBook>();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
+  private readonly executionResumeAfter = new Map<string, number>();
   private readonly maximumStrategyCandles: number;
   private readonly paperLeverage: number;
   private readonly maintenanceMarginRate: number;
   private readonly notifications?: NotificationService;
   private readonly now: () => number;
+  private rebuildingTimeframe = false;
 
   public constructor(
     public readonly store: PlatformStateStore,
@@ -171,6 +174,40 @@ export class TradingPlatformEngine {
     }
   }
 
+  public beginTimeframeRebuild(timeframe: TradingTimeframe): void {
+    this.rebuildingTimeframe = true;
+    this.candles.clear();
+    this.executionResumeAfter.clear();
+    this.store.clearStrategyMarketState();
+    this.store.setTimeframeState(
+      'REBUILDING',
+      `Loading confirmed OKX ${timeframe} candle history...`,
+    );
+  }
+
+  public completeTimeframeRebuild(
+    timeframe: TradingTimeframe,
+    lastHistoricalTimestampByInstrument: ReadonlyMap<string, number>,
+  ): void {
+    this.executionResumeAfter.clear();
+    for (const [instrumentId, timestamp] of lastHistoricalTimestampByInstrument) {
+      this.executionResumeAfter.set(instrumentId, timestamp);
+    }
+    this.rebuildingTimeframe = false;
+    this.store.setTimeframeState(
+      'READY',
+      `Using confirmed OKX ${timeframe} candles`,
+    );
+  }
+
+  public failTimeframeRebuild(timeframe: TradingTimeframe, message: string): void {
+    this.rebuildingTimeframe = true;
+    this.store.setTimeframeState(
+      'ERROR',
+      `Unable to rebuild ${timeframe} candles: ${message}`,
+    );
+  }
+
   public onOrderBook(instrumentId: string, state: MarketState): void {
     const book = toExecutionBook(state);
     if (book === null) return;
@@ -188,6 +225,9 @@ export class TradingPlatformEngine {
   }
 
   public onCandle(candle: OKXCandle): void {
+    const selectedTimeframe = this.store.getSettings().timeframe;
+    if (candle.interval !== selectedTimeframe) return;
+
     const strategyCandle = toEmaCandle(candle);
     const history = this.candles.get(candle.instId) ?? [];
     const existing = history.findIndex(
@@ -204,6 +244,7 @@ export class TradingPlatformEngine {
     if (!candle.confirm) {
       this.store.appendCandle({
         instrumentId: candle.instId,
+        timeframe: candle.interval,
         timestamp: candle.timestamp,
         open: candle.open,
         high: candle.high,
@@ -231,6 +272,7 @@ export class TradingPlatformEngine {
     });
     this.store.appendCandle({
       instrumentId: candle.instId,
+      timeframe: candle.interval,
       timestamp: candle.timestamp,
       open: candle.open,
       high: candle.high,
@@ -244,6 +286,10 @@ export class TradingPlatformEngine {
       atr: result.indicators.atr ?? null,
     });
     this.store.setStrategyStatus(statusFromDecision(result));
+
+    if (this.rebuildingTimeframe) return;
+    const resumeAfter = this.executionResumeAfter.get(candle.instId);
+    if (resumeAfter !== undefined && candle.timestamp <= resumeAfter) return;
 
     if (position !== undefined) {
       if (result.trailingStopPrice !== null) {
