@@ -114,6 +114,7 @@ const waitForChildExit = async (
   if (child.exitCode !== null || child.signalCode !== null) return true;
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout;
     const finish = (exited: boolean): void => {
       if (settled) return;
       settled = true;
@@ -122,7 +123,7 @@ const waitForChildExit = async (
       resolve(exited);
     };
     const onExit = (): void => finish(true);
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer = setTimeout(() => finish(false), timeoutMs);
     child.once('exit', onExit);
   });
 };
@@ -161,10 +162,14 @@ const startChrome = async (
   const child = spawn(
     executable,
     [
-      '--headless=new',
+      '--headless',
       '--no-sandbox',
       '--disable-gpu',
       '--disable-dev-shm-usage',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      '--remote-debugging-address=127.0.0.1',
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${userDataDirectory}`,
       'about:blank',
@@ -172,28 +177,38 @@ const startChrome = async (
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let startupError = '';
+  let spawnError: Error | null = null;
+  child.once('error', (error) => {
+    spawnError = error;
+  });
   child.stderr?.on('data', (chunk) => {
     startupError += chunk.toString();
   });
   child.stdout?.on('data', () => undefined);
 
-  await waitFor(
-    async () => {
-      if (child.exitCode !== null) {
-        throw new Error(
-          `Headless Chrome exited during startup (${child.exitCode}): ${startupError}`,
-        );
-      }
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
-    'Chrome DevTools endpoint',
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (spawnError !== null) {
+      throw new Error(`Unable to launch ${executable}: ${spawnError.message}`);
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `Headless Chrome exited during startup (${child.exitCode ?? child.signalCode}): ${startupError}`,
+      );
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      if (response.ok) return { process: child, port };
+    } catch {
+      // DevTools endpoint is not listening yet.
+    }
+    await sleep(100);
+  }
+
+  await stopChrome(child);
+  throw new Error(
+    `Timed out waiting for Chrome DevTools endpoint. Executable=${executable}. ${startupError}`,
   );
-  return { process: child, port };
 };
 
 const openPage = async (port: number, url: string): Promise<CdpClient> => {
