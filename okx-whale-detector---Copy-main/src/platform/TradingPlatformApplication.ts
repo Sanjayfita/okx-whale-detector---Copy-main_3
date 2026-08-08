@@ -20,7 +20,10 @@ import {
 } from './PlatformHealth';
 import { PlatformStateStore } from './PlatformStateStore';
 import { TradeExecutionContextRepository } from './TradeExecutionContextRepository';
-import { TradingPlatformEngine } from './TradingPlatformEngine';
+import {
+  TradingPlatformEngine,
+  type PaperEntryTraceContext,
+} from './TradingPlatformEngine';
 import type {
   CandleTimeframeController,
   TradingPlatformObserver,
@@ -131,6 +134,8 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
     });
     this.engine = new TradingPlatformEngine(this.store, {
       notifications: this.notifications,
+      beforePaperPositionOpen: (context) =>
+        this.persistTradeContextBeforeEntry(context),
       now: this.now,
     });
     this.server = new TradingPlatformServer(this.store, this.engine, {
@@ -299,62 +304,52 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       this.lastLiveCandleReceivedAt = this.now();
       this.lastLiveCandleTimestamp = candle.timestamp;
     }
-    const beforeTradeIds =
-      candle.confirm && this.tradeExecutionContextRepository !== undefined
-        ? new Set(
-            this.store.account
-              .snapshot(candle.timestamp)
-              .openPositions.map((position) => position.tradeId),
-          )
-        : null;
     try {
       this.engine.onCandle(candle);
       this.paperEngineError = null;
       if (candle.confirm) this.lastStrategyEvaluationAt = candle.timestamp;
-      if (beforeTradeIds !== null) this.recordNewTradeContexts(beforeTradeIds);
     } catch (error: unknown) {
       this.paperEngineError = error instanceof Error ? error.message : String(error);
       throw error;
     }
   }
 
-  private recordNewTradeContexts(beforeTradeIds: ReadonlySet<string>): void {
+  private persistTradeContextBeforeEntry(
+    context: PaperEntryTraceContext,
+  ): boolean {
     const repository = this.tradeExecutionContextRepository;
-    if (repository === undefined) return;
+    if (repository === undefined) return true;
     const config = this.store.getStrategyConfig();
-    const fingerprint = strategyConfigurationFingerprint(config);
-    const current = this.store.account.snapshot(this.now()).openPositions;
-    for (const position of current) {
-      if (beforeTradeIds.has(position.tradeId)) continue;
-      try {
-        repository.record({
-          tradeId: position.tradeId,
-          instrumentId: position.instrumentId,
-          strategyId: position.strategyId,
-          strategyVersion: position.strategyId,
-          timeframe: position.timeframe,
-          strategyConfig: config,
-          strategyConfigFingerprint: fingerprint,
-          deployment: this.deploymentIdentity,
-          recordedAt: this.now(),
-        });
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.paperEngineError = `trade execution context persistence failed: ${message}`;
-        this.store.log('ERROR', 'Paper trade context persistence failed', {
-          tradeId: position.tradeId,
-          instrumentId: position.instrumentId,
-          error: message,
-        });
-        this.store.setKillSwitch(true);
-        void this.notifications.send({
-          type: 'ERROR',
-          timestamp: this.now(),
-          title: 'Paper trade context persistence failed',
-          message: `${position.instrumentId}: ${message}`,
-          metadata: { tradeId: position.tradeId },
-        });
-      }
+    try {
+      repository.record({
+        tradeId: context.tradeId,
+        instrumentId: context.instrumentId,
+        strategyId: context.strategyId,
+        strategyVersion: context.strategyId,
+        timeframe: context.timeframe,
+        strategyConfig: config,
+        strategyConfigFingerprint: strategyConfigurationFingerprint(config),
+        deployment: this.deploymentIdentity,
+        recordedAt: context.recordedAt,
+      });
+      return true;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.paperEngineError = `trade execution context persistence failed: ${message}`;
+      this.store.log('ERROR', 'Paper entry trace context persistence failed', {
+        tradeId: context.tradeId,
+        instrumentId: context.instrumentId,
+        error: message,
+      });
+      this.store.setKillSwitch(true);
+      void this.notifications.send({
+        type: 'ERROR',
+        timestamp: this.now(),
+        title: 'Paper entry trace context persistence failed',
+        message: `${context.instrumentId}: ${message}`,
+        metadata: { tradeId: context.tradeId },
+      });
+      return false;
     }
   }
 
