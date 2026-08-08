@@ -572,6 +572,7 @@ export class TradingPlatformEngine {
       fillId,
       instrumentId,
       exitPrice: fill.averagePrice,
+      quantityBaseUnits: position.quantityBaseUnits,
       closedAt: book.observedAt,
       exitReason,
       exitFee: fill.fee,
