@@ -287,6 +287,8 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       stateFilePath: this.paperStateRepository?.getFilePath() ?? null,
       paperEngineError: this.paperEngineError,
       openPositions: platform.positions.length,
+      killSwitchActive: platform.risk.killSwitchActive,
+      circuitBreakerActive: platform.risk.circuitBreakerActive,
       dataDirectory: this.dataDirectory,
       deployment: this.deploymentIdentity,
     });
@@ -378,6 +380,8 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       health.paperEngine.status,
       health.persistence.status,
       health.disk.status,
+      health.risk.killSwitchActive,
+      health.risk.circuitBreakerActive,
     ].join('|');
     if (signature === this.lastHealthSignature) return;
     this.lastHealthSignature = signature;
@@ -402,6 +406,8 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
         marketData: health.marketData.status,
         persistence: health.persistence.status,
         disk: health.disk.status,
+        killSwitchActive: health.risk.killSwitchActive,
+        circuitBreakerActive: health.risk.circuitBreakerActive,
       },
     );
     void this.notifications.send({
@@ -411,9 +417,12 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
       message:
         `REST ${health.okxRest.status}; WS ${health.okxWebSocket.status}; ` +
         `market ${health.marketData.status}; persistence ${health.persistence.status}; ` +
-        `disk ${health.disk.status}`,
+        `disk ${health.disk.status}; kill switch ${health.risk.killSwitchActive}; ` +
+        `circuit breaker ${health.risk.circuitBreakerActive}`,
       metadata: {
         timeframe: health.marketData.timeframe,
+        killSwitchActive: health.risk.killSwitchActive,
+        circuitBreakerActive: health.risk.circuitBreakerActive,
         liveExecutionAllowed: false,
       },
     });
