@@ -55,6 +55,10 @@ const mockState = vi.hoisted(() => {
 vi.mock('ws', () => ({ default: mockState.MockWebSocket }));
 
 import { OKXCandleWebSocketClient } from '../src/clients/okx/OKXCandleWebSocketClient';
+import {
+  TRADING_TIMEFRAMES,
+  tradingTimeframeSpec,
+} from '../src/config/tradingTimeframes';
 
 const candleMessage = (channel: string): string =>
   JSON.stringify({
@@ -113,6 +117,41 @@ describe('OKXCandleWebSocketClient timeframe switching', () => {
     socket.triggerMessage(candleMessage('candle15m'));
     expect(received).toHaveLength(1);
     expect(received[0]?.interval).toBe('15m');
+    client.close();
+  });
+
+  it('uses the exact OKX websocket channel for every advertised timeframe', () => {
+    const client = new OKXCandleWebSocketClient();
+    client.subscribeToCandle('BTC-USDT-SWAP', TRADING_TIMEFRAMES[0]);
+    const socket = mockState.sockets[0];
+    if (!socket) throw new Error('Expected mock socket');
+    socket.triggerOpen();
+
+    for (const timeframe of TRADING_TIMEFRAMES.slice(1)) {
+      client.setCandleInterval('BTC-USDT-SWAP', timeframe);
+    }
+
+    const messages = subscriptionMessages(socket);
+    const subscribeChannels = messages
+      .filter((message) => message.op === 'subscribe')
+      .map((message) => message.args[0]?.channel);
+    expect(subscribeChannels).toEqual(
+      TRADING_TIMEFRAMES.map(
+        (timeframe) => tradingTimeframeSpec(timeframe).websocketChannel,
+      ),
+    );
+    for (let index = 1; index < TRADING_TIMEFRAMES.length; index += 1) {
+      expect(messages).toContainEqual(
+        expect.objectContaining({
+          op: 'unsubscribe',
+          args: [
+            expect.objectContaining({
+              channel: tradingTimeframeSpec(TRADING_TIMEFRAMES[index - 1]!).websocketChannel,
+            }),
+          ],
+        }),
+      );
+    }
     client.close();
   });
 
