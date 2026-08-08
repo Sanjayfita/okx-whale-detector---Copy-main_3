@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, resolve, sep } from 'node:path';
 import WebSocket, { WebSocketServer } from 'ws';
 import { isTradingTimeframe } from '../config/tradingTimeframes';
+import type { PlatformHealthSnapshot } from './PlatformHealth';
 import type {
   DashboardSettings,
   PlatformLogLevel,
@@ -22,6 +23,8 @@ export interface TradingPlatformServerOptions {
   readonly port?: number;
   readonly staticDirectory?: string;
   readonly settingsRepository?: PlatformSettingsRepository;
+  readonly healthProvider?: () => PlatformHealthSnapshot;
+  readonly allowLiveMonitoringMode?: boolean;
   readonly onSettingsChanged?: (
     previous: DashboardSettings,
     next: DashboardSettings,
@@ -49,6 +52,8 @@ const sendJson = (
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
   });
   response.end(JSON.stringify(body));
 };
@@ -138,6 +143,8 @@ export class TradingPlatformServer {
   private readonly staticDirectory: string;
   private readonly settingsRepository: PlatformSettingsRepository;
   private readonly onSettingsChanged?: TradingPlatformServerOptions['onSettingsChanged'];
+  private readonly healthProvider?: TradingPlatformServerOptions['healthProvider'];
+  private readonly allowLiveMonitoringMode: boolean;
   private readonly websocket = new WebSocketServer({ noServer: true });
   private server: Server | null = null;
   private unsubscribe?: () => void;
@@ -154,6 +161,8 @@ export class TradingPlatformServer {
     this.settingsRepository =
       options.settingsRepository ?? new PlatformSettingsRepository();
     this.onSettingsChanged = options.onSettingsChanged;
+    this.healthProvider = options.healthProvider;
+    this.allowLiveMonitoringMode = options.allowLiveMonitoringMode ?? true;
     if (!Number.isSafeInteger(this.port) || this.port < 0 || this.port > 65_535) {
       throw new Error('dashboard port must be between 0 and 65535');
     }
@@ -162,7 +171,13 @@ export class TradingPlatformServer {
   public async loadPersistedSettings(): Promise<void> {
     if (this.settingsLoaded) return;
     const persisted = await this.settingsRepository.load();
-    if (persisted !== null) this.store.updateSettings(persisted);
+    if (persisted !== null) {
+      const safePersisted =
+        !this.allowLiveMonitoringMode && persisted.mode === 'LIVE'
+          ? { ...persisted, mode: 'PAPER' as const }
+          : persisted;
+      this.store.updateSettings(safePersisted);
+    }
     this.settingsLoaded = true;
   }
 
@@ -250,13 +265,18 @@ export class TradingPlatformServer {
     this.store.log('API', `${method} ${url.pathname}`);
 
     if (method === 'GET' && url.pathname === '/api/health') {
-      sendJson(response, 200, {
-        status: 'ok',
-        strategy: this.store.strategies.getActive().id,
-        mode: this.store.getSettings().mode,
-        timeframe: this.store.getSettings().timeframe,
-        liveExecutionAllowed: false,
-      });
+      const health = this.healthProvider?.();
+      if (health === undefined) {
+        sendJson(response, 200, {
+          status: 'ok',
+          strategy: this.store.strategies.getActive().id,
+          mode: this.store.getSettings().mode,
+          timeframe: this.store.getSettings().timeframe,
+          liveExecutionAllowed: false,
+        });
+      } else {
+        sendJson(response, health.application === 'FAILED' ? 503 : 200, health);
+      }
       return;
     }
     if (method === 'GET' && url.pathname === '/api/snapshot') {
@@ -282,9 +302,16 @@ export class TradingPlatformServer {
     }
     if (method === 'PATCH' && url.pathname === '/api/settings') {
       const previous = this.store.getSettings();
-      const updated = this.store.updateSettings(
-        settingsPatch(await readJsonBody(request)),
-      );
+      const patch = settingsPatch(await readJsonBody(request));
+      if (!this.allowLiveMonitoringMode && patch.mode === 'LIVE') {
+        sendJson(response, 400, {
+          error: 'REMOTE_PAPER_ONLY',
+          message: 'This deployment is locked to PAPER mode.',
+          liveExecutionAllowed: false,
+        });
+        return;
+      }
+      const updated = this.store.updateSettings(patch);
       try {
         await this.onSettingsChanged?.(previous, updated);
       } catch (error: unknown) {
@@ -343,6 +370,8 @@ export class TradingPlatformServer {
         'content-type': contentTypes[extname(requestedPath)] ?? 'application/octet-stream',
         'cache-control':
           extname(requestedPath) === '.html' ? 'no-store' : 'public, max-age=60',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
       });
       response.end(content);
     } catch (error: unknown) {
