@@ -19,11 +19,22 @@ import type { StrategySignalResult } from '../strategies/TradingStrategy';
 import type { DashboardStrategyStatus } from './PlatformContracts';
 import { PlatformStateStore } from './PlatformStateStore';
 
+export interface PaperEntryTraceContext {
+  readonly tradeId: string;
+  readonly instrumentId: string;
+  readonly strategyId: string;
+  readonly timeframe: TradingTimeframe;
+  readonly recordedAt: number;
+}
+
 export interface TradingPlatformEngineOptions {
   readonly maximumStrategyCandles?: number;
   readonly paperLeverage?: number;
   readonly maintenanceMarginRate?: number;
   readonly notifications?: NotificationService;
+  readonly beforePaperPositionOpen?: (
+    context: PaperEntryTraceContext,
+  ) => boolean;
   readonly now?: () => number;
 }
 
@@ -139,11 +150,13 @@ export class TradingPlatformEngine {
   private readonly books = new Map<string, ExecutionOrderBook>();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
   private readonly executionResumeAfter = new Map<string, number>();
-  private readonly lastEvaluatedConfirmedCandle = new Map<string, string>();
   private readonly maximumStrategyCandles: number;
   private readonly paperLeverage: number;
   private readonly maintenanceMarginRate: number;
   private readonly notifications?: NotificationService;
+  private readonly beforePaperPositionOpen?: (
+    context: PaperEntryTraceContext,
+  ) => boolean;
   private readonly now: () => number;
   private rebuildingTimeframe = false;
 
@@ -155,6 +168,7 @@ export class TradingPlatformEngine {
     this.paperLeverage = options.paperLeverage ?? 2;
     this.maintenanceMarginRate = options.maintenanceMarginRate ?? 0.005;
     this.notifications = options.notifications;
+    this.beforePaperPositionOpen = options.beforePaperPositionOpen;
     this.now = options.now ?? Date.now;
 
     if (
@@ -179,7 +193,6 @@ export class TradingPlatformEngine {
     this.rebuildingTimeframe = true;
     this.candles.clear();
     this.executionResumeAfter.clear();
-    this.lastEvaluatedConfirmedCandle.clear();
     this.store.clearStrategyMarketState();
     this.store.setTimeframeState(
       'REBUILDING',
@@ -289,30 +302,22 @@ export class TradingPlatformEngine {
     });
     this.store.setStrategyStatus(statusFromDecision(result));
 
-    const evaluationId = `${selectedTimeframe}:${candle.timestamp}`;
-    if (this.lastEvaluatedConfirmedCandle.get(candle.instId) === evaluationId) {
-      return;
-    }
-    this.lastEvaluatedConfirmedCandle.set(candle.instId, evaluationId);
-
     if (this.rebuildingTimeframe) return;
     const resumeAfter = this.executionResumeAfter.get(candle.instId);
     if (resumeAfter !== undefined && candle.timestamp <= resumeAfter) return;
 
     if (position !== undefined) {
       if (result.trailingStopPrice !== null) {
-        const trailingChanged =
-          result.trailingStopPrice !== position.trailingStopPrice;
         this.store.account.markPosition({
           instrumentId: candle.instId,
           price: candle.close,
           timestamp: candle.timestamp,
           trailingStopPrice: result.trailingStopPrice,
-          auditEventId: trailingChanged
-            ? `trailing:${position.tradeId}:${candle.timestamp}:${result.trailingStopPrice}`
-            : undefined,
+          auditEventId:
+            `trailing:${position.tradeId}:` +
+            `${candle.timestamp}:${result.trailingStopPrice}`,
         });
-        if (trailingChanged) this.store.persistPaperState(candle.timestamp);
+        this.store.persistPaperState(candle.timestamp);
       }
       if (result.action === 'EXIT') {
         this.closePaperPosition(
@@ -342,7 +347,7 @@ export class TradingPlatformEngine {
     readonly instrumentId: string;
     readonly fundingRatePercent: number;
     readonly timestamp: number;
-    readonly fundingEventId?: string;
+    readonly fundingId?: string;
   }): void {
     const position = this.store.account.getOpenPosition(input.instrumentId);
     if (position === undefined) return;
@@ -355,9 +360,9 @@ export class TradingPlatformEngine {
       (input.fundingRatePercent / 100) *
       (position.direction === 'LONG' ? -1 : 1);
     const fundingId =
-      input.fundingEventId ??
-      `paper-funding:${input.instrumentId}:${input.timestamp}`;
-    const applied = this.store.account.applyFundingEvent({
+      input.fundingId ??
+      `funding:${input.instrumentId}:${input.timestamp}:${input.fundingRatePercent}`;
+    const funding = this.store.account.applyFundingEvent({
       fundingId,
       instrumentId: input.instrumentId,
       fundingPnl,
@@ -365,10 +370,11 @@ export class TradingPlatformEngine {
       positionNotional: notional,
       timestamp: input.timestamp,
     });
-    if (!applied.applied) return;
+    if (!funding.applied) return;
     this.store.persistPaperState(input.timestamp);
     this.store.log('TRADE', 'Paper funding applied', {
       instrumentId: input.instrumentId,
+      fundingId,
       fundingPnl,
       fundingRatePercent: input.fundingRatePercent,
     });
@@ -480,6 +486,22 @@ export class TradingPlatformEngine {
       `paper:${result.strategyId}:${result.instrumentId}:` +
       `${timeframe}:${result.observedAt}`;
     const fillId = `${tradeId}:entry:${executionBook.observedAt}`;
+    if (
+      this.beforePaperPositionOpen !== undefined &&
+      !this.beforePaperPositionOpen({
+        tradeId,
+        instrumentId: result.instrumentId,
+        strategyId: result.strategyId,
+        timeframe,
+        recordedAt: executionBook.observedAt,
+      })
+    ) {
+      this.store.log('ERROR', 'Paper entry blocked because trace context was not persisted', {
+        tradeId,
+        instrumentId: result.instrumentId,
+      });
+      return;
+    }
     const opened = this.store.account.openPositionFromFill({
       fillId,
       tradeId,
@@ -550,7 +572,6 @@ export class TradingPlatformEngine {
       fillId,
       instrumentId,
       exitPrice: fill.averagePrice,
-      quantityBaseUnits: fill.filledQuantity,
       closedAt: book.observedAt,
       exitReason,
       exitFee: fill.fee,
@@ -562,19 +583,7 @@ export class TradingPlatformEngine {
       closedAt: trade.closedAt,
       netPnl: trade.netPnl,
     });
-    const risk = this.store.riskManager.getStatus();
-    this.store.account.recordAuditEvent({
-      eventId: `risk-close:${trade.tradeId}:${trade.closedAt}`,
-      type: 'RISK_STATE_UPDATE',
-      timestamp: trade.closedAt,
-      instrumentId,
-      details: {
-        consecutiveLosses: risk.consecutiveLosses,
-        circuitBreakerActive: risk.circuitBreakerActive,
-        cooldownUntil: risk.cooldownUntil,
-      },
-    });
-    this.store.persistPaperState(trade.closedAt);
+    this.store.persistPaperState(book.observedAt);
     this.store.log('TRADE', 'Paper position closed', {
       instrumentId,
       exitReason,
