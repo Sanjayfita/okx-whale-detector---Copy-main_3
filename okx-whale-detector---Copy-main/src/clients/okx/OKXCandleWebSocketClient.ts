@@ -26,6 +26,19 @@ export interface OKXCandle {
   confirm: boolean;
 }
 
+export type OKXCandleConnectionState =
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'DISCONNECTED'
+  | 'CLOSED';
+
+export interface OKXCandleConnectionStatus {
+  readonly state: OKXCandleConnectionState;
+  readonly lastMessageAt: number | null;
+  readonly lastCandleReceivedAt: number | null;
+  readonly reconnectAttempts: number;
+}
+
 export class OKXCandleWebSocketClient {
   private ws: WebSocket | null = null;
   private reconnectTimer?: NodeJS.Timeout;
@@ -34,6 +47,9 @@ export class OKXCandleWebSocketClient {
   private reconnectAttempt = 0;
   private intentionallyClosed = false;
   private hasConnected = false;
+  private connectionState: OKXCandleConnectionState = 'CONNECTING';
+  private lastMessageAt: number | null = null;
+  private lastCandleReceivedAt: number | null = null;
 
   private readonly url = 'wss://ws.okx.com:8443/ws/v5/business';
   private readonly candleSubscriptions = new Map<string, TradingTimeframe>();
@@ -50,6 +66,7 @@ export class OKXCandleWebSocketClient {
 
   private connect(): void {
     if (this.intentionallyClosed) return;
+    this.connectionState = 'CONNECTING';
 
     const ws = new WebSocket(this.url, {
       maxPayload: 2 * 1024 * 1024,
@@ -61,6 +78,7 @@ export class OKXCandleWebSocketClient {
       console.log('Connected to OKX Candle WebSocket');
       const reconnected = this.hasConnected;
       this.hasConnected = true;
+      this.connectionState = 'CONNECTED';
       this.reconnectAttempt = 0;
       this.awaitingHeartbeatResponse = false;
       this.startHeartbeat();
@@ -69,6 +87,7 @@ export class OKXCandleWebSocketClient {
     });
 
     ws.on('message', (data) => {
+      this.lastMessageAt = Date.now();
       this.awaitingHeartbeatResponse = false;
       this.handleMessage(data, performance.now());
     });
@@ -80,6 +99,7 @@ export class OKXCandleWebSocketClient {
     ws.on('close', () => {
       console.log('❌ Disconnected from OKX Candle WebSocket');
       this.stopHeartbeat();
+      this.connectionState = this.intentionallyClosed ? 'CLOSED' : 'DISCONNECTED';
       if (!this.intentionallyClosed) this.scheduleReconnect();
     });
   }
@@ -192,6 +212,7 @@ export class OKXCandleWebSocketClient {
       volumeCurrencyQuote,
       confirm: values[8] === '1',
     };
+    this.lastCandleReceivedAt = Date.now();
     this.recordTiming(
       'okx.candle.validationTransform',
       performance.now() - validationStartedAt,
@@ -309,9 +330,37 @@ export class OKXCandleWebSocketClient {
     this.subscribeToCandle(instId, interval);
   }
 
+  public getConnectionStatus(): OKXCandleConnectionStatus {
+    return {
+      state: this.connectionState,
+      lastMessageAt: this.lastMessageAt,
+      lastCandleReceivedAt: this.lastCandleReceivedAt,
+      reconnectAttempts: this.reconnectAttempt,
+    };
+  }
+
+  public forceReconnect(): void {
+    if (this.intentionallyClosed) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    this.reconnectAttempt = 0;
+    const ws = this.ws;
+    if (
+      ws !== null &&
+      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+    ) {
+      ws.terminate();
+      return;
+    }
+    this.connect();
+  }
+
   public close(): void {
     if (this.intentionallyClosed) return;
     this.intentionallyClosed = true;
+    this.connectionState = 'CLOSED';
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
