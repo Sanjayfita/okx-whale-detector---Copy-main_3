@@ -9,8 +9,6 @@ x-logging: &default-logging
 services:
   database:
     image: postgres:16
-    env_file:
-      - .env.production
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env.production}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
@@ -37,8 +35,6 @@ services:
     depends_on:
       database:
         condition: service_healthy
-    env_file:
-      - .env.production
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
       PGUSER: ${POSTGRES_USER:?set POSTGRES_USER in .env.production}
@@ -62,8 +58,6 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
-    env_file:
-      - .env.production
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env.production}
       DASHBOARD_HOST: 0.0.0.0
@@ -71,12 +65,20 @@ services:
       TRADING_MODE: PAPER
       REMOTE_PAPER_ONLY: "true"
       PAPER_STARTING_EQUITY: ${PAPER_STARTING_EQUITY:-10000}
+      PAPER_CHECKPOINT_INTERVAL_MS: ${PAPER_CHECKPOINT_INTERVAL_MS:-5000}
+      PLATFORM_HEALTH_CHECK_INTERVAL_MS: ${PLATFORM_HEALTH_CHECK_INTERVAL_MS:-30000}
       PLATFORM_DATA_DIR: /app/data
       PAPER_STATE_PATH: /app/data/platform/paper-state.json
       TRADE_CONTEXT_PATH: /app/data/platform/trade-contexts.json
       APP_GIT_COMMIT: ${APP_GIT_COMMIT:-unknown}
       APP_IMAGE_VERSION: ${APP_IMAGE_VERSION:-phase12-local}
       APP_CONFIGURATION_VERSION: ${APP_CONFIGURATION_VERSION:-phase12-v1}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      TRADING_WEBHOOK_URL: ${TRADING_WEBHOOK_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      EMAIL_RELAY_URL: ${EMAIL_RELAY_URL:-}
+      EMAIL_RECIPIENT: ${EMAIL_RECIPIENT:-}
       TZ: UTC
     ports:
       - "127.0.0.1:${DASHBOARD_PORT:-4173}:4173"
