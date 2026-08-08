@@ -347,6 +347,7 @@ export class TradingPlatformEngine {
     readonly instrumentId: string;
     readonly fundingRatePercent: number;
     readonly timestamp: number;
+    readonly fundingEventId?: string;
     readonly fundingId?: string;
   }): void {
     const position = this.store.account.getOpenPosition(input.instrumentId);
@@ -360,6 +361,7 @@ export class TradingPlatformEngine {
       (input.fundingRatePercent / 100) *
       (position.direction === 'LONG' ? -1 : 1);
     const fundingId =
+      input.fundingEventId ??
       input.fundingId ??
       `funding:${input.instrumentId}:${input.timestamp}:${input.fundingRatePercent}`;
     const funding = this.store.account.applyFundingEvent({
