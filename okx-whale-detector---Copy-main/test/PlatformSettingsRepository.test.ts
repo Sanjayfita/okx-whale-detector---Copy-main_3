@@ -10,6 +10,7 @@ const directories: string[] = [];
 const settings: DashboardSettings = {
   mode: 'PAPER',
   activeStrategyId: 'ema-trend-crossover-v1',
+  timeframe: '15m',
   fastEmaLength: 20,
   slowEmaLength: 50,
   rsiPeriod: 14,
@@ -34,7 +35,7 @@ afterEach(async () => {
 });
 
 describe('PlatformSettingsRepository', () => {
-  it('atomically persists and reloads dashboard settings', async () => {
+  it('atomically persists and reloads dashboard settings including timeframe', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'platform-settings-'));
     directories.push(directory);
     const path = join(directory, 'nested', 'settings.json');
