@@ -26,7 +26,13 @@ export interface OkxCandleHistoryBridgeOptions {
   readonly timeframe?: TradingTimeframe;
   readonly maximumCandles?: number;
   readonly maximumRecoveryPages?: number;
+  readonly maximumRestRetries?: number;
+  readonly retryBaseDelayMs?: number;
+  readonly sleep?: (delayMs: number) => Promise<void>;
 }
+
+const defaultSleep = async (delayMs: number): Promise<void> =>
+  new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs));
 
 /**
  * Bridges native OKX REST candles into the exact candle contract used by the
@@ -38,12 +44,18 @@ export class OkxCandleHistoryBridge {
   private readonly timeframe: TradingTimeframe;
   private readonly maximumCandles: number;
   private readonly maximumRecoveryPages: number;
+  private readonly maximumRestRetries: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly sleep: (delayMs: number) => Promise<void>;
 
   public constructor(options: OkxCandleHistoryBridgeOptions = {}) {
     this.client = options.client ?? new OKXHistoricalDataClient();
     this.timeframe = options.timeframe ?? '1m';
     this.maximumCandles = options.maximumCandles ?? 100;
     this.maximumRecoveryPages = options.maximumRecoveryPages ?? 250;
+    this.maximumRestRetries = options.maximumRestRetries ?? 4;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 500;
+    this.sleep = options.sleep ?? defaultSleep;
 
     if (
       !Number.isSafeInteger(this.maximumCandles) ||
@@ -57,6 +69,18 @@ export class OkxCandleHistoryBridge {
       this.maximumRecoveryPages <= 0
     ) {
       throw new Error('maximumRecoveryPages must be a positive safe integer');
+    }
+    if (
+      !Number.isSafeInteger(this.maximumRestRetries) ||
+      this.maximumRestRetries < 0
+    ) {
+      throw new Error('maximumRestRetries must be a non-negative safe integer');
+    }
+    if (
+      !Number.isSafeInteger(this.retryBaseDelayMs) ||
+      this.retryBaseDelayMs <= 0
+    ) {
+      throw new Error('retryBaseDelayMs must be a positive safe integer');
     }
   }
 
@@ -75,7 +99,7 @@ export class OkxCandleHistoryBridge {
     }
 
     const spec = tradingTimeframeSpec(this.timeframe);
-    const page = await this.client.fetchCandlesPage({
+    const page = await this.fetchCandlesPageWithRetry({
       instrumentId,
       interval: spec.okxBar,
       intervalMs: spec.intervalMs,
@@ -126,7 +150,7 @@ export class OkxCandleHistoryBridge {
     let reachedRequiredBoundary = false;
 
     while (pagesFetched < this.maximumRecoveryPages) {
-      const page = await this.client.fetchCandlesPage({
+      const page = await this.fetchCandlesPageWithRetry({
         instrumentId: input.instrumentId,
         interval: spec.okxBar,
         intervalMs: spec.intervalMs,
@@ -193,6 +217,22 @@ export class OkxCandleHistoryBridge {
       );
     }
     return results;
+  }
+
+  private async fetchCandlesPageWithRetry(
+    input: Parameters<OKXHistoricalDataClient['fetchCandlesPage']>[0],
+  ): ReturnType<OKXHistoricalDataClient['fetchCandlesPage']> {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await this.client.fetchCandlesPage(input);
+      } catch (error: unknown) {
+        if (attempt >= this.maximumRestRetries) throw error;
+        const delayMs = Math.min(10_000, this.retryBaseDelayMs * 2 ** attempt);
+        attempt += 1;
+        await this.sleep(delayMs);
+      }
+    }
   }
 
   private confirmedChronological(
