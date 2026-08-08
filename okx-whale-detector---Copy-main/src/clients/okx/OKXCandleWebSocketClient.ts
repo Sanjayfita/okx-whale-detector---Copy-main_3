@@ -129,7 +129,6 @@ export class OKXCandleWebSocketClient {
     if (typeof channel !== 'string' || typeof instId !== 'string') return;
     const interval = tradingTimeframeFromWebSocketChannel(channel);
     if (interval === null) return;
-    if (this.candleSubscriptions.get(instId) !== interval) return;
 
     if (!Array.isArray(message.data) || message.data.length === 0) {
       console.error('Rejected candle message without valid data');
@@ -174,6 +173,11 @@ export class OKXCandleWebSocketClient {
       console.error('Rejected invalid OKX candle values');
       return;
     }
+
+    // Validate the payload first, then discard stale/unsolicited timeframe data.
+    // This preserves data-integrity diagnostics while ensuring a late candle from
+    // the previous timeframe can never reach the strategy callback.
+    if (this.candleSubscriptions.get(instId) !== interval) return;
 
     const candle: OKXCandle = {
       instId,
