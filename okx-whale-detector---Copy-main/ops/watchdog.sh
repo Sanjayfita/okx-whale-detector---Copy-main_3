@@ -45,14 +45,18 @@ restart_platform_if_allowed() {
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d platform
 }
 
+healthy_pass=1
 health_body=''
 if health_body=$(curl -sS --max-time 10 "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null); then
   if printf '%s' "$health_body" | grep -q '"application":"FAILED"'; then
+    healthy_pass=0
     alert "Platform reports FAILED health. Inspect persistence/paper-engine status before restarting."
   elif printf '%s' "$health_body" | grep -q '"application":"DEGRADED"'; then
-    alert "Platform reports DEGRADED health. Inspect OKX connectivity, stale market data, and disk status."
+    healthy_pass=0
+    alert "Platform reports DEGRADED health. Inspect OKX connectivity, stale market data, risk state, and disk status."
   fi
 else
+  healthy_pass=0
   restart_platform_if_allowed
 fi
 
@@ -60,11 +64,21 @@ container_id=$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q pl
 if [ -n "$container_id" ]; then
   restart_count=$(docker inspect -f '{{.RestartCount}}' "$container_id" 2>/dev/null || echo 0)
   if [ "$restart_count" -ge "$RESTART_ALERT_THRESHOLD" ]; then
+    healthy_pass=0
     alert "Platform container restart count is $restart_count (threshold $RESTART_ALERT_THRESHOLD)."
   fi
 fi
 
 used_percent=$(df -Pk "$PLATFORM_DATA_DIR" | awk 'NR==2 {gsub(/%/, "", $5); print $5}')
 if [ -n "$used_percent" ] && [ "$used_percent" -ge 90 ]; then
+  healthy_pass=0
   alert "Platform data filesystem is ${used_percent}% used."
+fi
+
+# Optional external dead-man/heartbeat service. The endpoint should be configured
+# to alert when scheduled pings stop; therefore a full VPS/provider outage can be
+# detected even though no process on the failed VPS can send its own alert.
+if [ "$healthy_pass" -eq 1 ] && [ -n "${OPS_HEARTBEAT_URL:-}" ]; then
+  curl -fsS --max-time 10 "$OPS_HEARTBEAT_URL" >/dev/null || \
+    echo "External watchdog heartbeat delivery failed" >&2
 fi
