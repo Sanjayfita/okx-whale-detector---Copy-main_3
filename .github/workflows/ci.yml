@@ -83,5 +83,7 @@ jobs:
           sh -n ops/backup-production.sh
           sh -n ops/restore-production.sh
           sh -n ops/watchdog.sh
+          sh -n ops/preflight-production.sh
+          sh -n ops/measure-resources.sh
           sh -n ops/verify-backup-restore.sh
           sh ops/verify-backup-restore.sh
