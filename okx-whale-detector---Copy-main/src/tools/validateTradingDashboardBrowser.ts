@@ -114,16 +114,18 @@ const waitForChildExit = async (
   if (child.exitCode !== null || child.signalCode !== null) return true;
   return new Promise<boolean>((resolve) => {
     let settled = false;
-    let timer: NodeJS.Timeout;
-    const finish = (exited: boolean): void => {
+    const onExit = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.off('exit', onExit);
-      resolve(exited);
+      resolve(true);
     };
-    const onExit = (): void => finish(true);
-    timer = setTimeout(() => finish(false), timeoutMs);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.off('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
     child.once('exit', onExit);
   });
 };
