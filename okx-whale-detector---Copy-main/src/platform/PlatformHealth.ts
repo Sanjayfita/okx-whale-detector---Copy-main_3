@@ -37,6 +37,10 @@ export interface PlatformHealthSnapshot {
     readonly lastEvaluationAt: number | null;
     readonly timeframeState: TimeframeLoadState;
   };
+  readonly risk: {
+    readonly killSwitchActive: boolean;
+    readonly circuitBreakerActive: boolean;
+  };
   readonly paperEngine: {
     readonly status: ComponentHealthStatus;
     readonly openPositions: number;
@@ -78,6 +82,8 @@ export interface PlatformHealthInput {
   readonly stateFilePath: string | null;
   readonly paperEngineError: string | null;
   readonly openPositions: number;
+  readonly killSwitchActive: boolean;
+  readonly circuitBreakerActive: boolean;
   readonly dataDirectory: string;
   readonly deployment: DeploymentIdentity;
   readonly staleMultiplier?: number;
@@ -140,8 +146,11 @@ export const buildPlatformHealthSnapshot = (
     (input.lastCandleReceivedAt === null ||
       input.now - input.lastCandleReceivedAt > staleAfterMs);
   const marketDataStatus: MarketDataHealthStatus = stale ? 'STALE' : 'HEALTHY';
+  const riskPaused = input.killSwitchActive || input.circuitBreakerActive;
   const strategyStatus: StrategyHealthStatus =
-    input.timeframeState === 'READY' && !stale ? 'RUNNING' : 'PAUSED';
+    input.timeframeState === 'READY' && !stale && !riskPaused
+      ? 'RUNNING'
+      : 'PAUSED';
   const disk = diskUsage(
     input.dataDirectory,
     input.minimumFreeBytes ?? 1_073_741_824,
@@ -180,6 +189,10 @@ export const buildPlatformHealthSnapshot = (
       status: strategyStatus,
       lastEvaluationAt: input.lastStrategyEvaluationAt,
       timeframeState: input.timeframeState,
+    },
+    risk: {
+      killSwitchActive: input.killSwitchActive,
+      circuitBreakerActive: input.circuitBreakerActive,
     },
     paperEngine: {
       status: input.paperEngineError === null ? 'HEALTHY' : 'FAILED',
