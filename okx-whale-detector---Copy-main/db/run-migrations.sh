@@ -1,12 +1,16 @@
 #!/bin/sh
 set -eu
 
+PGHOST="${PGHOST:-database}"
+PGUSER="${PGUSER:-postgres}"
+PGDATABASE="${PGDATABASE:-research}"
+
 for migration in /db/migrations/*.sql; do
   echo "Applying ${migration}"
   psql \
-    -h database \
-    -U postgres \
-    -d research \
+    -h "$PGHOST" \
+    -U "$PGUSER" \
+    -d "$PGDATABASE" \
     -v ON_ERROR_STOP=1 \
     -f "${migration}"
 done
