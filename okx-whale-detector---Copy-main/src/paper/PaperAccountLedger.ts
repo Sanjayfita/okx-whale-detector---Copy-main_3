@@ -3,10 +3,57 @@ import {
   type EquityPoint,
   type PerformanceAnalyticsReport,
 } from '../analytics/PerformanceAnalytics';
+import type { TradingTimeframe } from '../config/tradingTimeframes';
 
 export type ManagedPositionDirection = 'LONG' | 'SHORT';
 
+export type PaperLedgerEventType =
+  | 'FILL'
+  | 'POSITION_OPEN'
+  | 'POSITION_CLOSE'
+  | 'FEE'
+  | 'FUNDING'
+  | 'STOP_UPDATE'
+  | 'TARGET_UPDATE'
+  | 'TRAILING_UPDATE'
+  | 'RISK_STATE_UPDATE';
+
+export interface PaperLedgerEvent {
+  readonly eventId: string;
+  readonly type: PaperLedgerEventType;
+  readonly timestamp: number;
+  readonly instrumentId: string;
+  readonly details: Readonly<
+    Record<string, string | number | boolean | null>
+  >;
+}
+
+export interface PaperFillRecord {
+  readonly fillId: string;
+  readonly instrumentId: string;
+  readonly side: 'BUY' | 'SELL';
+  readonly timestamp: number;
+  readonly quantityBaseUnits: number;
+  readonly averagePrice: number;
+  readonly fee: number;
+  readonly slippageBps: number | null;
+  readonly reduceOnly: boolean;
+  readonly strategyId: string;
+  readonly timeframe: TradingTimeframe;
+}
+
+export interface PaperFundingRecord {
+  readonly fundingId: string;
+  readonly instrumentId: string;
+  readonly timestamp: number;
+  readonly direction: ManagedPositionDirection;
+  readonly positionNotional: number;
+  readonly fundingRatePercent: number;
+  readonly fundingPnl: number;
+}
+
 export interface PaperManagedPosition {
+  readonly tradeId: string;
   readonly instrumentId: string;
   readonly direction: ManagedPositionDirection;
   readonly openedAt: number;
@@ -21,6 +68,10 @@ export interface PaperManagedPosition {
   readonly fundingPnl: number;
   readonly currentPrice: number;
   readonly unrealizedPnl: number;
+  readonly strategyId: string;
+  readonly timeframe: TradingTimeframe;
+  readonly entryFillId: string | null;
+  readonly entrySlippageBps: number | null;
 }
 
 export interface PaperJournalTrade {
@@ -41,6 +92,12 @@ export interface PaperJournalTrade {
   readonly riskAmount: number;
   readonly rMultiple: number | null;
   readonly durationMs: number;
+  readonly strategyId: string;
+  readonly timeframe: TradingTimeframe;
+  readonly entryFillId: string | null;
+  readonly exitFillId: string | null;
+  readonly entrySlippageBps: number | null;
+  readonly exitSlippageBps: number | null;
 }
 
 export interface PaperAccountSnapshot {
@@ -52,9 +109,34 @@ export interface PaperAccountSnapshot {
   readonly peakEquity: number;
   readonly openPositions: readonly PaperManagedPosition[];
   readonly trades: readonly PaperJournalTrade[];
+  readonly fills: readonly PaperFillRecord[];
+  readonly fundingEvents: readonly PaperFundingRecord[];
+  readonly ledgerEvents: readonly PaperLedgerEvent[];
   readonly equityCurve: readonly EquityPoint[];
   readonly analytics: PerformanceAnalyticsReport;
   readonly liveExecutionAllowed: false;
+}
+
+export interface PaperAccountPersistedState {
+  readonly schemaVersion: 1;
+  readonly startingEquity: number;
+  readonly cashBalance: number;
+  readonly peakEquity: number;
+  readonly openPositions: readonly PaperManagedPosition[];
+  readonly trades: readonly PaperJournalTrade[];
+  readonly fills: readonly PaperFillRecord[];
+  readonly fundingEvents: readonly PaperFundingRecord[];
+  readonly ledgerEvents: readonly PaperLedgerEvent[];
+  readonly equityCurve: readonly EquityPoint[];
+}
+
+export interface PaperAccountRestoreResult {
+  readonly positionsRestored: number;
+  readonly tradesRestored: number;
+  readonly fillsRestored: number;
+  readonly fundingEventsRestored: number;
+  readonly duplicateEvents: number;
+  readonly warnings: readonly string[];
 }
 
 const requireTimestamp = (value: number, name: string): void => {
@@ -75,6 +157,14 @@ const requireNonNegativeFinite = (value: number, name: string): void => {
   }
 };
 
+const requireFinite = (value: number, name: string): void => {
+  if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
+};
+
+const requireNonEmpty = (value: string, name: string): void => {
+  if (value.trim().length === 0) throw new Error(`${name} must not be empty`);
+};
+
 const unrealized = (
   direction: ManagedPositionDirection,
   entryPrice: number,
@@ -87,22 +177,53 @@ const unrealized = (
 const utcDay = (timestamp: number): string =>
   new Date(timestamp).toISOString().slice(0, 10);
 
+const approximatelyEqual = (left: number, right: number): boolean =>
+  Math.abs(left - right) <= Math.max(1e-8, Math.abs(right) * 1e-10);
+
+const uniqueBy = <T>(
+  values: readonly T[],
+  key: (value: T) => string,
+): { readonly values: T[]; readonly duplicates: number } => {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  let duplicates = 0;
+  for (const value of values) {
+    const identity = key(value);
+    if (seen.has(identity)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(identity);
+    unique.push(value);
+  }
+  return { values: unique, duplicates };
+};
+
 /**
  * Account and journal bookkeeping for paper/shadow execution.
  *
- * Fill realism remains the responsibility of PaperTradingEngine / ExecutionSimulator.
- * This class owns balance, mark-to-market equity, trade reasons and risk-normalized
- * performance so the dashboard and risk manager read one consistent state.
+ * Fill realism remains the responsibility of the execution simulator. This class
+ * owns balance, positions, funding, the closed-trade journal and explicit durable
+ * event identities. Runtime persistence uses exportState()/restoreState() rather
+ * than serializing this class instance.
  */
 export class PaperAccountLedger {
+  private startingEquity: number;
   private cashBalance: number;
   private peakEquity: number;
   private readonly positions = new Map<string, PaperManagedPosition>();
   private readonly trades: PaperJournalTrade[] = [];
+  private readonly fills: PaperFillRecord[] = [];
+  private readonly fundingEvents: PaperFundingRecord[] = [];
+  private readonly ledgerEvents: PaperLedgerEvent[] = [];
+  private readonly fillIds = new Set<string>();
+  private readonly fundingIds = new Set<string>();
+  private readonly ledgerEventIds = new Set<string>();
   private readonly equityCurve: EquityPoint[] = [];
 
-  public constructor(private readonly startingEquity: number) {
+  public constructor(startingEquity: number) {
     requirePositiveFinite(startingEquity, 'startingEquity');
+    this.startingEquity = startingEquity;
     this.cashBalance = startingEquity;
     this.peakEquity = startingEquity;
     this.recordEquity(0);
@@ -120,10 +241,13 @@ export class PaperAccountLedger {
     readonly riskAmount: number;
     readonly entryReason: string;
     readonly entryFee: number;
+    readonly tradeId?: string;
+    readonly strategyId?: string;
+    readonly timeframe?: TradingTimeframe;
+    readonly entryFillId?: string | null;
+    readonly entrySlippageBps?: number | null;
   }): PaperManagedPosition {
-    if (input.instrumentId.trim().length === 0) {
-      throw new Error('instrumentId must not be empty');
-    }
+    requireNonEmpty(input.instrumentId, 'instrumentId');
     if (this.positions.has(input.instrumentId)) {
       throw new Error(`position already exists for ${input.instrumentId}`);
     }
@@ -134,11 +258,18 @@ export class PaperAccountLedger {
     requirePositiveFinite(input.takeProfitPrice, 'takeProfitPrice');
     requirePositiveFinite(input.riskAmount, 'riskAmount');
     requireNonNegativeFinite(input.entryFee, 'entryFee');
-    if (input.entryReason.trim().length === 0) {
-      throw new Error('entryReason must not be empty');
+    requireNonEmpty(input.entryReason, 'entryReason');
+    if (input.entrySlippageBps !== undefined && input.entrySlippageBps !== null) {
+      requireFinite(input.entrySlippageBps, 'entrySlippageBps');
     }
 
+    const tradeId =
+      input.tradeId ?? `paper:${input.instrumentId}:${input.openedAt}`;
+    const strategyId = input.strategyId ?? 'legacy-paper';
+    requireNonEmpty(tradeId, 'tradeId');
+    requireNonEmpty(strategyId, 'strategyId');
     const position: PaperManagedPosition = {
+      tradeId,
       instrumentId: input.instrumentId,
       direction: input.direction,
       openedAt: input.openedAt,
@@ -153,6 +284,10 @@ export class PaperAccountLedger {
       fundingPnl: 0,
       currentPrice: input.entryPrice,
       unrealizedPnl: 0,
+      strategyId,
+      timeframe: input.timeframe ?? '1m',
+      entryFillId: input.entryFillId ?? null,
+      entrySlippageBps: input.entrySlippageBps ?? null,
     };
     this.cashBalance -= input.entryFee;
     this.positions.set(input.instrumentId, position);
@@ -160,22 +295,123 @@ export class PaperAccountLedger {
     return position;
   }
 
+  public openPositionFromFill(input: {
+    readonly fillId: string;
+    readonly instrumentId: string;
+    readonly direction: ManagedPositionDirection;
+    readonly openedAt: number;
+    readonly entryPrice: number;
+    readonly quantityBaseUnits: number;
+    readonly stopLossPrice: number;
+    readonly takeProfitPrice: number;
+    readonly trailingStopPrice?: number | null;
+    readonly riskAmount: number;
+    readonly entryReason: string;
+    readonly entryFee: number;
+    readonly slippageBps: number | null;
+    readonly strategyId: string;
+    readonly timeframe: TradingTimeframe;
+    readonly tradeId: string;
+  }): { readonly applied: boolean; readonly position: PaperManagedPosition | null } {
+    requireNonEmpty(input.fillId, 'fillId');
+    if (this.fillIds.has(input.fillId)) {
+      return {
+        applied: false,
+        position: this.positions.get(input.instrumentId) ?? null,
+      };
+    }
+    if (input.slippageBps !== null) requireFinite(input.slippageBps, 'slippageBps');
+    const position = this.openPosition({
+      ...input,
+      entryFillId: input.fillId,
+      entrySlippageBps: input.slippageBps,
+    });
+    const fill: PaperFillRecord = {
+      fillId: input.fillId,
+      instrumentId: input.instrumentId,
+      side: input.direction === 'LONG' ? 'BUY' : 'SELL',
+      timestamp: input.openedAt,
+      quantityBaseUnits: input.quantityBaseUnits,
+      averagePrice: input.entryPrice,
+      fee: input.entryFee,
+      slippageBps: input.slippageBps,
+      reduceOnly: false,
+      strategyId: input.strategyId,
+      timeframe: input.timeframe,
+    };
+    this.fills.push(fill);
+    this.fillIds.add(fill.fillId);
+    this.recordAuditEvent({
+      eventId: `fill:${fill.fillId}`,
+      type: 'FILL',
+      timestamp: fill.timestamp,
+      instrumentId: fill.instrumentId,
+      details: {
+        side: fill.side,
+        quantityBaseUnits: fill.quantityBaseUnits,
+        averagePrice: fill.averagePrice,
+        reduceOnly: false,
+      },
+    });
+    if (fill.fee > 0) {
+      this.recordAuditEvent({
+        eventId: `fee:${fill.fillId}`,
+        type: 'FEE',
+        timestamp: fill.timestamp,
+        instrumentId: fill.instrumentId,
+        details: { amount: fill.fee, stage: 'ENTRY' },
+      });
+    }
+    this.recordAuditEvent({
+      eventId: `position-open:${input.tradeId}`,
+      type: 'POSITION_OPEN',
+      timestamp: input.openedAt,
+      instrumentId: input.instrumentId,
+      details: {
+        tradeId: input.tradeId,
+        direction: input.direction,
+        quantityBaseUnits: input.quantityBaseUnits,
+        entryPrice: input.entryPrice,
+        strategyId: input.strategyId,
+        timeframe: input.timeframe,
+      },
+    });
+    this.recordAuditEvent({
+      eventId: `stop:${input.tradeId}:${input.openedAt}`,
+      type: 'STOP_UPDATE',
+      timestamp: input.openedAt,
+      instrumentId: input.instrumentId,
+      details: { stopLossPrice: input.stopLossPrice },
+    });
+    this.recordAuditEvent({
+      eventId: `target:${input.tradeId}:${input.openedAt}`,
+      type: 'TARGET_UPDATE',
+      timestamp: input.openedAt,
+      instrumentId: input.instrumentId,
+      details: { takeProfitPrice: input.takeProfitPrice },
+    });
+    return { applied: true, position };
+  }
+
   public markPosition(input: {
     readonly instrumentId: string;
     readonly price: number;
     readonly timestamp: number;
     readonly trailingStopPrice?: number | null;
+    readonly auditEventId?: string;
   }): PaperManagedPosition {
     const position = this.requirePosition(input.instrumentId);
     requirePositiveFinite(input.price, 'price');
     requireTimestamp(input.timestamp, 'timestamp');
+    const nextTrailing =
+      input.trailingStopPrice === undefined
+        ? position.trailingStopPrice
+        : input.trailingStopPrice;
+    if (nextTrailing !== null) requirePositiveFinite(nextTrailing, 'trailingStopPrice');
     const updated: PaperManagedPosition = {
       ...position,
       currentPrice: input.price,
-      trailingStopPrice:
-        input.trailingStopPrice === undefined
-          ? position.trailingStopPrice
-          : input.trailingStopPrice,
+      trailingStopPrice: nextTrailing,
       unrealizedPnl: unrealized(
         position.direction,
         position.entryPrice,
@@ -184,6 +420,18 @@ export class PaperAccountLedger {
       ),
     };
     this.positions.set(input.instrumentId, updated);
+    if (
+      input.auditEventId !== undefined &&
+      nextTrailing !== position.trailingStopPrice
+    ) {
+      this.recordAuditEvent({
+        eventId: input.auditEventId,
+        type: 'TRAILING_UPDATE',
+        timestamp: input.timestamp,
+        instrumentId: input.instrumentId,
+        details: { trailingStopPrice: nextTrailing },
+      });
+    }
     this.recordEquity(input.timestamp);
     return updated;
   }
@@ -194,9 +442,7 @@ export class PaperAccountLedger {
     readonly timestamp: number;
   }): PaperManagedPosition {
     const position = this.requirePosition(input.instrumentId);
-    if (!Number.isFinite(input.fundingPnl)) {
-      throw new Error('fundingPnl must be finite');
-    }
+    requireFinite(input.fundingPnl, 'fundingPnl');
     requireTimestamp(input.timestamp, 'timestamp');
     const updated = {
       ...position,
@@ -208,23 +454,72 @@ export class PaperAccountLedger {
     return updated;
   }
 
+  public applyFundingEvent(input: {
+    readonly fundingId: string;
+    readonly instrumentId: string;
+    readonly fundingPnl: number;
+    readonly fundingRatePercent: number;
+    readonly positionNotional: number;
+    readonly timestamp: number;
+  }): { readonly applied: boolean; readonly position: PaperManagedPosition | null } {
+    requireNonEmpty(input.fundingId, 'fundingId');
+    if (this.fundingIds.has(input.fundingId)) {
+      return {
+        applied: false,
+        position: this.positions.get(input.instrumentId) ?? null,
+      };
+    }
+    const position = this.positions.get(input.instrumentId);
+    if (position === undefined) return { applied: false, position: null };
+    requireFinite(input.fundingRatePercent, 'fundingRatePercent');
+    requirePositiveFinite(input.positionNotional, 'positionNotional');
+    const updated = this.applyFunding(input);
+    const record: PaperFundingRecord = {
+      fundingId: input.fundingId,
+      instrumentId: input.instrumentId,
+      timestamp: input.timestamp,
+      direction: position.direction,
+      positionNotional: input.positionNotional,
+      fundingRatePercent: input.fundingRatePercent,
+      fundingPnl: input.fundingPnl,
+    };
+    this.fundingEvents.push(record);
+    this.fundingIds.add(record.fundingId);
+    this.recordAuditEvent({
+      eventId: `funding:${record.fundingId}`,
+      type: 'FUNDING',
+      timestamp: record.timestamp,
+      instrumentId: record.instrumentId,
+      details: {
+        direction: record.direction,
+        positionNotional: record.positionNotional,
+        fundingRatePercent: record.fundingRatePercent,
+        fundingPnl: record.fundingPnl,
+      },
+    });
+    return { applied: true, position: updated };
+  }
+
   public closePosition(input: {
     readonly instrumentId: string;
     readonly exitPrice: number;
     readonly closedAt: number;
     readonly exitReason: string;
     readonly exitFee: number;
+    readonly exitFillId?: string | null;
+    readonly exitSlippageBps?: number | null;
   }): PaperJournalTrade {
     const position = this.requirePosition(input.instrumentId);
     requirePositiveFinite(input.exitPrice, 'exitPrice');
     requireTimestamp(input.closedAt, 'closedAt');
     requireNonNegativeFinite(input.exitFee, 'exitFee');
+    if (input.exitSlippageBps !== undefined && input.exitSlippageBps !== null) {
+      requireFinite(input.exitSlippageBps, 'exitSlippageBps');
+    }
     if (input.closedAt < position.openedAt) {
       throw new Error('closedAt must not precede openedAt');
     }
-    if (input.exitReason.trim().length === 0) {
-      throw new Error('exitReason must not be empty');
-    }
+    requireNonEmpty(input.exitReason, 'exitReason');
 
     const grossPnl = unrealized(
       position.direction,
@@ -235,7 +530,7 @@ export class PaperAccountLedger {
     const fees = position.entryFee + input.exitFee;
     const netPnl = grossPnl - fees + position.fundingPnl;
     const trade: PaperJournalTrade = {
-      tradeId: `${position.instrumentId}:${position.openedAt}:${input.closedAt}`,
+      tradeId: position.tradeId,
       instrumentId: position.instrumentId,
       direction: position.direction,
       openedAt: position.openedAt,
@@ -252,6 +547,12 @@ export class PaperAccountLedger {
       riskAmount: position.riskAmount,
       rMultiple: position.riskAmount > 0 ? netPnl / position.riskAmount : null,
       durationMs: input.closedAt - position.openedAt,
+      strategyId: position.strategyId,
+      timeframe: position.timeframe,
+      entryFillId: position.entryFillId,
+      exitFillId: input.exitFillId ?? null,
+      entrySlippageBps: position.entrySlippageBps,
+      exitSlippageBps: input.exitSlippageBps ?? null,
     };
 
     // Entry fee and funding were already applied to cash when they occurred.
@@ -260,6 +561,98 @@ export class PaperAccountLedger {
     this.trades.push(trade);
     this.recordEquity(input.closedAt);
     return trade;
+  }
+
+  public closePositionFromFill(input: {
+    readonly fillId: string;
+    readonly instrumentId: string;
+    readonly exitPrice: number;
+    readonly quantityBaseUnits: number;
+    readonly closedAt: number;
+    readonly exitReason: string;
+    readonly exitFee: number;
+    readonly slippageBps: number | null;
+  }): { readonly applied: boolean; readonly trade: PaperJournalTrade | null } {
+    requireNonEmpty(input.fillId, 'fillId');
+    if (this.fillIds.has(input.fillId)) {
+      return {
+        applied: false,
+        trade: this.trades.find((trade) => trade.exitFillId === input.fillId) ?? null,
+      };
+    }
+    const position = this.requirePosition(input.instrumentId);
+    if (input.quantityBaseUnits + Number.EPSILON < position.quantityBaseUnits) {
+      throw new Error('closing fill does not cover the full paper position');
+    }
+    if (input.slippageBps !== null) requireFinite(input.slippageBps, 'slippageBps');
+    const trade = this.closePosition({
+      instrumentId: input.instrumentId,
+      exitPrice: input.exitPrice,
+      closedAt: input.closedAt,
+      exitReason: input.exitReason,
+      exitFee: input.exitFee,
+      exitFillId: input.fillId,
+      exitSlippageBps: input.slippageBps,
+    });
+    const fill: PaperFillRecord = {
+      fillId: input.fillId,
+      instrumentId: input.instrumentId,
+      side: position.direction === 'LONG' ? 'SELL' : 'BUY',
+      timestamp: input.closedAt,
+      quantityBaseUnits: position.quantityBaseUnits,
+      averagePrice: input.exitPrice,
+      fee: input.exitFee,
+      slippageBps: input.slippageBps,
+      reduceOnly: true,
+      strategyId: position.strategyId,
+      timeframe: position.timeframe,
+    };
+    this.fills.push(fill);
+    this.fillIds.add(fill.fillId);
+    this.recordAuditEvent({
+      eventId: `fill:${fill.fillId}`,
+      type: 'FILL',
+      timestamp: fill.timestamp,
+      instrumentId: fill.instrumentId,
+      details: {
+        side: fill.side,
+        quantityBaseUnits: fill.quantityBaseUnits,
+        averagePrice: fill.averagePrice,
+        reduceOnly: true,
+      },
+    });
+    if (fill.fee > 0) {
+      this.recordAuditEvent({
+        eventId: `fee:${fill.fillId}`,
+        type: 'FEE',
+        timestamp: fill.timestamp,
+        instrumentId: fill.instrumentId,
+        details: { amount: fill.fee, stage: 'EXIT' },
+      });
+    }
+    this.recordAuditEvent({
+      eventId: `position-close:${trade.tradeId}:${input.closedAt}`,
+      type: 'POSITION_CLOSE',
+      timestamp: input.closedAt,
+      instrumentId: input.instrumentId,
+      details: {
+        tradeId: trade.tradeId,
+        exitPrice: trade.exitPrice,
+        exitReason: trade.exitReason,
+        netPnl: trade.netPnl,
+      },
+    });
+    return { applied: true, trade };
+  }
+
+  public recordAuditEvent(event: PaperLedgerEvent): boolean {
+    requireNonEmpty(event.eventId, 'eventId');
+    requireNonEmpty(event.instrumentId, 'instrumentId');
+    requireTimestamp(event.timestamp, 'timestamp');
+    if (this.ledgerEventIds.has(event.eventId)) return false;
+    this.ledgerEvents.push({ ...event, details: { ...event.details } });
+    this.ledgerEventIds.add(event.eventId);
+    return true;
   }
 
   public snapshot(timestamp = Date.now()): PaperAccountSnapshot {
@@ -291,9 +684,181 @@ export class PaperAccountLedger {
       peakEquity: this.peakEquity,
       openPositions: positions,
       trades: this.trades.slice(),
+      fills: this.fills.slice(),
+      fundingEvents: this.fundingEvents.slice(),
+      ledgerEvents: this.ledgerEvents.slice(),
       equityCurve: this.equityCurve.slice(),
       analytics,
       liveExecutionAllowed: false,
+    };
+  }
+
+  public exportState(): PaperAccountPersistedState {
+    return {
+      schemaVersion: 1,
+      startingEquity: this.startingEquity,
+      cashBalance: this.cashBalance,
+      peakEquity: this.peakEquity,
+      openPositions: [...this.positions.values()].map((position) => ({ ...position })),
+      trades: this.trades.map((trade) => ({ ...trade })),
+      fills: this.fills.map((fill) => ({ ...fill })),
+      fundingEvents: this.fundingEvents.map((event) => ({ ...event })),
+      ledgerEvents: this.ledgerEvents.map((event) => ({
+        ...event,
+        details: { ...event.details },
+      })),
+      equityCurve: this.equityCurve.map((point) => ({ ...point })),
+    };
+  }
+
+  public restoreState(state: PaperAccountPersistedState): PaperAccountRestoreResult {
+    if (state.schemaVersion !== 1) throw new Error('unsupported paper account schema');
+    requirePositiveFinite(state.startingEquity, 'persisted.startingEquity');
+    requireFinite(state.cashBalance, 'persisted.cashBalance');
+    requirePositiveFinite(state.peakEquity, 'persisted.peakEquity');
+
+    const warnings: string[] = [];
+    const uniqueTrades = uniqueBy(state.trades, (trade) => trade.tradeId);
+    const uniqueFills = uniqueBy(state.fills, (fill) => fill.fillId);
+    const uniqueFunding = uniqueBy(
+      state.fundingEvents,
+      (event) => event.fundingId,
+    );
+    const uniqueEvents = uniqueBy(
+      state.ledgerEvents,
+      (event) => event.eventId,
+    );
+    const duplicateEvents =
+      uniqueTrades.duplicates +
+      uniqueFills.duplicates +
+      uniqueFunding.duplicates +
+      uniqueEvents.duplicates;
+    if (duplicateEvents > 0) {
+      warnings.push(`Removed ${duplicateEvents} duplicate persisted event records`);
+    }
+
+    const positionIds = new Set<string>();
+    const restoredPositions: PaperManagedPosition[] = [];
+    for (const position of state.openPositions) {
+      requireNonEmpty(position.instrumentId, 'persisted.position.instrumentId');
+      if (positionIds.has(position.instrumentId)) {
+        throw new Error(`duplicate persisted position for ${position.instrumentId}`);
+      }
+      positionIds.add(position.instrumentId);
+      requirePositiveFinite(position.entryPrice, 'persisted.position.entryPrice');
+      requirePositiveFinite(
+        position.quantityBaseUnits,
+        'persisted.position.quantityBaseUnits',
+      );
+      requirePositiveFinite(position.currentPrice, 'persisted.position.currentPrice');
+      requireTimestamp(position.openedAt, 'persisted.position.openedAt');
+      const calculatedUnrealized = unrealized(
+        position.direction,
+        position.entryPrice,
+        position.currentPrice,
+        position.quantityBaseUnits,
+      );
+      if (!approximatelyEqual(calculatedUnrealized, position.unrealizedPnl)) {
+        warnings.push(
+          `Recalculated unrealized PnL for ${position.instrumentId} during recovery`,
+        );
+      }
+      restoredPositions.push({
+        ...position,
+        unrealizedPnl: calculatedUnrealized,
+      });
+    }
+
+    const restoredTrades = uniqueTrades.values.map((trade) => {
+      const calculatedNet = trade.grossPnl - trade.fees + trade.fundingPnl;
+      if (!approximatelyEqual(calculatedNet, trade.netPnl)) {
+        warnings.push(`Recalculated net PnL for trade ${trade.tradeId}`);
+      }
+      return {
+        ...trade,
+        netPnl: calculatedNet,
+        rMultiple:
+          trade.riskAmount > 0 ? calculatedNet / trade.riskAmount : null,
+      };
+    });
+
+    const curveByTimestamp = new Map<number, EquityPoint>();
+    for (const point of state.equityCurve) {
+      requireTimestamp(point.timestamp, 'persisted.equityCurve.timestamp');
+      requireFinite(point.equity, 'persisted.equityCurve.equity');
+      if (curveByTimestamp.has(point.timestamp)) {
+        warnings.push(`Collapsed duplicate equity point at ${point.timestamp}`);
+      }
+      curveByTimestamp.set(point.timestamp, { ...point });
+    }
+    const restoredCurve = [...curveByTimestamp.values()].sort(
+      (left, right) => left.timestamp - right.timestamp,
+    );
+
+    const derivedCash =
+      state.startingEquity +
+      restoredTrades.reduce((sum, trade) => sum + trade.netPnl, 0) +
+      restoredPositions.reduce(
+        (sum, position) => sum - position.entryFee + position.fundingPnl,
+        0,
+      );
+    if (!approximatelyEqual(derivedCash, state.cashBalance)) {
+      warnings.push(
+        `Persisted cash ${state.cashBalance} disagreed with ledger-derived cash ${derivedCash}; ledger value used`,
+      );
+    }
+
+    this.startingEquity = state.startingEquity;
+    this.cashBalance = derivedCash;
+    this.positions.clear();
+    for (const position of restoredPositions) {
+      this.positions.set(position.instrumentId, position);
+    }
+    this.trades.splice(0, this.trades.length, ...restoredTrades);
+    this.fills.splice(0, this.fills.length, ...uniqueFills.values.map((fill) => ({ ...fill })));
+    this.fundingEvents.splice(
+      0,
+      this.fundingEvents.length,
+      ...uniqueFunding.values.map((event) => ({ ...event })),
+    );
+    this.ledgerEvents.splice(
+      0,
+      this.ledgerEvents.length,
+      ...uniqueEvents.values.map((event) => ({
+        ...event,
+        details: { ...event.details },
+      })),
+    );
+    this.fillIds.clear();
+    for (const fill of this.fills) this.fillIds.add(fill.fillId);
+    this.fundingIds.clear();
+    for (const event of this.fundingEvents) this.fundingIds.add(event.fundingId);
+    this.ledgerEventIds.clear();
+    for (const event of this.ledgerEvents) this.ledgerEventIds.add(event.eventId);
+    this.equityCurve.splice(0, this.equityCurve.length, ...restoredCurve);
+
+    const currentUnrealized = restoredPositions.reduce(
+      (sum, position) => sum + position.unrealizedPnl,
+      0,
+    );
+    const currentEquity = this.cashBalance + currentUnrealized;
+    this.peakEquity = Math.max(
+      state.startingEquity,
+      currentEquity,
+      ...restoredCurve.map((point) => point.equity),
+    );
+    if (!approximatelyEqual(this.peakEquity, state.peakEquity)) {
+      warnings.push('Recalculated peak equity from persisted equity evidence');
+    }
+    if (this.equityCurve.length === 0) this.recordEquity(0);
+
+    return {
+      positionsRestored: restoredPositions.length,
+      tradesRestored: restoredTrades.length,
+      fillsRestored: this.fills.length,
+      fundingEventsRestored: this.fundingEvents.length,
+      duplicateEvents,
+      warnings,
     };
   }
 
@@ -313,6 +878,14 @@ export class PaperAccountLedger {
 
   public getOpenPosition(instrumentId: string): PaperManagedPosition | undefined {
     return this.positions.get(instrumentId);
+  }
+
+  public hasProcessedFill(fillId: string): boolean {
+    return this.fillIds.has(fillId);
+  }
+
+  public hasProcessedFunding(fundingId: string): boolean {
+    return this.fundingIds.has(fundingId);
   }
 
   private requirePosition(instrumentId: string): PaperManagedPosition {
