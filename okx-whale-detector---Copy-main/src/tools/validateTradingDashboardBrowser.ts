@@ -252,6 +252,28 @@ const waitForExpression = async (
     description,
   );
 
+const waitForDomQuiet = async (
+  client: CdpClient,
+  description: string,
+  timeoutMs = 4_000,
+  quietWindowMs = 600,
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  let previous = await evaluate<number>(client, `window.__timeframeMutationCount ?? 0`);
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await sleep(100);
+    const current = await evaluate<number>(client, `window.__timeframeMutationCount ?? 0`);
+    if (current === previous) {
+      if (Date.now() - quietSince >= quietWindowMs) return;
+    } else {
+      previous = current;
+      quietSince = Date.now();
+    }
+  }
+  throw new Error(`Dashboard DOM did not settle: ${description}`);
+};
+
 const selectTimeframe = async (
   client: CdpClient,
   timeframe: string,
@@ -362,21 +384,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
         `document.querySelectorAll('#timeframe-control').length`,
       );
       if (count !== 1) throw new Error(`Expected one timeframe control, found ${count}`);
-
-      const mutationsBefore = await evaluate<number>(
-        page,
-        `window.__timeframeMutationCount ?? 0`,
-      );
-      await sleep(300);
-      const mutationsAfter = await evaluate<number>(
-        page,
-        `window.__timeframeMutationCount ?? 0`,
-      );
-      if (mutationsAfter !== mutationsBefore) {
-        throw new Error(
-          `Dashboard DOM did not settle after ${timeframe} switch (${mutationsBefore} -> ${mutationsAfter})`,
-        );
-      }
+      await waitForDomQuiet(page, `${timeframe} switch`);
     }
 
     for (const timeframe of ['3m', '30m', '2H', '1m']) {
@@ -390,6 +398,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
         },
         `browser option ${timeframe}`,
       );
+      await waitForDomQuiet(page, `${timeframe} option`);
     }
 
     await evaluate(
@@ -426,6 +435,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     if (application.store.getSettings().timeframe !== '1m') {
       throw new Error('Backend failed to roll rejected browser setting back to 1m');
     }
+    await waitForDomQuiet(page, 'error state');
 
     if (browserErrors.length > 0) {
       throw new Error(`Browser console/runtime errors: ${browserErrors.join(' | ')}`);
