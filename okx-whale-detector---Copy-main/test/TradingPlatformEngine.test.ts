@@ -143,4 +143,48 @@ describe('TradingPlatformEngine', () => {
       state: 'READY',
     });
   });
+
+  it('can discover a historical EMA crossover during rebuild without attempting a paper entry', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+    store.updateSettings({
+      timeframe: '15m',
+      fastEmaLength: 3,
+      slowEmaLength: 5,
+      rsiPeriod: 3,
+      atrPeriod: 3,
+      minimumAtrPercent: 0.1,
+      maximumAtrPercent: 20,
+      trailingStopEnabled: false,
+    });
+    engine.beginTimeframeRebuild('15m');
+
+    const closes = [100, 98, 96, 94, 94.5, 96.5, 98.5] as const;
+    closes.forEach((close, index) => {
+      const open = closes[index - 1] ?? close;
+      engine.onCandle({
+        instId: 'BTC-USDT-SWAP',
+        interval: '15m',
+        timestamp: 900_000 * (index + 1),
+        open,
+        high: Math.max(open, close) + 0.5,
+        low: Math.min(open, close) - 0.5,
+        close,
+        volume: 10,
+        volumeCurrency: 5,
+        volumeCurrencyQuote: close * 5,
+        confirm: true,
+      });
+    });
+
+    const snapshot = store.snapshot(2_000);
+    expect(snapshot.strategyStatus['ema-trend-crossover-v1']?.signal).toBe('BUY');
+    expect(snapshot.positions).toHaveLength(0);
+    expect(snapshot.trades).toHaveLength(0);
+    expect(
+      snapshot.logs.some((entry) =>
+        entry.message.includes('Paper entry missed because no usable order book'),
+      ),
+    ).toBe(false);
+  });
 });
