@@ -6,15 +6,20 @@ const development = argumentsSet.has('--dev');
 const skipDatabase = argumentsSet.has('--skip-database');
 const noBrowser = argumentsSet.has('--no-browser');
 
-const executable = (name: string): string =>
-  process.platform === 'win32' && (name === 'npm' || name === 'npx')
-    ? `${name}.cmd`
-    : name;
+const isWindowsShellCommand = (name: string): boolean =>
+  process.platform === 'win32' && (name === 'npm' || name === 'npx');
 
+/**
+ * npm and npx are .cmd shims on Windows. Recent Node versions can reject a
+ * direct spawnSync/spawn of those shims with EINVAL. Let the Windows command
+ * shell resolve them instead, while keeping native executables such as docker
+ * on the normal direct-spawn path.
+ */
 const run = (command: string, args: readonly string[]): void => {
-  const result = spawnSync(executable(command), args, {
+  const result = spawnSync(command, args, {
     stdio: 'inherit',
     env: process.env,
+    shell: isWindowsShellCommand(command),
   });
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {
@@ -63,19 +68,22 @@ export const startPlatformOrchestrator = (): void => {
 
   const port = process.env.DASHBOARD_PORT?.trim() || '4173';
   const url = `http://127.0.0.1:${port}`;
-  const child = spawn(
-    development ? executable('npx') : process.execPath,
-    development
-      ? ['tsx', 'watch', 'src/tools/startTradingPlatform.ts']
-      : ['dist/tools/startTradingPlatform.js'],
-    {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        TRADING_MODE: mode,
-      },
-    },
-  );
+  const child = development
+    ? spawn('npx', ['tsx', 'watch', 'src/tools/startTradingPlatform.ts'], {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          TRADING_MODE: mode,
+        },
+        shell: isWindowsShellCommand('npx'),
+      })
+    : spawn(process.execPath, ['dist/tools/startTradingPlatform.js'], {
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          TRADING_MODE: mode,
+        },
+      });
 
   child.on('error', (error) => {
     console.error('Unable to start trading platform process:', error);
