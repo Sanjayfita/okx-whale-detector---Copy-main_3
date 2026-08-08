@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import WebSocket from 'ws';
 import { PlatformSettingsRepository } from '../platform/PlatformSettingsRepository';
 import { TradingPlatformApplication } from '../platform/TradingPlatformApplication';
@@ -20,7 +20,6 @@ interface RuntimeEvaluation {
 }
 
 interface ChromeTarget {
-  readonly id: string;
   readonly webSocketDebuggerUrl: string;
 }
 
@@ -110,7 +109,7 @@ const waitFor = async (
 
 const startChrome = async (
   userDataDirectory: string,
-): Promise<{ readonly process: ChildProcessWithoutNullStreams; readonly port: number }> => {
+): Promise<{ readonly process: ChildProcess; readonly port: number }> => {
   const port = 9_223;
   const executable = process.env.CHROME_BIN?.trim() || 'google-chrome';
   const child = spawn(
@@ -127,10 +126,10 @@ const startChrome = async (
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   let startupError = '';
-  child.stderr.on('data', (chunk) => {
+  child.stderr?.on('data', (chunk) => {
     startupError += chunk.toString();
   });
-  child.stdout.on('data', () => undefined);
+  child.stdout?.on('data', () => undefined);
 
   await waitFor(
     async () => {
@@ -219,7 +218,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     environment: {},
   });
 
-  let chrome: ChildProcessWithoutNullStreams | null = null;
+  let chrome: ChildProcess | null = null;
   let page: CdpClient | null = null;
   const browserErrors: string[] = [];
   try {
@@ -235,7 +234,12 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
         typeof params === 'object' && params !== null && 'entry' in params
           ? (params as { entry?: { level?: string; text?: string } }).entry
           : undefined;
-      if (entry?.level === 'error') browserErrors.push(entry.text ?? 'browser log error');
+      if (
+        entry?.level === 'error' &&
+        !entry.text?.toLowerCase().includes('favicon.ico')
+      ) {
+        browserErrors.push(entry.text ?? 'browser log error');
+      }
     });
 
     await waitForExpression(
@@ -253,12 +257,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     }
     const initial = await evaluate<string>(
       page,
-      `(document.querySelector('#timeframe-select') as HTMLSelectElement | null)?.value ?? ''`,
-    ).catch(async () =>
-      evaluate<string>(
-        page as CdpClient,
-        `document.querySelector('#timeframe-select')?.value ?? ''`,
-      ),
+      `document.querySelector('#timeframe-select')?.value ?? ''`,
     );
     if (initial !== '1m') throw new Error(`Expected browser to start at 1m, got ${initial}`);
 
@@ -274,7 +273,6 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
         `document.querySelector('.timeframe-status')?.textContent?.includes('Loading ${timeframe}') === true`,
         `${timeframe} loading indicator`,
       );
-      // The UI must remain responsive while the settings request is intentionally delayed.
       const responsive = await evaluate<boolean>(
         page,
         `document.querySelector('#kill-switch') instanceof HTMLButtonElement`,
@@ -317,8 +315,6 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
       }
     }
 
-    // Validate all advertised choices in the actual browser, including the three
-    // values not present in the requested primary sequence.
     for (const timeframe of ['3m', '30m', '2H', '1m']) {
       await selectTimeframe(page, timeframe);
       await waitFor(
@@ -349,8 +345,6 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
       throw new Error(`Unexpected settings timeframe options: ${JSON.stringify(settingsOptions)}`);
     }
 
-    // Force one settings failure to confirm a user-visible error is rendered and
-    // the browser does not silently claim the rejected timeframe is active.
     reject4H = true;
     await selectTimeframe(page, '4H');
     await waitForExpression(
@@ -365,9 +359,8 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     if (!errorLabel.includes('Error')) {
       throw new Error(`Expected visible timeframe error, got ${errorLabel}`);
     }
-    const backendAfterFailure = application.store.getSettings().timeframe;
-    if (backendAfterFailure !== '1m') {
-      throw new Error(`Backend failed to roll rejected browser setting back to 1m`);
+    if (application.store.getSettings().timeframe !== '1m') {
+      throw new Error('Backend failed to roll rejected browser setting back to 1m');
     }
 
     if (browserErrors.length > 0) {
