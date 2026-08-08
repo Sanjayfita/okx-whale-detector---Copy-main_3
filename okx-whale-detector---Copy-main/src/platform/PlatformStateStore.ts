@@ -3,6 +3,7 @@ import {
   type TradingStrategyConfig,
   validateTradingStrategyConfig,
 } from '../config/tradingStrategyConfig';
+import type { TimeframeLoadState } from './PlatformContracts';
 import { PaperAccountLedger } from '../paper/PaperAccountLedger';
 import { TradingRiskManager } from '../risk/TradingRiskManager';
 import {
@@ -34,6 +35,7 @@ type SnapshotSubscriber = (snapshot: TradingPlatformSnapshot) => void;
 const defaultSettings = (mode: PlatformMode): DashboardSettings => ({
   mode,
   activeStrategyId: 'ema-trend-crossover-v1',
+  timeframe: '1m',
   fastEmaLength: tradingStrategyConfig.fastEmaLength,
   slowEmaLength: tradingStrategyConfig.slowEmaLength,
   rsiPeriod: tradingStrategyConfig.rsiPeriod,
@@ -78,6 +80,8 @@ export class PlatformStateStore {
   private readonly maximumCandlesPerInstrument: number;
   private readonly maximumLogs: number;
   private readonly now: () => number;
+  private timeframeState: TimeframeLoadState = 'READY';
+  private timeframeMessage = 'Using 1m confirmed OKX candles';
 
   public constructor(options: PlatformStateStoreOptions = {}) {
     this.account = new PaperAccountLedger(options.startingEquity ?? 10_000);
@@ -117,10 +121,23 @@ export class PlatformStateStore {
     this.log('INFO', 'Platform settings updated', {
       activeStrategyId: next.activeStrategyId,
       mode: next.mode,
+      timeframe: next.timeframe,
       riskPerTradePercent: next.riskPerTradePercent,
     });
     this.publish();
     return this.getSettings();
+  }
+
+  public setTimeframeState(state: TimeframeLoadState, message: string): void {
+    this.timeframeState = state;
+    this.timeframeMessage = message;
+    this.publish();
+  }
+
+  public clearStrategyMarketState(): void {
+    this.candles.clear();
+    this.status.clear();
+    this.publish();
   }
 
   public setKillSwitch(active: boolean): void {
@@ -133,13 +150,13 @@ export class PlatformStateStore {
   }
 
   public appendCandle(candle: DashboardCandle): void {
+    if (candle.timeframe !== this.settings.timeframe) return;
     const history = this.candles.get(candle.instrumentId) ?? [];
     const existingIndex = history.findIndex(
       (candidate) => candidate.timestamp === candle.timestamp,
     );
-    if (existingIndex >= 0) {
-      history[existingIndex] = candle;
-    } else {
+    if (existingIndex >= 0) history[existingIndex] = candle;
+    else {
       history.push(candle);
       history.sort((left, right) => left.timestamp - right.timestamp);
     }
@@ -190,9 +207,7 @@ export class PlatformStateStore {
     const riskStatus = this.riskManager.getStatus();
     const positions = account.openPositions.map((position) => {
       const stopDistance = Math.abs(position.entryPrice - position.stopLossPrice);
-      const targetDistance = Math.abs(
-        position.takeProfitPrice - position.entryPrice,
-      );
+      const targetDistance = Math.abs(position.takeProfitPrice - position.entryPrice);
       return {
         instrumentId: position.instrumentId,
         direction: position.direction,
@@ -258,6 +273,7 @@ export class PlatformStateStore {
         dailyReturnPercent: (pnlToday / startOfDayEquity) * 100,
         currentStrategy: this.strategies.getActive().label,
         mode: this.settings.mode,
+        timeframe: this.settings.timeframe,
         liveExecutionAllowed: false,
       },
       positions,
@@ -274,6 +290,11 @@ export class PlatformStateStore {
       analytics: account.analytics,
       settings: this.getSettings(),
       strategies: this.strategies.list(),
+      timeframe: {
+        selected: this.settings.timeframe,
+        state: this.timeframeState,
+        message: this.timeframeMessage,
+      },
       risk: {
         killSwitchActive: riskStatus.killSwitchActive,
         circuitBreakerActive: riskStatus.circuitBreakerActive,
