@@ -13,7 +13,8 @@ import {
 
 export interface OKXCandle {
   instId: string;
-  interval: TradingTimeframe;
+  /** Legacy fixtures without an interval are treated as 1m by consumers. */
+  interval?: TradingTimeframe;
   timestamp: number;
   open: number;
   high: number;
@@ -32,6 +33,7 @@ export class OKXCandleWebSocketClient {
   private awaitingHeartbeatResponse = false;
   private reconnectAttempt = 0;
   private intentionallyClosed = false;
+  private hasConnected = false;
 
   private readonly url = 'wss://ws.okx.com:8443/ws/v5/business';
   private readonly candleSubscriptions = new Map<string, TradingTimeframe>();
@@ -40,6 +42,7 @@ export class OKXCandleWebSocketClient {
     candle: OKXCandle,
     performanceContext?: MessagePerformanceContext,
   ) => void;
+  private onReconnectUpdate?: () => void;
 
   constructor(private readonly profiler?: PipelineProfiler) {
     this.connect();
@@ -52,15 +55,17 @@ export class OKXCandleWebSocketClient {
       maxPayload: 2 * 1024 * 1024,
       perMessageDeflate: false,
     });
-
     this.ws = ws;
 
     ws.on('open', () => {
       console.log('Connected to OKX Candle WebSocket');
+      const reconnected = this.hasConnected;
+      this.hasConnected = true;
       this.reconnectAttempt = 0;
       this.awaitingHeartbeatResponse = false;
       this.startHeartbeat();
       this.resubscribeAll();
+      if (reconnected) this.onReconnectUpdate?.();
     });
 
     ws.on('message', (data) => {
@@ -88,7 +93,6 @@ export class OKXCandleWebSocketClient {
       performance.now() - stringStartedAt,
       timings,
     );
-
     if (rawMessage === 'pong') return;
 
     let message: unknown;
@@ -123,18 +127,14 @@ export class OKXCandleWebSocketClient {
     const channel = message.arg.channel;
     const instId = message.arg.instId;
     if (typeof channel !== 'string' || typeof instId !== 'string') return;
-
     const interval = tradingTimeframeFromWebSocketChannel(channel);
     if (interval === null) return;
-
-    // A late message from an unsubscribed timeframe must never enter strategy state.
     if (this.candleSubscriptions.get(instId) !== interval) return;
 
     if (!Array.isArray(message.data) || message.data.length === 0) {
       console.error('Rejected candle message without valid data');
       return;
     }
-
     const values = message.data[0];
     if (!Array.isArray(values) || values.length < 9) {
       console.error('Rejected malformed OKX candle payload');
@@ -289,12 +289,14 @@ export class OKXCandleWebSocketClient {
     this.onCandleUpdate = callback;
   }
 
+  public onReconnect(callback: () => void): void {
+    this.onReconnectUpdate = callback;
+  }
+
   public subscribeToCandle(instId: string, interval: TradingTimeframe = '1m'): void {
     const previous = this.candleSubscriptions.get(instId);
     if (previous === interval) return;
-    if (previous !== undefined) {
-      this.sendSubscription('unsubscribe', instId, previous);
-    }
+    if (previous !== undefined) this.sendSubscription('unsubscribe', instId, previous);
     this.candleSubscriptions.set(instId, interval);
     this.sendSubscription('subscribe', instId, interval);
   }
