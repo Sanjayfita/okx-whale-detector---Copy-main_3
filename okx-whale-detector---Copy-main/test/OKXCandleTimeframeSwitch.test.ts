@@ -62,6 +62,14 @@ const candleMessage = (channel: string): string =>
     data: [['1800000000000', '100', '102', '99', '101', '10', '5', '1010', '1']],
   });
 
+const subscriptionMessages = (socket: InstanceType<typeof mockState.MockWebSocket>) =>
+  socket.sentMessages
+    .filter((message) => message !== 'ping')
+    .map((message) => JSON.parse(message) as {
+      op: string;
+      args: Array<{ channel: string; instId: string }>;
+    });
+
 describe('OKXCandleWebSocketClient timeframe switching', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -88,14 +96,12 @@ describe('OKXCandleWebSocketClient timeframe switching', () => {
     socket.triggerOpen();
     client.setCandleInterval('BTC-USDT-SWAP', '15m');
 
-    const messages = socket.sentMessages
-      .filter((message) => message !== 'ping')
-      .map((message) => JSON.parse(message) as {
-        op: string;
-        args: Array<{ channel: string; instId: string }>;
-      });
-
-    expect(messages.map((message) => [message.op, message.args[0]?.channel])).toEqual([
+    expect(
+      subscriptionMessages(socket).map((message) => [
+        message.op,
+        message.args[0]?.channel,
+      ]),
+    ).toEqual([
       ['subscribe', 'candle1m'],
       ['unsubscribe', 'candle1m'],
       ['subscribe', 'candle15m'],
@@ -107,6 +113,40 @@ describe('OKXCandleWebSocketClient timeframe switching', () => {
     socket.triggerMessage(candleMessage('candle15m'));
     expect(received).toHaveLength(1);
     expect(received[0]?.interval).toBe('15m');
+    client.close();
+  });
+
+  it('reconnects directly to the selected 15m channel without falling back to 1m', () => {
+    const client = new OKXCandleWebSocketClient();
+    const reconnect = vi.fn();
+    client.onReconnect(reconnect);
+    client.subscribeToCandle('BTC-USDT-SWAP', '1m');
+
+    const first = mockState.sockets[0];
+    if (!first) throw new Error('Expected first mock socket');
+    first.triggerOpen();
+    client.setCandleInterval('BTC-USDT-SWAP', '15m');
+    first.close();
+
+    vi.advanceTimersByTime(1_000);
+    const second = mockState.sockets[1];
+    if (!second) throw new Error('Expected reconnect mock socket');
+    expect(subscriptionMessages(second)).toHaveLength(0);
+    second.triggerOpen();
+
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(
+      subscriptionMessages(second).map((message) => [
+        message.op,
+        message.args[0]?.channel,
+      ]),
+    ).toEqual([['subscribe', 'candle15m']]);
+    expect(
+      subscriptionMessages(second).some(
+        (message) => message.args[0]?.channel === 'candle1m',
+      ),
+    ).toBe(false);
+
     client.close();
   });
 });
