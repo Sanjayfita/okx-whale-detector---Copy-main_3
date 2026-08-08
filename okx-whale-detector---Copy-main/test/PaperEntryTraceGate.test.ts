@@ -97,8 +97,9 @@ describe('paper entry traceability gate', () => {
     engine.onCandle(candle);
 
     expect(beforePaperPositionOpen).toHaveBeenCalledTimes(1);
-    expect(store.account.snapshot(2_000).openPositions).toHaveLength(0);
-    expect(store.account.getFillRecords()).toHaveLength(0);
+    const snapshot = store.account.snapshot(2_000);
+    expect(snapshot.openPositions).toHaveLength(0);
+    expect(snapshot.fills).toHaveLength(0);
   });
 
   it('opens normally only after the trace context gate succeeds', () => {
@@ -119,7 +120,8 @@ describe('paper entry traceability gate', () => {
         timeframe: '1m',
       }),
     );
-    expect(store.account.snapshot(2_000).openPositions).toHaveLength(1);
-    expect(store.account.getFillRecords()).toHaveLength(1);
+    const snapshot = store.account.snapshot(2_000);
+    expect(snapshot.openPositions).toHaveLength(1);
+    expect(snapshot.fills).toHaveLength(1);
   });
 });
