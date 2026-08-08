@@ -307,6 +307,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
   let chrome: ChildProcess | null = null;
   let page: CdpClient | null = null;
   const browserErrors: string[] = [];
+  let expectedSettingsFailureConsoleErrors = 0;
   try {
     await application.start();
     const startedChrome = await startChrome(join(directory, 'chrome'));
@@ -320,12 +321,16 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
         typeof params === 'object' && params !== null && 'entry' in params
           ? (params as { entry?: { level?: string; text?: string } }).entry
           : undefined;
+      if (entry?.level !== 'error') return;
+      const text = entry.text ?? 'browser log error';
       if (
-        entry?.level === 'error' &&
-        !entry.text?.toLowerCase().includes('favicon.ico')
+        expectedSettingsFailureConsoleErrors > 0 &&
+        text.includes('500 (Internal Server Error)')
       ) {
-        browserErrors.push(entry.text ?? 'browser log error');
+        expectedSettingsFailureConsoleErrors -= 1;
+        return;
       }
+      browserErrors.push(text);
     });
 
     await waitForExpression(
@@ -419,6 +424,7 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     }
 
     reject4H = true;
+    expectedSettingsFailureConsoleErrors = 1;
     await selectTimeframe(page, '4H');
     await waitForExpression(
       page,
@@ -437,6 +443,9 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     }
     await waitForDomQuiet(page, 'error state');
 
+    if (expectedSettingsFailureConsoleErrors !== 0) {
+      throw new Error('Expected simulated settings failure was not observed by Chrome');
+    }
     if (browserErrors.length > 0) {
       throw new Error(`Browser console/runtime errors: ${browserErrors.join(' | ')}`);
     }
