@@ -112,7 +112,8 @@ const ensureTopControl = (): void => {
 
 const ensureSettingsControl = (): void => {
   const strategySelect = document.querySelector<HTMLSelectElement>('#activeStrategyId');
-  const formGrid = strategySelect?.closest('.form-grid');
+  if (!strategySelect) return;
+  const formGrid = strategySelect.closest('.form-grid');
   if (!formGrid || formGrid.querySelector('#settings-timeframe-field')) return;
   const field = document.createElement('div');
   field.className = 'field';
