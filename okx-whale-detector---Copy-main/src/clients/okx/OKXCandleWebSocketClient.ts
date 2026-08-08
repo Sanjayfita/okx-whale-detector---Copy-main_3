@@ -5,9 +5,15 @@ import type {
   MessagePerformanceContext,
   ObservedStageTiming,
 } from '../../core/PerformanceTrace';
+import {
+  tradingTimeframeFromWebSocketChannel,
+  tradingTimeframeSpec,
+  type TradingTimeframe,
+} from '../../config/tradingTimeframes';
 
 export interface OKXCandle {
   instId: string;
+  interval: TradingTimeframe;
   timestamp: number;
   open: number;
   high: number;
@@ -28,8 +34,7 @@ export class OKXCandleWebSocketClient {
   private intentionallyClosed = false;
 
   private readonly url = 'wss://ws.okx.com:8443/ws/v5/business';
-
-  private readonly candleSubscriptions = new Set<string>();
+  private readonly candleSubscriptions = new Map<string, TradingTimeframe>();
 
   private onCandleUpdate?: (
     candle: OKXCandle,
@@ -41,9 +46,7 @@ export class OKXCandleWebSocketClient {
   }
 
   private connect(): void {
-    if (this.intentionallyClosed) {
-      return;
-    }
+    if (this.intentionallyClosed) return;
 
     const ws = new WebSocket(this.url, {
       maxPayload: 2 * 1024 * 1024,
@@ -54,7 +57,6 @@ export class OKXCandleWebSocketClient {
 
     ws.on('open', () => {
       console.log('Connected to OKX Candle WebSocket');
-
       this.reconnectAttempt = 0;
       this.awaitingHeartbeatResponse = false;
       this.startHeartbeat();
@@ -72,12 +74,8 @@ export class OKXCandleWebSocketClient {
 
     ws.on('close', () => {
       console.log('❌ Disconnected from OKX Candle WebSocket');
-
       this.stopHeartbeat();
-
-      if (!this.intentionallyClosed) {
-        this.scheduleReconnect();
-      }
+      if (!this.intentionallyClosed) this.scheduleReconnect();
     });
   }
 
@@ -91,18 +89,14 @@ export class OKXCandleWebSocketClient {
       timings,
     );
 
-    if (rawMessage === 'pong') {
-      return;
-    }
+    if (rawMessage === 'pong') return;
 
     let message: unknown;
     const parseStartedAt = performance.now();
-
     try {
       message = JSON.parse(rawMessage);
     } catch (error) {
       console.error('Failed to parse Candle WebSocket message:', error);
-
       return;
     } finally {
       this.recordTiming(
@@ -113,61 +107,47 @@ export class OKXCandleWebSocketClient {
     }
 
     const validationStartedAt = performance.now();
-
     if (!isRecord(message)) {
       console.error('Rejected non-object OKX candle message');
-
       return;
     }
-
     if (typeof message.event === 'string') {
       console.log('OKX Candle event:', message);
-
       return;
     }
-
     if (!isRecord(message.arg)) {
       console.error('Rejected candle message without valid arg');
-
       return;
     }
 
     const channel = message.arg.channel;
-
     const instId = message.arg.instId;
+    if (typeof channel !== 'string' || typeof instId !== 'string') return;
 
-    if (channel !== 'candle1m' || typeof instId !== 'string') {
-      return;
-    }
+    const interval = tradingTimeframeFromWebSocketChannel(channel);
+    if (interval === null) return;
+
+    // A late message from an unsubscribed timeframe must never enter strategy state.
+    if (this.candleSubscriptions.get(instId) !== interval) return;
 
     if (!Array.isArray(message.data) || message.data.length === 0) {
       console.error('Rejected candle message without valid data');
-
       return;
     }
 
     const values = message.data[0];
-
     if (!Array.isArray(values) || values.length < 9) {
       console.error('Rejected malformed OKX candle payload');
-
       return;
     }
 
     const timestamp = Number(values[0]);
-
     const open = Number(values[1]);
-
     const high = Number(values[2]);
-
     const low = Number(values[3]);
-
     const close = Number(values[4]);
-
     const volume = Number(values[5]);
-
     const volumeCurrency = Number(values[6]);
-
     const volumeCurrencyQuote = Number(values[7]);
 
     if (
@@ -192,12 +172,12 @@ export class OKXCandleWebSocketClient {
       (values[8] !== '0' && values[8] !== '1')
     ) {
       console.error('Rejected invalid OKX candle values');
-
       return;
     }
 
     const candle: OKXCandle = {
       instId,
+      interval,
       timestamp,
       open,
       high,
@@ -223,7 +203,7 @@ export class OKXCandleWebSocketClient {
         stages: timings,
       });
     } catch (error) {
-      console.error(`Candle callback failed for ` + `${candle.instId}:`, error);
+      console.error(`Candle callback failed for ${candle.instId}:`, error);
     } finally {
       this.profiler?.record(
         'okx.candle.handler',
@@ -233,40 +213,27 @@ export class OKXCandleWebSocketClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer) {
-      return;
-    }
-
+    if (this.reconnectTimer) return;
     const delayMs = Math.min(30_000, 1_000 * 2 ** this.reconnectAttempt);
-
     this.reconnectAttempt += 1;
-
-    console.log(`Reconnecting Candle WebSocket in ` + `${delayMs / 1_000}s...`);
-
+    console.log(`Reconnecting Candle WebSocket in ${delayMs / 1_000}s...`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-
       this.connect();
     }, delayMs);
   }
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-
     this.heartbeatTimer = setInterval(() => {
       const ws = this.ws;
-
-      if (ws?.readyState !== WebSocket.OPEN) {
-        return;
-      }
-
+      if (ws?.readyState !== WebSocket.OPEN) return;
       if (this.awaitingHeartbeatResponse) {
         console.warn('OKX Candle WebSocket heartbeat timed out; reconnecting');
         this.awaitingHeartbeatResponse = false;
         ws.terminate();
         return;
       }
-
       try {
         ws.send('ping');
         this.awaitingHeartbeatResponse = true;
@@ -279,38 +246,38 @@ export class OKXCandleWebSocketClient {
 
   private stopHeartbeat(): void {
     this.awaitingHeartbeatResponse = false;
-
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
-
       this.heartbeatTimer = undefined;
     }
   }
 
   private resubscribeAll(): void {
-    for (const instId of this.candleSubscriptions) {
-      this.sendCandleSubscription(instId);
+    for (const [instId, interval] of this.candleSubscriptions) {
+      this.sendSubscription('subscribe', instId, interval);
     }
   }
 
-  private sendCandleSubscription(instId: string): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
+  private sendSubscription(
+    operation: 'subscribe' | 'unsubscribe',
+    instId: string,
+    interval: TradingTimeframe,
+  ): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.ws.send(
       JSON.stringify({
-        op: 'subscribe',
+        op: operation,
         args: [
           {
-            channel: 'candle1m',
+            channel: tradingTimeframeSpec(interval).websocketChannel,
             instId,
           },
         ],
       }),
     );
-
-    console.log(`📈 Subscribed to ${instId} 1m candles`);
+    if (operation === 'subscribe') {
+      console.log(`📈 Subscribed to ${instId} ${interval} candles`);
+    }
   }
 
   public onCandle(
@@ -322,29 +289,29 @@ export class OKXCandleWebSocketClient {
     this.onCandleUpdate = callback;
   }
 
-  public subscribeToCandle(instId: string): void {
-    this.candleSubscriptions.add(instId);
+  public subscribeToCandle(instId: string, interval: TradingTimeframe = '1m'): void {
+    const previous = this.candleSubscriptions.get(instId);
+    if (previous === interval) return;
+    if (previous !== undefined) {
+      this.sendSubscription('unsubscribe', instId, previous);
+    }
+    this.candleSubscriptions.set(instId, interval);
+    this.sendSubscription('subscribe', instId, interval);
+  }
 
-    this.sendCandleSubscription(instId);
+  public setCandleInterval(instId: string, interval: TradingTimeframe): void {
+    this.subscribeToCandle(instId, interval);
   }
 
   public close(): void {
-    if (this.intentionallyClosed) {
-      return;
-    }
-
+    if (this.intentionallyClosed) return;
     this.intentionallyClosed = true;
-
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
-
       this.reconnectTimer = undefined;
     }
-
     this.stopHeartbeat();
-
     console.log('Closing OKX Candle WebSocket intentionally...');
-
     this.ws?.close();
     this.ws = null;
   }
