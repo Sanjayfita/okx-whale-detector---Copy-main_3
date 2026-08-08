@@ -1,6 +1,10 @@
+import { OKXCandleWebSocketClient } from '../clients/okx/OKXCandleWebSocketClient';
+import { SYMBOL_PROFILES } from '../config/symbolProfiles';
+import type { TradingTimeframe } from '../config/tradingTimeframes';
 import { createAppRuntime } from '../index';
 import { TradingPlatformApplication } from '../platform/TradingPlatformApplication';
 import type { PlatformMode } from '../platform/PlatformContracts';
+import type { CandleTimeframeController } from '../platform/TradingPlatformObserver';
 
 const parseMode = (value: string | undefined): PlatformMode =>
   value?.trim().toUpperCase() === 'LIVE' ? 'LIVE' : 'PAPER';
@@ -36,21 +40,45 @@ export const startTradingPlatform = async (
     environment,
   });
 
-  // Starting the server first loads persisted settings, including the selected
-  // timeframe. createAppRuntime then invokes prepareCandleRuntime before live
-  // subscriptions begin, so the strategy is initialized from native OKX history.
   await platform.start();
-  console.log(`Trading dashboard: ${platform.getUrl()}`);
-  console.log(
-    `Mode: ${platform.store.getSettings().mode}; ` +
-      `timeframe: ${platform.store.getSettings().timeframe}; ` +
-      'live order execution remains disabled.',
-  );
+
+  const symbols = SYMBOL_PROFILES.map((profile) => profile.symbol);
+  const candleClient = new OKXCandleWebSocketClient();
+  let activeTimeframe: TradingTimeframe = platform.store.getSettings().timeframe;
+  const controller: CandleTimeframeController = {
+    setTimeframe: (timeframe) => {
+      activeTimeframe = timeframe;
+      for (const symbol of symbols) {
+        candleClient.setCandleInterval(symbol, timeframe);
+      }
+    },
+    getTimeframe: () => activeTimeframe,
+  };
+  candleClient.onCandle((candle) => platform.onCandle(candle));
+  candleClient.onReconnect(() => platform.resetSymbols(symbols));
 
   try {
-    const runtime = await createAppRuntime({ tradingPlatformObserver: platform });
+    await platform.prepareCandleRuntime({ symbols, controller });
+    console.log(`Trading dashboard: ${platform.getUrl()}`);
+    console.log(
+      `Mode: ${platform.store.getSettings().mode}; ` +
+        `timeframe: ${platform.store.getSettings().timeframe}; ` +
+        'live order execution remains disabled.',
+    );
+
+    // The established research runtime keeps its own 1m candle feed. Platform
+    // strategy candles come from the dedicated, configurable client above.
+    const runtime = await createAppRuntime({
+      tradingPlatformObserver: {
+        onOrderBook: (instrumentId, state) => platform.onOrderBook(instrumentId, state),
+        onCandle: () => undefined,
+        resetSymbols: (reset) => platform.resetSymbols(reset),
+        close: () => platform.close(),
+      },
+    });
     void runtime.polymarketRuntime.start();
   } catch (error: unknown) {
+    candleClient.close();
     await platform.close();
     throw error;
   }
