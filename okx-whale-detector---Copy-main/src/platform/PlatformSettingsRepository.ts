@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { isTradingTimeframe } from '../config/tradingTimeframes';
 import type { DashboardSettings, PlatformMode } from './PlatformContracts';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -34,11 +35,6 @@ const modeValue = (record: Record<string, unknown>): PlatformMode | undefined =>
   return mode === 'PAPER' || mode === 'LIVE' ? mode : undefined;
 };
 
-/**
- * Small atomic JSON repository for user-editable platform settings.
- * Database evidence remains immutable; mutable UI preferences are intentionally
- * kept separate so editing a dashboard setting cannot rewrite research records.
- */
 export class PlatformSettingsRepository {
   public constructor(
     private readonly filePath = 'data/platform/settings.json',
@@ -61,11 +57,13 @@ export class PlatformSettingsRepository {
       throw new Error('platform settings file must contain a JSON object');
     }
 
+    const timeframe = stringValue(parsed, 'timeframe');
     return {
       ...(modeValue(parsed) === undefined ? {} : { mode: modeValue(parsed) }),
       ...(stringValue(parsed, 'activeStrategyId') === undefined
         ? {}
         : { activeStrategyId: stringValue(parsed, 'activeStrategyId') }),
+      ...(isTradingTimeframe(timeframe) ? { timeframe } : {}),
       ...(numberValue(parsed, 'fastEmaLength') === undefined
         ? {}
         : { fastEmaLength: numberValue(parsed, 'fastEmaLength') }),
