@@ -107,6 +107,52 @@ const waitFor = async (
   }
 };
 
+const waitForChildExit = async (
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> => {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+  });
+};
+
+const stopChrome = async (child: ChildProcess | null): Promise<void> => {
+  if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, 1_500)) return;
+  child.kill('SIGKILL');
+  await waitForChildExit(child, 1_500);
+};
+
+const removeDirectoryWithRetry = async (directory: string): Promise<void> => {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(directory, { recursive: true, force: true });
+      return;
+    } catch (error: unknown) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String(error.code)
+          : '';
+      if (!['ENOTEMPTY', 'EBUSY', 'EPERM'].includes(code) || attempt === 9) {
+        throw error;
+      }
+      await sleep(100 * (attempt + 1));
+    }
+  }
+};
+
 const startChrome = async (
   userDataDirectory: string,
 ): Promise<{ readonly process: ChildProcess; readonly port: number }> => {
@@ -369,9 +415,9 @@ export const validateTradingDashboardBrowser = async (): Promise<void> => {
     console.log('Trading dashboard headless browser validation passed.');
   } finally {
     page?.close();
-    chrome?.kill('SIGKILL');
+    await stopChrome(chrome);
     await application.close().catch(() => undefined);
-    await rm(directory, { recursive: true, force: true });
+    await removeDirectoryWithRetry(directory);
   }
 };
 
