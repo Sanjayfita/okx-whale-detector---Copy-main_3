@@ -38,6 +38,8 @@ const baseInput = (directory: string) => ({
   stateFilePath: null,
   paperEngineError: null,
   openPositions: 1,
+  killSwitchActive: false,
+  circuitBreakerActive: false,
   dataDirectory: directory,
   deployment: {
     gitCommit: 'abc123',
@@ -70,6 +72,18 @@ describe('PlatformHealth', () => {
     expect(health.okxWebSocket.status).toBe('CONNECTED');
     expect(health.marketData.status).toBe('STALE');
     expect(health.strategy.status).toBe('PAUSED');
+  });
+
+  it('reports a risk lockout as a paused/degraded strategy', () => {
+    const directory = dataDirectory();
+    const health = buildPlatformHealthSnapshot({
+      ...baseInput(directory),
+      killSwitchActive: true,
+    });
+
+    expect(health.application).toBe('DEGRADED');
+    expect(health.strategy.status).toBe('PAUSED');
+    expect(health.risk.killSwitchActive).toBe(true);
   });
 
   it('fails closed when paper persistence reports an error', () => {
