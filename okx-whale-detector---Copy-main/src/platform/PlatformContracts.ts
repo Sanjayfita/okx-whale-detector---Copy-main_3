@@ -2,14 +2,17 @@ import type {
   EquityPoint,
   PerformanceAnalyticsReport,
 } from '../analytics/PerformanceAnalytics';
+import type { TradingTimeframe } from '../config/tradingTimeframes';
 import type { StrategyDescriptor } from '../strategies/StrategyRegistry';
 
 export type PlatformMode = 'PAPER' | 'LIVE';
 export type PlatformSignal = 'BUY' | 'SELL' | 'WAIT';
 export type PlatformLogLevel = 'INFO' | 'WARNING' | 'ERROR' | 'TRADE' | 'API';
+export type TimeframeLoadState = 'READY' | 'REBUILDING' | 'ERROR';
 
 export interface DashboardCandle {
   readonly instrumentId: string;
+  readonly timeframe: TradingTimeframe;
   readonly timestamp: number;
   readonly open: number;
   readonly high: number;
@@ -81,6 +84,7 @@ export interface DashboardLogEntry {
 export interface DashboardSettings {
   readonly mode: PlatformMode;
   readonly activeStrategyId: string;
+  readonly timeframe: TradingTimeframe;
   readonly fastEmaLength: number;
   readonly slowEmaLength: number;
   readonly rsiPeriod: number;
@@ -106,6 +110,7 @@ export interface DashboardOverview {
   readonly dailyReturnPercent: number;
   readonly currentStrategy: string;
   readonly mode: PlatformMode;
+  readonly timeframe: TradingTimeframe;
   readonly liveExecutionAllowed: false;
 }
 
@@ -121,6 +126,11 @@ export interface TradingPlatformSnapshot {
   readonly analytics: PerformanceAnalyticsReport;
   readonly settings: DashboardSettings;
   readonly strategies: readonly StrategyDescriptor[];
+  readonly timeframe: {
+    readonly selected: TradingTimeframe;
+    readonly state: TimeframeLoadState;
+    readonly message: string;
+  };
   readonly risk: {
     readonly killSwitchActive: boolean;
     readonly circuitBreakerActive: boolean;
