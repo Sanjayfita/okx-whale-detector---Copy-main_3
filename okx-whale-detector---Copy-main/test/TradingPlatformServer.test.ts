@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PlatformSettingsRepository } from '../src/platform/PlatformSettingsRepository';
 import { PlatformStateStore } from '../src/platform/PlatformStateStore';
 import { TradingPlatformEngine } from '../src/platform/TradingPlatformEngine';
@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 describe('TradingPlatformServer', () => {
-  it('serves health, snapshot, settings, kill switch and static dashboard', async () => {
+  it('serves health, snapshot, coordinated settings, kill switch and static dashboard', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'trading-platform-server-'));
     cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const webDirectory = join(directory, 'web');
@@ -25,12 +25,14 @@ describe('TradingPlatformServer', () => {
 
     const store = new PlatformStateStore({ now: () => 1_000 });
     const engine = new TradingPlatformEngine(store, { now: () => 1_000 });
+    const onSettingsChanged = vi.fn(async () => undefined);
     const server = new TradingPlatformServer(store, engine, {
       port: 0,
       staticDirectory: webDirectory,
       settingsRepository: new PlatformSettingsRepository(
         join(directory, 'settings.json'),
       ),
+      onSettingsChanged,
     });
     await server.start();
     cleanup.push(() => server.close());
@@ -41,6 +43,7 @@ describe('TradingPlatformServer', () => {
       expect.objectContaining({
         status: 'ok',
         strategy: 'ema-trend-crossover-v1',
+        timeframe: '1m',
         liveExecutionAllowed: false,
       }),
     );
@@ -48,12 +51,23 @@ describe('TradingPlatformServer', () => {
     const settings = await fetch(`${server.getUrl()}/api/settings`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ riskPerTradePercent: 0.5 }),
+      body: JSON.stringify({ riskPerTradePercent: 0.5, timeframe: '15m' }),
     });
     expect(settings.status).toBe(200);
     expect(await settings.json()).toEqual(
-      expect.objectContaining({ riskPerTradePercent: 0.5 }),
+      expect.objectContaining({ riskPerTradePercent: 0.5, timeframe: '15m' }),
     );
+    expect(onSettingsChanged).toHaveBeenCalledOnce();
+    expect(onSettingsChanged.mock.calls[0]?.[0].timeframe).toBe('1m');
+    expect(onSettingsChanged.mock.calls[0]?.[1].timeframe).toBe('15m');
+
+    const invalidTimeframe = await fetch(`${server.getUrl()}/api/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ timeframe: '1h' }),
+    });
+    expect(invalidTimeframe.status).toBe(500);
+    expect(store.getSettings().timeframe).toBe('15m');
 
     const kill = await fetch(`${server.getUrl()}/api/risk/kill-switch`, {
       method: 'POST',
