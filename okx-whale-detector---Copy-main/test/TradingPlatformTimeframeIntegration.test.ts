@@ -323,25 +323,29 @@ describe('trading platform timeframe end-to-end lifecycle', () => {
     }
   });
 
-  it('rolls a failed 4H rebuild back to a coherent 1m subscription, settings, and indicator state', async () => {
-    const { application } = await createFixture();
-    const controller = createController();
-    try {
-      await application.prepareCandleRuntime({ symbols: [instrumentId], controller });
-      historyMock.failIntervals.add('4H');
-      const response = await patchTimeframe(application, '4H');
-      expect(response.status).toBe(500);
-      expect(controller.current).toBe('1m');
-      expect(historyMock.calls.slice(-2).map((call) => call.interval)).toEqual([
-        '4H',
-        '1m',
-      ]);
-      assertRebuiltState(application, '1m');
-      expect(application.store.snapshot().timeframe.message).toContain('1m');
-    } finally {
-      await application.close();
-    }
-  });
+  it(
+    'rolls a failed 4H rebuild back to a coherent 1m subscription, settings, and indicator state',
+    async () => {
+      const { application } = await createFixture();
+      const controller = createController();
+      try {
+        await application.prepareCandleRuntime({ symbols: [instrumentId], controller });
+        historyMock.failIntervals.add('4H');
+        const response = await patchTimeframe(application, '4H');
+        expect(response.status).toBe(500);
+        expect(controller.current).toBe('1m');
+        expect(historyMock.calls.slice(-2).map((call) => call.interval)).toEqual([
+          '4H',
+          '1m',
+        ]);
+        assertRebuiltState(application, '1m');
+        expect(application.store.snapshot().timeframe.message).toContain('1m');
+      } finally {
+        await application.close();
+      }
+    },
+    integrationTestTimeoutMs,
+  );
 
   it('reconciles a reconnect on 15m without falling back to 1m or duplicating candles', async () => {
     const { application } = await createFixture();
