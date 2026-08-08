@@ -8,17 +8,20 @@ cd "$ROOT"
 
 sh ops/preflight-production.sh
 
-GIT_COMMIT="$(git rev-parse HEAD)"
-SHORT_COMMIT="$(printf '%s' "$GIT_COMMIT" | cut -c1-12)"
-IMAGE_VERSION="${DEPLOY_IMAGE_VERSION:-phase12-$SHORT_COMMIT}"
-
-export APP_GIT_COMMIT="$GIT_COMMIT"
-export APP_IMAGE_VERSION="$IMAGE_VERSION"
-
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
+
+GIT_COMMIT="$(git rev-parse HEAD)"
+SHORT_COMMIT="$(printf '%s' "$GIT_COMMIT" | cut -c1-12)"
+IMAGE_VERSION="${DEPLOY_IMAGE_VERSION:-phase12-$SHORT_COMMIT}"
+
+# Shell environment has higher Compose interpolation precedence than --env-file.
+# Export after loading .env.production so stale metadata in that file can never
+# override the actual checked-out version being built and deployed.
+export APP_GIT_COMMIT="$GIT_COMMIT"
+export APP_IMAGE_VERSION="$IMAGE_VERSION"
 
 if [ -f "$PLATFORM_DATA_DIR/platform/paper-state.json" ]; then
   ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" sh ops/backup-production.sh
