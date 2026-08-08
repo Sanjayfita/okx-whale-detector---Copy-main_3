@@ -71,6 +71,18 @@ export interface TradingRiskStatus {
   readonly liveExecutionAllowed: false;
 }
 
+export interface TradingRiskPersistedState {
+  readonly schemaVersion: 1;
+  readonly killSwitchActive: boolean;
+  readonly consecutiveLosses: number;
+  readonly lastLossAt: number | null;
+}
+
+export interface TradingRiskRestoreResult {
+  readonly restored: boolean;
+  readonly warnings: readonly string[];
+}
+
 const requirePositiveFinite = (value: number, name: string): void => {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${name} must be positive and finite`);
@@ -231,6 +243,37 @@ export class TradingRiskManager {
           : this.lastLossAt + this.policy.cooldownAfterLossMs,
       liveExecutionAllowed: false,
     };
+  }
+
+  public exportState(): TradingRiskPersistedState {
+    return {
+      schemaVersion: 1,
+      killSwitchActive: this.killSwitchActive,
+      consecutiveLosses: this.consecutiveLosses,
+      lastLossAt: this.lastLossAt,
+    };
+  }
+
+  public restoreState(state: TradingRiskPersistedState): TradingRiskRestoreResult {
+    if (state.schemaVersion !== 1) throw new Error('unsupported trading risk schema');
+    if (typeof state.killSwitchActive !== 'boolean') {
+      throw new Error('persisted killSwitchActive must be boolean');
+    }
+    requireNonNegativeInteger(
+      state.consecutiveLosses,
+      'persisted.consecutiveLosses',
+    );
+    if (state.lastLossAt !== null) {
+      requireNonNegativeInteger(state.lastLossAt, 'persisted.lastLossAt');
+    }
+    if (state.consecutiveLosses > 0 && state.lastLossAt === null) {
+      throw new Error('persisted loss streak requires lastLossAt');
+    }
+
+    this.killSwitchActive = state.killSwitchActive;
+    this.consecutiveLosses = state.consecutiveLosses;
+    this.lastLossAt = state.lastLossAt;
+    return { restored: true, warnings: [] };
   }
 
   public getPolicy(): TradingRiskPolicy {
