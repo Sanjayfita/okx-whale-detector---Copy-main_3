@@ -69,5 +69,8 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Validate dashboard in headless Chrome
+        run: npx tsx src/tools/validateTradingDashboardBrowser.ts
+
       - name: Validate Docker Compose deployment
         run: docker compose config --quiet
