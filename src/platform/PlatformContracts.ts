@@ -62,6 +62,17 @@ export interface DashboardTrade {
   readonly durationMs: number;
 }
 
+export interface DashboardStrategyTelemetry {
+  readonly evaluations: number;
+  readonly insufficientHistory: number;
+  readonly noFreshEmaCrossover: number;
+  readonly priceTrendMismatch: number;
+  readonly rsiFilter: number;
+  readonly atrFilter: number;
+  readonly positionAlreadyOpen: number;
+  readonly entryReady: number;
+}
+
 export interface DashboardStrategyStatus {
   readonly strategyId: string;
   readonly instrumentId: string;
@@ -74,18 +85,8 @@ export interface DashboardStrategyStatus {
     readonly passed: boolean | null;
     readonly detail: string;
   }[];
+  readonly telemetry: DashboardStrategyTelemetry;
   readonly updatedAt: number | null;
-}
-
-export interface DashboardStrategyTelemetry {
-  readonly evaluations: number;
-  readonly insufficientHistory: number;
-  readonly noFreshEmaCrossover: number;
-  readonly priceTrendMismatch: number;
-  readonly rsiFilter: number;
-  readonly atrFilter: number;
-  readonly positionAlreadyOpen: number;
-  readonly entryReady: number;
 }
 
 export interface DashboardLogEntry {
@@ -137,7 +138,6 @@ export interface TradingPlatformSnapshot {
   readonly equityCurve: readonly EquityPoint[];
   readonly candles: Readonly<Record<string, readonly DashboardCandle[]>>;
   readonly strategyStatus: Readonly<Record<string, DashboardStrategyStatus>>;
-  readonly strategyTelemetry: Readonly<Record<string, DashboardStrategyTelemetry>>;
   readonly logs: readonly DashboardLogEntry[];
   readonly analytics: PerformanceAnalyticsReport;
   readonly settings: DashboardSettings;
