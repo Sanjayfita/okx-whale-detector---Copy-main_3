@@ -1,24 +1,22 @@
 name: One-time repository flatten
 
 on:
-  push:
-    branches:
-      - agent/trading-platform-foundation
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   flatten:
-    if: ${{ !contains(github.event.head_commit.message, '[flatten-done]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
     steps:
-      - name: Check out repository
+      - name: Check out PR head branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Flatten tracked project files into repository root
         shell: bash
