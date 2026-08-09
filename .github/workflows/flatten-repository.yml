@@ -1,0 +1,158 @@
+name: One-time repository flatten
+
+on:
+  push:
+    branches:
+      - agent/trading-platform-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  flatten:
+    if: ${{ !contains(github.event.head_commit.message, '[flatten-done]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Flatten tracked project files into repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          inner='okx-whale-detector---Copy-main'
+
+          test -d "$inner"
+          test -f "$inner/package.json"
+          test -f "$inner/package-lock.json"
+          test -f "$inner/README.md"
+          test -f '.github/workflows/ci.yml'
+
+          # The outer README is only a placeholder. The maintained project README
+          # from the inner project becomes the repository README.
+          git rm -- README.md
+
+          # This tracked file is an accidentally saved terminal/git-diff dump, not
+          # source code. Delete it rather than moving it into the flattened root.
+          if git ls-files --error-unmatch "$inner/tash drop stash@{0}" >/dev/null 2>&1; then
+            git rm -- "$inner/tash drop stash@{0}"
+          fi
+
+          # Keep the current repository-root CI workflow. The nested .github tree
+          # is obsolete and must not overwrite the active root workflow.
+          while IFS= read -r -d '' file; do
+            git rm -- "$file"
+          done < <(git ls-files -z "$inner/.github/")
+
+          # Move every remaining tracked application file to repository root.
+          while IFS= read -r -d '' file; do
+            destination="${file#${inner}/}"
+            if [ "$destination" = "$file" ]; then
+              echo "Could not strip nested project prefix from: $file" >&2
+              exit 1
+            fi
+            if [ -e "$destination" ] || git ls-files --error-unmatch "$destination" >/dev/null 2>&1; then
+              echo "Flattening collision at: $destination" >&2
+              exit 1
+            fi
+            mkdir -p "$(dirname "$destination")"
+            git mv -- "$file" "$destination"
+          done < <(git ls-files -z "$inner/")
+
+          # Update the root CI workflow now that package.json and the project live
+          # directly at repository root.
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = '.github/workflows/ci.yml';
+          let text = fs.readFileSync(path, 'utf8');
+          const defaults =
+            '    defaults:\n' +
+            '      run:\n' +
+            '        working-directory: okx-whale-detector---Copy-main\n\n';
+          if (!text.includes(defaults)) {
+            throw new Error('Expected nested CI working-directory block was not found');
+          }
+          text = text.replace(defaults, '');
+          const oldCache =
+            '          cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json';
+          if (!text.includes(oldCache)) {
+            throw new Error('Expected nested npm cache path was not found');
+          }
+          text = text.replace(
+            oldCache,
+            '          cache-dependency-path: package-lock.json',
+          );
+          fs.writeFileSync(path, text);
+          NODE
+
+          # The one-time workflow removes itself from the final repository state.
+          git rm -- '.github/workflows/flatten-repository.yml'
+
+          test -f package.json
+          test -f package-lock.json
+          test -f README.md
+          test -f Dockerfile
+          test -f docker-compose.production.yml
+          test -d src
+          test -d test
+          test -d web
+          test -d docs
+          test -d db
+          test -d ops
+          test ! -e "$inner"
+
+          if git grep -n 'working-directory: okx-whale-detector---Copy-main' -- .github ':!*.md'; then
+            echo 'Obsolete nested CI working directory remains' >&2
+            exit 1
+          fi
+          if git grep -n 'cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json' -- .github ':!*.md'; then
+            echo 'Obsolete nested npm cache path remains' >&2
+            exit 1
+          fi
+
+          echo 'Flattened tree prepared:'
+          git status --short
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check, lint, and test
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate dashboard in headless Chrome
+        run: npx tsx src/tools/validateTradingDashboardBrowser.ts
+
+      - name: Validate Docker Compose files
+        run: |
+          docker compose config --quiet
+          docker compose --env-file .env.production.example -f docker-compose.production.yml config --quiet
+
+      - name: Validate production operations scripts
+        run: |
+          sh -n ops/backup-production.sh
+          sh -n ops/restore-production.sh
+          sh -n ops/watchdog.sh
+          sh -n ops/preflight-production.sh
+          sh -n ops/measure-resources.sh
+          sh -n ops/deploy-production.sh
+          sh -n ops/rollback-production.sh
+          sh -n ops/verify-backup-restore.sh
+          sh ops/verify-backup-restore.sh
+
+      - name: Commit and push flattened repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'chore(repo): flatten project to repository root [flatten-done]'
+          git push origin HEAD:agent/trading-platform-foundation
