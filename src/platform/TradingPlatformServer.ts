@@ -166,7 +166,6 @@ export class TradingPlatformServer {
   private server: Server | null = null;
   private unsubscribe?: () => void;
   private settingsLoaded = false;
-  private pendingSnapshot: TradingPlatformSnapshot | null = null;
   private snapshotBroadcastTimer: NodeJS.Timeout | null = null;
   private snapshotInvalidations = 0;
   private snapshotBroadcasts = 0;
@@ -248,9 +247,8 @@ export class TradingPlatformServer {
       const payload = this.serializeSnapshot(this.store.snapshot());
       client.send(payload);
     });
-    this.unsubscribe = this.store.subscribe((snapshot) => {
+    this.unsubscribe = this.store.subscribeInvalidation(() => {
       this.snapshotInvalidations += 1;
-      this.pendingSnapshot = snapshot;
       this.scheduleSnapshotBroadcast();
     });
 
@@ -275,7 +273,6 @@ export class TradingPlatformServer {
       clearTimeout(this.snapshotBroadcastTimer);
       this.snapshotBroadcastTimer = null;
     }
-    this.pendingSnapshot = null;
     for (const client of this.websocket.clients) client.close();
     this.websocket.close();
     const server = this.server;
@@ -328,22 +325,18 @@ export class TradingPlatformServer {
     if (this.snapshotBroadcastTimer !== null) return;
     this.snapshotBroadcastTimer = setTimeout(() => {
       this.snapshotBroadcastTimer = null;
-      this.flushPendingSnapshot();
+      this.flushLatestSnapshot();
     }, this.snapshotBroadcastIntervalMs);
     this.snapshotBroadcastTimer.unref();
   }
 
-  private flushPendingSnapshot(): void {
-    const snapshot = this.pendingSnapshot;
-    this.pendingSnapshot = null;
-    if (snapshot === null) return;
-
+  private flushLatestSnapshot(): void {
     const clients = [...this.websocket.clients].filter(
       (client) => client.readyState === WebSocket.OPEN,
     );
     if (clients.length === 0) return;
 
-    const payload = this.serializeSnapshot(snapshot);
+    const payload = this.serializeSnapshot(this.store.snapshot());
     const payloadBytes = this.lastSnapshotPayloadBytes;
     let sent = false;
 
