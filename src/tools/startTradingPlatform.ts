@@ -121,6 +121,16 @@ export const startTradingPlatform = async (
       host: environment.DASHBOARD_HOST?.trim() || '0.0.0.0',
       port: parsePositiveNumber(environment.DASHBOARD_PORT, 4173, 'DASHBOARD_PORT'),
       staticDirectory: environment.DASHBOARD_STATIC_DIR?.trim() || 'web',
+      snapshotBroadcastIntervalMs: parsePositiveNumber(
+        environment.DASHBOARD_SNAPSHOT_BROADCAST_INTERVAL_MS,
+        1_000,
+        'DASHBOARD_SNAPSHOT_BROADCAST_INTERVAL_MS',
+      ),
+      maximumClientBufferedBytes: parsePositiveNumber(
+        environment.DASHBOARD_MAX_CLIENT_BUFFERED_BYTES,
+        4 * 1024 * 1024,
+        'DASHBOARD_MAX_CLIENT_BUFFERED_BYTES',
+      ),
     },
     environment,
   });
@@ -132,10 +142,17 @@ export const startTradingPlatform = async (
       'PROCESS_MEMORY_REPORT_INTERVAL_MS',
     ),
     additionalMetrics: () => {
-      const metrics = platform.engine.getExecutionBookMetrics();
+      const execution = platform.engine.getExecutionBookMetrics();
+      const dashboard = platform.server.getSnapshotTransportMetrics();
       return {
-        orderBookUpdates: metrics.orderBookUpdates,
-        executionBookMaterializations: metrics.executionBookMaterializations,
+        orderBookUpdates: execution.orderBookUpdates,
+        executionBookMaterializations: execution.executionBookMaterializations,
+        dashboardInvalidations: dashboard.snapshotInvalidations,
+        dashboardBroadcasts: dashboard.snapshotBroadcasts,
+        dashboardBackpressureSkips: dashboard.snapshotBackpressureSkips,
+        dashboardClients: dashboard.dashboardClients,
+        dashboardBufferedBytes: dashboard.dashboardBufferedBytes,
+        dashboardSnapshotBytes: dashboard.lastSnapshotPayloadBytes,
       };
     },
   });
