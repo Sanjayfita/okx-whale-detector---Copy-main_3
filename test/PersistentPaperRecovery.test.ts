@@ -107,8 +107,11 @@ describe('persistent paper restart reconciliation', () => {
       riskStateRestored: true,
       fundingEventsRestored: 1,
       duplicateEvents: 0,
-      result: 'PASS',
+      result: 'WARN',
     });
+    expect(
+      report.warnings.some((warning) => warning.includes('peak equity')),
+    ).toBe(true);
     expect(restored.openPositions[0]).toMatchObject({
       tradeId: 'trade-btc-1',
       instrumentId: 'BTC-USDT-SWAP',
