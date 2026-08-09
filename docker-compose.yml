@@ -1,0 +1,50 @@
+services:
+  database:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: research
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d research"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migrations:
+    image: postgres:16
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./db:/db:ro
+    entrypoint: ["/bin/sh", "/db/run-migrations.sh"]
+
+  platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@database:5432/research
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 4173
+      TRADING_MODE: PAPER
+      PAPER_STARTING_EQUITY: 10000
+    ports:
+      - "4173:4173"
+    volumes:
+      - platform-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  platform-data:

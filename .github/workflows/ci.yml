@@ -30,9 +30,6 @@ jobs:
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
-    defaults:
-      run:
-        working-directory: okx-whale-detector---Copy-main
 
     steps:
       - name: Check out repository
@@ -43,7 +40,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install PostgreSQL client
         run: |
@@ -63,8 +60,56 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Type-check, lint, and test
         run: npm run check
 
       - name: Build
         run: npm run build
+
+      - name: Validate dashboard in headless Chrome
+        run: npx tsx src/tools/validateTradingDashboardBrowser.ts
+
+      - name: Validate development Docker Compose deployment
+        run: docker compose config --quiet
+
+      - name: Validate production Docker Compose deployment
+        run: docker compose --env-file .env.production.example -f docker-compose.production.yml config --quiet
+
+      - name: Build production Docker image
+        env:
+          APP_GIT_COMMIT: ${{ github.sha }}
+          APP_IMAGE_VERSION: ci-${{ github.sha }}
+        run: |
+          docker compose --env-file .env.production.example -f docker-compose.production.yml build platform
+          image_ref="okx-whale-detector:${APP_IMAGE_VERSION}"
+          baked_commit="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image_ref" | sed -n 's/^APP_GIT_COMMIT=//p' | tail -n 1)"
+          test "$baked_commit" = "$APP_GIT_COMMIT"
+
+      - name: Validate production container hardening
+        env:
+          APP_GIT_COMMIT: ${{ github.sha }}
+          APP_IMAGE_VERSION: ci-${{ github.sha }}
+        run: sh ops/verify-production-container-config.sh
+
+      - name: Validate production operations scripts
+        run: |
+          sh -n ops/backup-production.sh
+          sh -n ops/check-production-health.sh
+          sh -n ops/capture-acceptance-evidence.sh
+          sh -n ops/restore-production.sh
+          sh -n ops/watchdog.sh
+          sh -n ops/preflight-production.sh
+          sh -n ops/measure-resources.sh
+          sh -n ops/deploy-production.sh
+          sh -n ops/rollback-production.sh
+          sh -n ops/upload-offsite-backup.sh
+          sh -n ops/verify-backup-restore.sh
+          sh -n ops/verify-database-backup-restore.sh
+          sh -n ops/verify-production-container-config.sh
+          sh ops/verify-backup-restore.sh
+
+      - name: Verify PostgreSQL backup and disposable restore
+        run: sh ops/verify-database-backup-restore.sh
