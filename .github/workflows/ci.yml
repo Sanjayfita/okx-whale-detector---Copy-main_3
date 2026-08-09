@@ -75,6 +75,16 @@ jobs:
       - name: Validate production Docker Compose deployment
         run: docker compose --env-file .env.production.example -f docker-compose.production.yml config --quiet
 
+      - name: Build production Docker image
+        env:
+          APP_GIT_COMMIT: ${{ github.sha }}
+          APP_IMAGE_VERSION: ci-${{ github.sha }}
+        run: |
+          docker compose --env-file .env.production.example -f docker-compose.production.yml build platform
+          image_ref="okx-whale-detector:${APP_IMAGE_VERSION}"
+          baked_commit="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image_ref" | sed -n 's/^APP_GIT_COMMIT=//p' | tail -n 1)"
+          test "$baked_commit" = "$APP_GIT_COMMIT"
+
       - name: Validate production operations scripts
         run: |
           sh -n ops/backup-production.sh
