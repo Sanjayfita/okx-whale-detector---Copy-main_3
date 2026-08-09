@@ -45,11 +45,45 @@ copy_if_present "$PLATFORM_DATA_DIR/platform/paper-state.json" paper-state.json
 copy_if_present "$PLATFORM_DATA_DIR/platform/trade-contexts.json" trade-contexts.json
 copy_if_present "$PLATFORM_DATA_DIR/platform/settings.json" settings.json
 
+# Scheduled backups run in a fresh shell, so values left in .env.production can
+# be stale placeholders even while the platform container is running a newer
+# deployment. Prefer the actual container environment for evidence identity.
+PLATFORM_CONTAINER_ID=""
+if command -v docker >/dev/null 2>&1; then
+  PLATFORM_CONTAINER_ID="$(
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -a -q platform 2>/dev/null || true
+  )"
+fi
+
+read_running_platform_env() {
+  variable_name="$1"
+  if [ -z "$PLATFORM_CONTAINER_ID" ]; then
+    return 0
+  fi
+  docker image inspect >/dev/null 2>&1 || true
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$PLATFORM_CONTAINER_ID" 2>/dev/null |
+    sed -n "s/^${variable_name}=//p" |
+    tail -n 1
+}
+
+RUNNING_GIT_COMMIT="$(read_running_platform_env APP_GIT_COMMIT)"
+RUNNING_IMAGE_VERSION="$(read_running_platform_env APP_IMAGE_VERSION)"
+RUNNING_CONFIGURATION_VERSION="$(read_running_platform_env APP_CONFIGURATION_VERSION)"
+if [ -n "$PLATFORM_CONTAINER_ID" ] && [ -n "$RUNNING_GIT_COMMIT" ] && [ -n "$RUNNING_IMAGE_VERSION" ]; then
+  MANIFEST_IDENTITY_SOURCE="running_platform_container"
+else
+  MANIFEST_IDENTITY_SOURCE="environment_fallback"
+  RUNNING_GIT_COMMIT="${APP_GIT_COMMIT:-unknown}"
+  RUNNING_IMAGE_VERSION="${APP_IMAGE_VERSION:-unknown}"
+  RUNNING_CONFIGURATION_VERSION="${APP_CONFIGURATION_VERSION:-unknown}"
+fi
+
 cat > "$DESTINATION/manifest.txt" <<EOF
 created_at_utc=$STAMP
-app_git_commit=${APP_GIT_COMMIT:-unknown}
-app_image_version=${APP_IMAGE_VERSION:-unknown}
-configuration_version=${APP_CONFIGURATION_VERSION:-unknown}
+identity_source=$MANIFEST_IDENTITY_SOURCE
+app_git_commit=$RUNNING_GIT_COMMIT
+app_image_version=$RUNNING_IMAGE_VERSION
+configuration_version=${RUNNING_CONFIGURATION_VERSION:-unknown}
 paper_state_present=$(test -f "$DESTINATION/paper-state.json" && echo yes || echo no)
 trade_contexts_present=$(test -f "$DESTINATION/trade-contexts.json" && echo yes || echo no)
 settings_present=$(test -f "$DESTINATION/settings.json" && echo yes || echo no)
