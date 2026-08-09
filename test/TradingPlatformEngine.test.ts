@@ -38,13 +38,124 @@ describe('TradingPlatformEngine', () => {
       ),
     ).toBe(true);
 
+    expect(engine.getExecutionBookMetrics()).toEqual({
+      orderBookUpdates: 0,
+      executionBookMaterializations: 0,
+    });
     engine.onOrderBook('BTC-USDT-SWAP', state);
+    expect(engine.getExecutionBookMetrics()).toEqual({
+      orderBookUpdates: 1,
+      executionBookMaterializations: 1,
+    });
 
     const snapshot = store.account.snapshot(2_000);
     expect(snapshot.openPositions).toHaveLength(0);
     expect(snapshot.trades).toHaveLength(1);
     expect(snapshot.trades[0]?.exitReason).toBe('TAKE_PROFIT');
     expect(snapshot.trades[0]?.fees).toBeGreaterThan(0);
+  });
+
+  it('does not materialize execution depth for ordinary order-book updates', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+    const state = new MarketState(resolveSymbolConfig('BTC-USDT-SWAP'), {
+      instId: 'BTC-USDT-SWAP',
+      instType: 'SWAP',
+      quoteCurrency: 'USDT',
+      baseUnitsPerSize: 1,
+    });
+
+    expect(
+      state.orderBookManager.applyUpdate(
+        [['100', '100', '0', '1']],
+        [['101', '100', '0', '1']],
+        1_000,
+        1,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+    engine.onOrderBook('BTC-USDT-SWAP', state);
+
+    for (let sequence = 2; sequence <= 101; sequence += 1) {
+      expect(
+        state.orderBookManager.applyUpdate(
+          [['100', `${100 + sequence}`, '0', '1']],
+          [['101', `${100 + sequence}`, '0', '1']],
+          1_000 + sequence,
+          sequence,
+          sequence - 1,
+          'update',
+        ),
+      ).toBe(true);
+      engine.onOrderBook('BTC-USDT-SWAP', state);
+    }
+
+    expect(engine.getExecutionBookMetrics()).toEqual({
+      orderBookUpdates: 101,
+      executionBookMaterializations: 0,
+    });
+  });
+
+  it('materializes the current book when a valid EMA paper entry executes', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+    store.updateSettings({
+      timeframe: '15m',
+      fastEmaLength: 3,
+      slowEmaLength: 5,
+      rsiPeriod: 3,
+      atrPeriod: 3,
+      minimumAtrPercent: 0.1,
+      maximumAtrPercent: 20,
+      trailingStopEnabled: false,
+    });
+
+    const state = new MarketState(resolveSymbolConfig('BTC-USDT-SWAP'), {
+      instId: 'BTC-USDT-SWAP',
+      instType: 'SWAP',
+      quoteCurrency: 'USDT',
+      baseUnitsPerSize: 1,
+    });
+    expect(
+      state.orderBookManager.applyUpdate(
+        [['100', '1000000', '0', '1']],
+        [['101', '1000000', '0', '1']],
+        2_000,
+        1,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+    engine.onOrderBook('BTC-USDT-SWAP', state);
+    expect(engine.getExecutionBookMetrics().executionBookMaterializations).toBe(0);
+
+    const closes = [100, 98, 96, 94, 94.5, 96.5, 98.5] as const;
+    closes.forEach((close, index) => {
+      const open = closes[index - 1] ?? close;
+      engine.onCandle({
+        instId: 'BTC-USDT-SWAP',
+        interval: '15m',
+        timestamp: 900_000 * (index + 1),
+        open,
+        high: Math.max(open, close) + 0.5,
+        low: Math.min(open, close) - 0.5,
+        close,
+        volume: 10,
+        volumeCurrency: 5,
+        volumeCurrencyQuote: close * 5,
+        confirm: true,
+      });
+    });
+
+    const account = store.account.snapshot(2_000);
+    expect(account.openPositions).toHaveLength(1);
+    expect(account.openPositions[0]?.direction).toBe('LONG');
+    expect(account.openPositions[0]?.entryPrice).toBeCloseTo(101.001515);
+    expect(engine.getExecutionBookMetrics()).toEqual({
+      orderBookUpdates: 1,
+      executionBookMaterializations: 1,
+    });
   });
 
   it('applies funding to an open paper position', () => {
