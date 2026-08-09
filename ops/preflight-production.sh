@@ -6,6 +6,19 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 
 command -v docker >/dev/null 2>&1 || { echo "Docker is required" >&2; exit 1; }
 docker compose version >/dev/null
+command -v git >/dev/null 2>&1 || { echo "Git is required" >&2; exit 1; }
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Production deployment must run from a Git checkout." >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+  echo "Production checkout is dirty. Commit, stash, or remove local source changes before deployment so APP_GIT_COMMIT exactly identifies the image." >&2
+  git status --short >&2 || true
+  exit 1
+fi
+GIT_COMMIT="$(git rev-parse HEAD)"
+echo "Git checkout: clean ($GIT_COMMIT)"
 
 if command -v systemctl >/dev/null 2>&1; then
   docker_enabled="$(systemctl is-enabled docker 2>/dev/null || true)"
