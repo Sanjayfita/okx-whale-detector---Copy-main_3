@@ -34,6 +34,16 @@ set +a
 : "${POSTGRES_USER:=paperapp}"
 : "${POSTGRES_DB:=research}"
 
+if [ -f "$SOURCE/SHA256SUMS" ]; then
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum is required to verify this backup" >&2
+    exit 1
+  fi
+  (cd "$SOURCE" && sha256sum -c SHA256SUMS)
+else
+  echo "WARNING: backup has no SHA256SUMS; integrity cannot be cryptographically verified" >&2
+fi
+
 validate_json() {
   target="$1"
   if command -v node >/dev/null 2>&1; then
@@ -96,6 +106,7 @@ if [ "${SKIP_CONTAINER_CONTROL:-0}" != "1" ]; then
     fi
     sleep 2
   done
+  echo "Restore procedure completed and platform health endpoint recovered from: $SOURCE"
+else
+  echo "Restore file copy completed in test mode from: $SOURCE"
 fi
-
-echo "Paper account restore verified from: $SOURCE"
