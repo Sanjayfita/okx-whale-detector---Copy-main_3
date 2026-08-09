@@ -61,7 +61,19 @@ if [ "${SKIP_DATABASE_BACKUP:-0}" != "1" ]; then
     > "$DESTINATION/research.dump"
 fi
 
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "sha256sum is required to create verifiable production backups" >&2
+  exit 1
+fi
+: > "$DESTINATION/SHA256SUMS"
+for file in manifest.txt paper-state.json trade-contexts.json settings.json research.dump; do
+  if [ -f "$DESTINATION/$file" ]; then
+    (cd "$DESTINATION" && sha256sum "$file") >> "$DESTINATION/SHA256SUMS"
+  fi
+done
+
 find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d \
   -mtime "+$BACKUP_RETENTION_DAYS" -exec rm -rf {} +
 
 echo "Production backup created: $DESTINATION"
+echo "Backup checksums: $DESTINATION/SHA256SUMS"
