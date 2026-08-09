@@ -41,7 +41,25 @@ ENV_FILE="$ENV_FILE" BACKUP_DIR="$BACKUP_DIR" SKIP_DATABASE_BACKUP=1 \
 
 BACKUP_SOURCE="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 [ -n "$BACKUP_SOURCE" ]
+[ -f "$BACKUP_SOURCE/SHA256SUMS" ]
+(cd "$BACKUP_SOURCE" && sha256sum -c SHA256SUMS >/dev/null)
+grep -q '^identity_source=environment_fallback$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^app_git_commit=test-commit$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^app_image_version=test-image$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^configuration_version=test-config$' "$BACKUP_SOURCE/manifest.txt"
 
+# A corrupt backup must be rejected before it can replace the live paper state.
+TAMPERED_BACKUP="$TEMP_ROOT/tampered-backup"
+cp -R "$BACKUP_SOURCE" "$TAMPERED_BACKUP"
+printf '\n' >> "$TAMPERED_BACKUP/paper-state.json"
+if ENV_FILE="$ENV_FILE" SKIP_CONTAINER_CONTROL=1 \
+  sh "$ROOT/ops/restore-production.sh" "$TAMPERED_BACKUP" >/dev/null 2>&1; then
+  echo "Tampered backup was unexpectedly accepted" >&2
+  exit 1
+fi
+[ "$(cat "$DATA_DIR/platform/paper-state.json")" = "$expected_paper" ]
+
+# Prove the valid backup can restore the account/context files after corruption.
 echo '{"corrupted":true}' > "$DATA_DIR/platform/paper-state.json"
 echo '{"corrupted":true}' > "$DATA_DIR/platform/trade-contexts.json"
 
