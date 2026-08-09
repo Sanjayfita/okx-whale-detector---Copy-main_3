@@ -6,6 +6,24 @@ import type {
 } from '../strategy/EmaTrendStrategy';
 
 export type StrategySignalAction = 'BUY' | 'SELL' | 'WAIT' | 'EXIT';
+export type StrategyDecisionState =
+  | 'WAIT'
+  | 'ENTRY_READY'
+  | 'IN_POSITION'
+  | 'EXIT_READY';
+
+export interface StrategyDiagnostics {
+  readonly state: StrategyDecisionState;
+  readonly candidateDirection: TradeDirection | null;
+  readonly sufficientHistory: boolean;
+  readonly freshEmaCrossover: boolean;
+  readonly priceTrendAlignment: boolean | null;
+  readonly rsiPass: boolean | null;
+  readonly atrVolatilityPass: boolean | null;
+  readonly positionOpen: boolean;
+  readonly blockingReasons: readonly string[];
+  readonly primaryReason: string | null;
+}
 
 export interface StrategyContext {
   readonly instrumentId: string;
@@ -22,6 +40,7 @@ export interface StrategySignalResult {
   readonly direction: TradeDirection | null;
   readonly observedAt: number | null;
   readonly reasons: readonly string[];
+  readonly diagnostics: StrategyDiagnostics;
   readonly entryPrice: number | null;
   readonly stopLossPrice: number | null;
   readonly takeProfitPrice: number | null;
