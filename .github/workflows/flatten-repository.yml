@@ -61,6 +61,15 @@ jobs:
             git mv -- "$file" "$destination"
           done < <(git ls-files -z "$inner/")
 
+          # git moves files but leaves empty source directories on disk. Refuse to
+          # remove the old tree if any file/symlink remains, then delete empties.
+          if find "$inner" \( -type f -o -type l \) -print -quit | grep -q .; then
+            echo 'Unexpected file remains in nested project after tracked moves:' >&2
+            find "$inner" \( -type f -o -type l \) -print >&2
+            exit 1
+          fi
+          find "$inner" -depth -type d -empty -delete
+
           # Update the root CI workflow now that package.json and the project live
           # directly at repository root.
           node <<'NODE'
