@@ -47,14 +47,19 @@ export APP_IMAGE_VERSION="$IMAGE_VERSION"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --no-build platform
 
 attempts=0
-until curl -fsS "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" >/dev/null; do
+health_body=""
+until health_body="$(curl -fsS "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null)" && \
+  printf '%s' "$health_body" | grep -q '"application":"RUNNING"'; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 45 ]; then
-    echo "Rollback image failed health check" >&2
+    echo "Rollback image did not reach application=RUNNING" >&2
+    if [ -n "$health_body" ]; then
+      echo "Last health response: $health_body" >&2
+    fi
     exit 1
   fi
   sleep 2
 done
 
-echo "Rollback complete: $IMAGE_REF"
+echo "Rollback complete and application=RUNNING: $IMAGE_REF"
 echo "git_commit=$ROLLBACK_GIT_COMMIT"
