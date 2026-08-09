@@ -43,6 +43,14 @@ export class LazyExecutionBookStore {
     this.orderBookUpdates += 1;
   }
 
+  public getObservedAt(instrumentId: string): number | undefined {
+    const state = this.states.get(instrumentId);
+    if (state === undefined || !state.orderBookManager.isUsableForSignals()) {
+      return undefined;
+    }
+    return state.orderBookManager.getOrderBook().updatedAt;
+  }
+
   public get(instrumentId: string): ExecutionOrderBook | undefined {
     const state = this.states.get(instrumentId);
     if (state === undefined || !state.orderBookManager.isUsableForSignals()) {
