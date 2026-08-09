@@ -124,7 +124,15 @@ const refresh = async (): Promise<void> => {
 
 const app = document.querySelector('#app');
 if (app !== null) {
-  const observer = new MutationObserver(queueRender);
+  const observer = new MutationObserver(() => {
+    if (
+      latestStatus !== null &&
+      document.querySelector('.signal-card') !== null &&
+      document.querySelector('.strategy-diagnostics-extra') === null
+    ) {
+      queueRender();
+    }
+  });
   observer.observe(app, { childList: true, subtree: true });
 }
 
