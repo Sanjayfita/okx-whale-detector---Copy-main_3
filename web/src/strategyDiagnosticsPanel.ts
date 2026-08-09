@@ -1,3 +1,5 @@
+export {};
+
 type StrategyTelemetry = {
   evaluations: number;
   insufficientHistory: number;
