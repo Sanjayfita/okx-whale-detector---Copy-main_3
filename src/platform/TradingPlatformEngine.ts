@@ -5,7 +5,7 @@ import {
 } from '../backtest/ExecutionSimulator';
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
 import type { TradingTimeframe } from '../config/tradingTimeframes';
-import type { MarketState } from '../core/MarketState';
+import type { OrderBookManager } from '../core/OrderBookManager';
 import type {
   NotificationService,
   TradingNotificationType,
@@ -16,8 +16,17 @@ import type {
   EmaTrendOpenPosition,
 } from '../strategy/EmaTrendStrategy';
 import type { StrategySignalResult } from '../strategies/TradingStrategy';
-import type { DashboardStrategyStatus } from './PlatformContracts';
+import type { MarketInstrumentConfig } from '../types/instrument';
+import type {
+  DashboardStrategyStatus,
+  DashboardStrategyTelemetry,
+} from './PlatformContracts';
 import { PlatformStateStore } from './PlatformStateStore';
+
+export interface ExecutionMarketState {
+  readonly instrument: MarketInstrumentConfig;
+  readonly orderBookManager: OrderBookManager;
+}
 
 export interface PaperEntryTraceContext {
   readonly tradeId: string;
@@ -38,7 +47,29 @@ export interface TradingPlatformEngineOptions {
   readonly now?: () => number;
 }
 
-const toExecutionBook = (state: MarketState): ExecutionOrderBook | null => {
+type MutableStrategyTelemetry = {
+  evaluations: number;
+  insufficientHistory: number;
+  noFreshEmaCrossover: number;
+  priceTrendMismatch: number;
+  rsiFilter: number;
+  atrFilter: number;
+  positionAlreadyOpen: number;
+  entryReady: number;
+};
+
+const emptyStrategyTelemetry = (): MutableStrategyTelemetry => ({
+  evaluations: 0,
+  insufficientHistory: 0,
+  noFreshEmaCrossover: 0,
+  priceTrendMismatch: 0,
+  rsiFilter: 0,
+  atrFilter: 0,
+  positionAlreadyOpen: 0,
+  entryReady: 0,
+});
+
+const toExecutionBook = (state: ExecutionMarketState): ExecutionOrderBook | null => {
   if (!state.orderBookManager.isUsableForSignals()) return null;
   const book = state.orderBookManager.getOrderBook();
   const baseUnitsPerSize = state.instrument.baseUnitsPerSize;
@@ -87,61 +118,66 @@ const signalText = (result: StrategySignalResult): 'BUY' | 'SELL' | 'WAIT' => {
 
 const statusFromDecision = (
   result: StrategySignalResult,
+  telemetry: DashboardStrategyTelemetry,
 ): DashboardStrategyStatus => {
-  const fast = result.indicators.fastEma ?? null;
-  const previousFast = result.indicators.previousFastEma ?? null;
-  const slow = result.indicators.slowEma ?? null;
-  const previousSlow = result.indicators.previousSlowEma ?? null;
+  const diagnostics = result.diagnostics;
   const rsi = result.indicators.rsi ?? null;
   const atrPercent = result.indicators.atrPercent ?? null;
-  const crossover =
-    fast !== null &&
-    previousFast !== null &&
-    slow !== null &&
-    previousSlow !== null &&
-    ((previousFast <= previousSlow && fast > slow) ||
-      (previousFast >= previousSlow && fast < slow));
-  const trend =
-    slow !== null &&
-    previousSlow !== null &&
-    ((result.direction === 'LONG' && slow > previousSlow) ||
-      (result.direction === 'SHORT' && slow < previousSlow));
-  const rsiOk =
-    rsi !== null &&
-    ((result.direction === 'LONG' && rsi >= 50 && rsi <= 70) ||
-      (result.direction === 'SHORT' && rsi >= 30 && rsi <= 50));
 
   return {
     strategyId: result.strategyId,
+    instrumentId: result.instrumentId,
+    state: diagnostics.state,
     signal: signalText(result),
     reasons: result.reasons,
+    primaryReason: diagnostics.primaryReason,
     checks: [
       {
-        label: 'EMA crossover',
-        passed: crossover,
-        detail: crossover ? 'Fast/slow crossover detected' : 'No fresh crossover',
+        label: 'Fresh EMA crossover',
+        passed: diagnostics.freshEmaCrossover,
+        detail: diagnostics.sufficientHistory
+          ? diagnostics.freshEmaCrossover
+            ? `${diagnostics.candidateDirection ?? ''} crossover detected`.trim()
+            : 'No fresh EMA crossover'
+          : 'Waiting for confirmed candle history',
       },
       {
-        label: 'Trend filter',
-        passed: trend,
-        detail: trend ? 'Slow EMA slope agrees' : 'Trend slope not confirmed',
+        label: 'Price trend alignment',
+        passed: diagnostics.priceTrendAlignment,
+        detail:
+          diagnostics.priceTrendAlignment === null
+            ? 'Requires a fresh crossover direction first'
+            : diagnostics.priceTrendAlignment
+              ? 'Price location and slow EMA slope agree'
+              : 'Price/slow EMA trend alignment not confirmed',
       },
       {
         label: 'RSI',
-        passed: rsiOk,
-        detail: rsi === null ? 'Waiting for RSI' : `RSI ${rsi.toFixed(2)}`,
+        passed: diagnostics.rsiPass,
+        detail:
+          rsi === null
+            ? 'Waiting for RSI'
+            : diagnostics.rsiPass === null
+              ? `RSI ${rsi.toFixed(2)}; waiting for crossover direction`
+              : `RSI ${rsi.toFixed(2)}`,
       },
       {
         label: 'ATR volatility',
-        passed:
-          !result.reasons.includes('LOW_VOLATILITY') &&
-          !result.reasons.includes('EXTREME_VOLATILITY'),
+        passed: diagnostics.atrVolatilityPass,
         detail:
           atrPercent === null
             ? 'Waiting for ATR'
             : `ATR ${atrPercent.toFixed(3)}%`,
       },
+      {
+        label: 'No open position',
+        passed: !diagnostics.positionOpen,
+        detail: diagnostics.positionOpen
+          ? 'A paper position is already open'
+          : 'No existing paper position blocks entry',
+      },
     ],
+    telemetry,
     updatedAt: result.observedAt,
   };
 };
@@ -150,6 +186,7 @@ export class TradingPlatformEngine {
   private readonly books = new Map<string, ExecutionOrderBook>();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
   private readonly executionResumeAfter = new Map<string, number>();
+  private readonly strategyTelemetry = new Map<string, MutableStrategyTelemetry>();
   private readonly maximumStrategyCandles: number;
   private readonly paperLeverage: number;
   private readonly maintenanceMarginRate: number;
@@ -193,6 +230,7 @@ export class TradingPlatformEngine {
     this.rebuildingTimeframe = true;
     this.candles.clear();
     this.executionResumeAfter.clear();
+    this.strategyTelemetry.clear();
     this.store.clearStrategyMarketState();
     this.store.setTimeframeState(
       'REBUILDING',
@@ -223,7 +261,7 @@ export class TradingPlatformEngine {
     );
   }
 
-  public onOrderBook(instrumentId: string, state: MarketState): void {
+  public onOrderBook(instrumentId: string, state: ExecutionMarketState): void {
     const book = toExecutionBook(state);
     if (book === null) return;
     this.books.set(instrumentId, book);
@@ -300,7 +338,8 @@ export class TradingPlatformEngine {
       rsi: result.indicators.rsi ?? null,
       atr: result.indicators.atr ?? null,
     });
-    this.store.setStrategyStatus(statusFromDecision(result));
+    const telemetry = this.recordStrategyTelemetry(result);
+    this.store.setStrategyStatus(statusFromDecision(result, telemetry));
 
     if (this.rebuildingTimeframe) return;
     const resumeAfter = this.executionResumeAfter.get(candle.instId);
@@ -396,6 +435,34 @@ export class TradingPlatformEngine {
         trades: snapshot.analytics.trades,
       },
     );
+  }
+
+  private recordStrategyTelemetry(
+    result: StrategySignalResult,
+  ): DashboardStrategyTelemetry {
+    const telemetry =
+      this.strategyTelemetry.get(result.strategyId) ?? emptyStrategyTelemetry();
+    this.strategyTelemetry.set(result.strategyId, telemetry);
+    telemetry.evaluations += 1;
+
+    for (const reason of result.diagnostics.blockingReasons) {
+      if (reason === 'INSUFFICIENT_CONFIRMED_CANDLES') {
+        telemetry.insufficientHistory += 1;
+      } else if (reason === 'NO_EMA_CROSSOVER') {
+        telemetry.noFreshEmaCrossover += 1;
+      } else if (reason === 'TREND_FILTER_NOT_CONFIRMED') {
+        telemetry.priceTrendMismatch += 1;
+      } else if (reason === 'RSI_FILTER_NOT_CONFIRMED') {
+        telemetry.rsiFilter += 1;
+      } else if (reason === 'LOW_VOLATILITY' || reason === 'EXTREME_VOLATILITY') {
+        telemetry.atrFilter += 1;
+      } else if (reason === 'POSITION_ALREADY_OPEN') {
+        telemetry.positionAlreadyOpen += 1;
+      }
+    }
+    if (result.diagnostics.state === 'ENTRY_READY') telemetry.entryReady += 1;
+
+    return { ...telemetry };
   }
 
   private openPaperPosition(result: StrategySignalResult): void {
