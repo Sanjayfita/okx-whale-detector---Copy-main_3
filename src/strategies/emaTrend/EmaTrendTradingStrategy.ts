@@ -56,6 +56,7 @@ const evaluate = (context: StrategyContext): StrategySignalResult => {
     direction: result.direction,
     observedAt: result.observedAt,
     reasons: result.reasons,
+    diagnostics: result.diagnostics,
     entryPrice: result.entryPrice,
     stopLossPrice: result.stopLossPrice,
     takeProfitPrice: result.takeProfitPrice,
