@@ -3,7 +3,8 @@ import { spawn, spawnSync } from 'node:child_process';
 const argumentsSet = new Set(process.argv.slice(2));
 const mode = argumentsSet.has('--live') ? 'LIVE' : 'PAPER';
 const development = argumentsSet.has('--dev');
-const skipDatabase = argumentsSet.has('--skip-database');
+const withDatabase =
+  argumentsSet.has('--with-database') && !argumentsSet.has('--skip-database');
 const noBrowser = argumentsSet.has('--no-browser');
 
 const isWindowsShellCommand = (name: string): boolean =>
@@ -56,7 +57,13 @@ const startDatabase = (): void => {
 };
 
 export const startPlatformOrchestrator = (): void => {
-  if (!skipDatabase) startDatabase();
+  if (withDatabase) {
+    startDatabase();
+  } else {
+    console.log(
+      'Local PostgreSQL/Docker startup skipped. Use --with-database when research database services are needed.',
+    );
+  }
 
   if (development) {
     console.log('Building dashboard assets...');
@@ -106,9 +113,11 @@ if (require.main === module) {
     startPlatformOrchestrator();
   } catch (error: unknown) {
     console.error('One-click platform startup failed:', error);
-    console.error(
-      'Docker Desktop / Docker Engine is required unless --skip-database is used.',
-    );
+    if (withDatabase) {
+      console.error(
+        'Docker Desktop / Docker Engine is required only when --with-database is used.',
+      );
+    }
     process.exitCode = 1;
   }
 }
