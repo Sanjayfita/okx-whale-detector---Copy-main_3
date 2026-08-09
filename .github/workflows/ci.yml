@@ -88,6 +88,12 @@ jobs:
           baked_commit="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image_ref" | sed -n 's/^APP_GIT_COMMIT=//p' | tail -n 1)"
           test "$baked_commit" = "$APP_GIT_COMMIT"
 
+      - name: Validate production container hardening
+        env:
+          APP_GIT_COMMIT: ${{ github.sha }}
+          APP_IMAGE_VERSION: ci-${{ github.sha }}
+        run: sh ops/verify-production-container-config.sh
+
       - name: Validate production operations scripts
         run: |
           sh -n ops/backup-production.sh
@@ -98,4 +104,5 @@ jobs:
           sh -n ops/deploy-production.sh
           sh -n ops/rollback-production.sh
           sh -n ops/verify-backup-restore.sh
+          sh -n ops/verify-production-container-config.sh
           sh ops/verify-backup-restore.sh
