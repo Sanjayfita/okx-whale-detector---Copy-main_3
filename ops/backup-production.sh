@@ -41,14 +41,39 @@ command -v sha256sum >/dev/null 2>&1 || {
 }
 
 # Prefer the identity reported by the running platform over stale values left in
-# the environment file after a prior deploy command exits.
-if runtime_health="$(curl -fsS --max-time 5 "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null)"; then
+# the environment file after a prior deploy command exits. The container
+# environment is a fallback for a temporarily unavailable health endpoint.
+MANIFEST_IDENTITY_SOURCE="environment_fallback"
+if command -v curl >/dev/null 2>&1 && \
+   runtime_health="$(curl -fsS --max-time 5 "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null)"; then
   runtime_git_commit="$(printf '%s' "$runtime_health" | sed -n 's/.*"gitCommit":"\([^"]*\)".*/\1/p')"
   runtime_image_version="$(printf '%s' "$runtime_health" | sed -n 's/.*"imageVersion":"\([^"]*\)".*/\1/p')"
   runtime_configuration_version="$(printf '%s' "$runtime_health" | sed -n 's/.*"configurationVersion":"\([^"]*\)".*/\1/p')"
-  if [ -n "$runtime_git_commit" ]; then APP_GIT_COMMIT="$runtime_git_commit"; fi
-  if [ -n "$runtime_image_version" ]; then APP_IMAGE_VERSION="$runtime_image_version"; fi
-  if [ -n "$runtime_configuration_version" ]; then APP_CONFIGURATION_VERSION="$runtime_configuration_version"; fi
+  if [ -n "$runtime_git_commit" ] && [ -n "$runtime_image_version" ]; then
+    APP_GIT_COMMIT="$runtime_git_commit"
+    APP_IMAGE_VERSION="$runtime_image_version"
+    APP_CONFIGURATION_VERSION="${runtime_configuration_version:-unknown}"
+    MANIFEST_IDENTITY_SOURCE="runtime_health"
+  fi
+fi
+
+if [ "$MANIFEST_IDENTITY_SOURCE" = "environment_fallback" ] && \
+   command -v docker >/dev/null 2>&1; then
+  platform_container_id="$(
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -a -q platform 2>/dev/null || true
+  )"
+  if [ -n "$platform_container_id" ]; then
+    container_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$platform_container_id" 2>/dev/null || true)"
+    container_git_commit="$(printf '%s\n' "$container_env" | sed -n 's/^APP_GIT_COMMIT=//p' | tail -n 1)"
+    container_image_version="$(printf '%s\n' "$container_env" | sed -n 's/^APP_IMAGE_VERSION=//p' | tail -n 1)"
+    container_configuration_version="$(printf '%s\n' "$container_env" | sed -n 's/^APP_CONFIGURATION_VERSION=//p' | tail -n 1)"
+    if [ -n "$container_git_commit" ] && [ -n "$container_image_version" ]; then
+      APP_GIT_COMMIT="$container_git_commit"
+      APP_IMAGE_VERSION="$container_image_version"
+      APP_CONFIGURATION_VERSION="${container_configuration_version:-unknown}"
+      MANIFEST_IDENTITY_SOURCE="running_platform_container"
+    fi
+  fi
 fi
 
 umask 077
@@ -87,6 +112,7 @@ fi
 cat > "$WORKING_DESTINATION/manifest.txt" <<EOF
 backup_format_version=2
 created_at_utc=$STAMP
+identity_source=$MANIFEST_IDENTITY_SOURCE
 app_git_commit=${APP_GIT_COMMIT:-unknown}
 app_image_version=${APP_IMAGE_VERSION:-unknown}
 configuration_version=${APP_CONFIGURATION_VERSION:-unknown}
@@ -114,3 +140,4 @@ find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d \
   -name '????????T??????Z' -mtime "+$BACKUP_RETENTION_DAYS" -exec rm -rf {} +
 
 echo "Production backup created: $DESTINATION"
+echo "Backup checksums: $DESTINATION/checksums.sha256"

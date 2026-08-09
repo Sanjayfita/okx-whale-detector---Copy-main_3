@@ -20,21 +20,37 @@ set -a
 set +a
 
 : "${PLATFORM_IMAGE_NAME:=okx-whale-detector}"
-if ! docker image inspect "$PLATFORM_IMAGE_NAME:$IMAGE_VERSION" >/dev/null 2>&1; then
-  echo "Rollback image is not available locally: $PLATFORM_IMAGE_NAME:$IMAGE_VERSION" >&2
+IMAGE_REF="$PLATFORM_IMAGE_NAME:$IMAGE_VERSION"
+if ! docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+  echo "Rollback image is not available locally: $IMAGE_REF" >&2
+  exit 1
+fi
+
+# Compose injects deployment identity at container start, so a rollback must
+# recover the Git SHA baked into the selected image rather than reuse metadata
+# from the current checkout/.env.production. Refuse an image without trustworthy
+# identity so future paper trades cannot be attributed to the wrong code.
+ROLLBACK_GIT_COMMIT="$(
+  docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE_REF" |
+    sed -n 's/^APP_GIT_COMMIT=//p' |
+    tail -n 1
+)"
+if [ -z "$ROLLBACK_GIT_COMMIT" ] || [ "$ROLLBACK_GIT_COMMIT" = "unknown" ]; then
+  echo "Rollback image does not contain a trustworthy APP_GIT_COMMIT; refusing rollback: $IMAGE_REF" >&2
   exit 1
 fi
 
 IMAGE_GIT_COMMIT="$(docker image inspect \
   --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
   "$PLATFORM_IMAGE_NAME:$IMAGE_VERSION")"
-if [ -z "$IMAGE_GIT_COMMIT" ] || [ "$IMAGE_GIT_COMMIT" = "<no value>" ] ||
-   [ "$IMAGE_GIT_COMMIT" = "unknown" ]; then
-  IMAGE_GIT_COMMIT="${ROLLBACK_GIT_COMMIT:-}"
-fi
-if [ -z "$IMAGE_GIT_COMMIT" ]; then
-  echo "Rollback image has no Git revision label. Set ROLLBACK_GIT_COMMIT to its verified commit." >&2
+if [ -n "$IMAGE_GIT_COMMIT" ] && [ "$IMAGE_GIT_COMMIT" != "<no value>" ] && \
+   [ "$IMAGE_GIT_COMMIT" != "unknown" ] && [ "$IMAGE_GIT_COMMIT" != "$ROLLBACK_GIT_COMMIT" ]; then
+  echo "Rollback image identity mismatch between OCI label and baked environment: $IMAGE_REF" >&2
   exit 1
+fi
+if [ -z "$IMAGE_GIT_COMMIT" ] || [ "$IMAGE_GIT_COMMIT" = "<no value>" ] || \
+   [ "$IMAGE_GIT_COMMIT" = "unknown" ]; then
+  IMAGE_GIT_COMMIT="$ROLLBACK_GIT_COMMIT"
 fi
 
 if [ ! -f "$PLATFORM_DATA_DIR/platform/paper-state.json" ]; then
@@ -51,7 +67,7 @@ attempts=0
 until ENV_FILE="$ENV_FILE" sh ops/check-production-health.sh >/dev/null 2>&1; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 45 ]; then
-    echo "Rollback image failed health check" >&2
+    echo "Rollback image failed the production health gate" >&2
     exit 1
   fi
   sleep 2

@@ -47,12 +47,18 @@ ENV_FILE="$ENV_FILE" BACKUP_DIR="$BACKUP_DIR" SKIP_DATABASE_BACKUP=1 \
 
 BACKUP_SOURCE="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 [ -n "$BACKUP_SOURCE" ]
+[ -f "$BACKUP_SOURCE/checksums.sha256" ]
+(cd "$BACKUP_SOURCE" && sha256sum -c checksums.sha256 >/dev/null)
+grep -q '^identity_source=environment_fallback$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^app_git_commit=test-commit$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^app_image_version=test-image$' "$BACKUP_SOURCE/manifest.txt"
+grep -q '^configuration_version=test-config$' "$BACKUP_SOURCE/manifest.txt"
 
 TAMPERED_SOURCE="$TEMP_ROOT/tampered-backup"
 cp -R "$BACKUP_SOURCE" "$TAMPERED_SOURCE"
 echo '{"tampered":true}' > "$TAMPERED_SOURCE/paper-state.json"
 if ENV_FILE="$ENV_FILE" SKIP_CONTAINER_CONTROL=1 SKIP_PRE_RESTORE_BACKUP=1 \
-  sh "$ROOT/ops/restore-production.sh" "$TAMPERED_SOURCE"; then
+  sh "$ROOT/ops/restore-production.sh" "$TAMPERED_SOURCE" >/dev/null 2>&1; then
   echo "Restore unexpectedly accepted a tampered backup" >&2
   exit 1
 fi
@@ -62,12 +68,13 @@ SECRET_SOURCE="$TEMP_ROOT/secret-backup"
 cp -R "$BACKUP_SOURCE" "$SECRET_SOURCE"
 echo 'DO_NOT_UPLOAD=true' > "$SECRET_SOURCE/.env.production"
 if ENV_FILE="$ENV_FILE" SKIP_CONTAINER_CONTROL=1 SKIP_PRE_RESTORE_BACKUP=1 \
-  sh "$ROOT/ops/restore-production.sh" "$SECRET_SOURCE"; then
+  sh "$ROOT/ops/restore-production.sh" "$SECRET_SOURCE" >/dev/null 2>&1; then
   echo "Restore unexpectedly accepted a backup containing secrets" >&2
   exit 1
 fi
 [ "$(cat "$DATA_DIR/platform/paper-state.json")" = "$expected_paper" ]
 
+# Prove the valid backup can restore the account/context files after corruption.
 echo '{"corrupted":true}' > "$DATA_DIR/platform/paper-state.json"
 echo '{"corrupted":true}' > "$DATA_DIR/platform/trade-contexts.json"
 echo '{"corrupted":true}' > "$DATA_DIR/platform/settings.json"

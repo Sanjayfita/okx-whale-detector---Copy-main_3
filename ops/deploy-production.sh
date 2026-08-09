@@ -51,7 +51,7 @@ attempts=0
 until ENV_FILE="$ENV_FILE" sh ops/check-production-health.sh >/dev/null 2>&1; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 45 ]; then
-    echo "Deployment failed health check" >&2
+    echo "Deployment failed the production health gate" >&2
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=200 platform >&2 || true
     exit 1
   fi
@@ -73,7 +73,7 @@ fi
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
 ENV_FILE="$ENV_FILE" sh ops/check-production-health.sh
 
-echo "Deployment healthy."
+echo "Deployment passed the production health gate."
 echo "git_commit=$GIT_COMMIT"
 echo "image_version=$IMAGE_VERSION"
 echo "Dashboard is not public. From your PC use:"

@@ -128,7 +128,7 @@ if [ "${SKIP_CONTAINER_CONTROL:-0}" != "1" ]; then
   until ENV_FILE="$ENV_FILE" sh ops/check-production-health.sh >/dev/null 2>&1; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 30 ]; then
-      echo "Platform did not become healthy after restore" >&2
+      echo "Platform failed the production health gate after restore" >&2
       exit 1
     fi
     sleep 2
