@@ -3,7 +3,7 @@ import type {
   OKXCandleConnectionStatus,
 } from '../clients/okx/OKXCandleWebSocketClient';
 import type { TradingTimeframe } from '../config/tradingTimeframes';
-import type { MarketState } from '../core/MarketState';
+import type { ExecutionMarketState } from './TradingPlatformEngine';
 
 export interface CandleTimeframeController {
   setTimeframe(timeframe: TradingTimeframe): void;
@@ -13,13 +13,13 @@ export interface CandleTimeframeController {
 }
 
 /**
- * Optional observer boundary between the existing OKX runtime and the platform.
- * The timeframe preparation hook lets the platform rebuild native OKX history
- * before live candle subscriptions begin, without moving exchange connectivity
- * into the dashboard layer.
+ * Optional observer boundary between OKX market-data runtimes and the platform.
+ * The execution-market state deliberately exposes only instrument metadata and
+ * an order-book manager, so lean paper trading does not need to instantiate the
+ * whale/research MarketState graph.
  */
 export interface TradingPlatformObserver {
-  onOrderBook(instrumentId: string, state: MarketState): void;
+  onOrderBook(instrumentId: string, state: ExecutionMarketState): void;
   onCandle(candle: OKXCandle): void;
   prepareCandleRuntime?(input: {
     readonly symbols: readonly string[];
