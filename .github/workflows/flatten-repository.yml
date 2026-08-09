@@ -1,22 +1,27 @@
 name: One-time repository flatten
 
 on:
-  pull_request:
+  push:
+    branches:
+      - agent/trading-platform-foundation
+    paths:
+      - .github/workflows/flatten-repository.yml
 
 permissions:
   contents: write
 
 jobs:
   flatten:
+    if: github.event.head_commit.message == 'chore(repo): run verified one-shot flatten'
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
     steps:
-      - name: Check out PR head branch
+      - name: Check out branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: agent/trading-platform-foundation
 
       - name: Flatten tracked project files into repository root
         shell: bash
@@ -61,43 +66,12 @@ jobs:
             git mv -- "$file" "$destination"
           done < <(git ls-files -z "$inner/")
 
-          # git moves files but leaves empty source directories on disk. Refuse to
-          # remove the old tree if any file/symlink remains, then delete empties.
           if find "$inner" \( -type f -o -type l \) -print -quit | grep -q .; then
             echo 'Unexpected file remains in nested project after tracked moves:' >&2
             find "$inner" \( -type f -o -type l \) -print >&2
             exit 1
           fi
           find "$inner" -depth -type d -empty -delete
-
-          # Update the root CI workflow now that package.json and the project live
-          # directly at repository root.
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = '.github/workflows/ci.yml';
-          let text = fs.readFileSync(path, 'utf8');
-          const defaults =
-            '    defaults:\n' +
-            '      run:\n' +
-            '        working-directory: okx-whale-detector---Copy-main\n\n';
-          if (!text.includes(defaults)) {
-            throw new Error('Expected nested CI working-directory block was not found');
-          }
-          text = text.replace(defaults, '');
-          const oldCache =
-            '          cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json';
-          if (!text.includes(oldCache)) {
-            throw new Error('Expected nested npm cache path was not found');
-          }
-          text = text.replace(
-            oldCache,
-            '          cache-dependency-path: package-lock.json',
-          );
-          fs.writeFileSync(path, text);
-          NODE
-
-          # The one-time workflow removes itself from the final repository state.
-          git rm -- '.github/workflows/flatten-repository.yml'
 
           test -f package.json
           test -f package-lock.json
@@ -112,17 +86,28 @@ jobs:
           test -d ops
           test ! -e "$inner"
 
-          if git grep -n 'working-directory: okx-whale-detector---Copy-main' -- .github ':!*.md'; then
-            echo 'Obsolete nested CI working directory remains' >&2
+          if git ls-files | grep -q '^okx-whale-detector---Copy-main/'; then
+            echo 'Tracked files remain under the old nested project path.' >&2
+            git ls-files | grep '^okx-whale-detector---Copy-main/' >&2
             exit 1
           fi
-          if git grep -n 'cache-dependency-path: okx-whale-detector---Copy-main/package-lock.json' -- .github ':!*.md'; then
-            echo 'Obsolete nested npm cache path remains' >&2
+          if git ls-files | grep -Fq 'tash drop stash@{0}'; then
+            echo 'Accidental stash-command file is still tracked.' >&2
             exit 1
           fi
 
+          readme_count=$(git ls-files | awk 'tolower($0)=="readme.md" {count++} END {print count+0}')
+          test "$readme_count" -eq 1
+
           echo 'Flattened tree prepared:'
           git status --short
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -153,13 +138,17 @@ jobs:
           sh -n ops/verify-backup-restore.sh
           sh ops/verify-backup-restore.sh
 
-      - name: Commit and push flattened repository
+      - name: Commit and push flattened application tree
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add -A ':!.github/workflows'
           git diff --cached --check
-          git commit -m 'chore(repo): flatten project to repository root [flatten-done]'
+          if git diff --cached --name-only | grep -q '^\.github/workflows/'; then
+            echo 'Refusing to push workflow-file changes from the one-shot token.' >&2
+            exit 1
+          fi
+          git commit -m 'refactor(repo): flatten application to repository root'
           git push origin HEAD:agent/trading-platform-foundation
