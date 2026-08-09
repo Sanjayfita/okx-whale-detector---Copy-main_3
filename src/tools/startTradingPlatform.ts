@@ -94,14 +94,6 @@ export const startTradingPlatform = async (
   );
   console.log(`Research runtime: ${withResearch ? 'enabled' : 'disabled'}`);
 
-  const memoryReporter = startProcessMemoryReporter({
-    intervalMs: parsePositiveNumber(
-      environment.PROCESS_MEMORY_REPORT_INTERVAL_MS,
-      60_000,
-      'PROCESS_MEMORY_REPORT_INTERVAL_MS',
-    ),
-  });
-
   const platform = new TradingPlatformApplication({
     mode: safety.mode,
     startingEquity: parsePositiveNumber(
@@ -131,6 +123,15 @@ export const startTradingPlatform = async (
       staticDirectory: environment.DASHBOARD_STATIC_DIR?.trim() || 'web',
     },
     environment,
+  });
+
+  const memoryReporter = startProcessMemoryReporter({
+    intervalMs: parsePositiveNumber(
+      environment.PROCESS_MEMORY_REPORT_INTERVAL_MS,
+      60_000,
+      'PROCESS_MEMORY_REPORT_INTERVAL_MS',
+    ),
+    additionalMetrics: () => platform.engine.getExecutionBookMetrics(),
   });
 
   await platform.start();
