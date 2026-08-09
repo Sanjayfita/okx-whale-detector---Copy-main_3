@@ -48,6 +48,7 @@ export interface PaperAccountReconciliationReport {
 }
 
 type SnapshotSubscriber = (snapshot: TradingPlatformSnapshot) => void;
+type InvalidationSubscriber = () => void;
 
 const defaultSettings = (mode: PlatformMode): DashboardSettings => ({
   mode,
@@ -103,6 +104,7 @@ export class PlatformStateStore {
   private readonly status = new Map<string, DashboardStrategyStatus>();
   private readonly logs: DashboardLogEntry[] = [];
   private readonly subscribers = new Set<SnapshotSubscriber>();
+  private readonly invalidationSubscribers = new Set<InvalidationSubscriber>();
   private readonly lastConfirmedCandleByInstrument = new Map<string, number>();
   private readonly paperStateRepository?: PaperStateRepository;
   private restoredRecoveryContext: PaperRecoveryContext | null = null;
@@ -366,6 +368,11 @@ export class PlatformStateStore {
     return () => this.subscribers.delete(subscriber);
   }
 
+  public subscribeInvalidation(subscriber: InvalidationSubscriber): () => void {
+    this.invalidationSubscribers.add(subscriber);
+    return () => this.invalidationSubscribers.delete(subscriber);
+  }
+
   public snapshot(timestamp = this.now()): TradingPlatformSnapshot {
     const account = this.account.snapshot(timestamp);
     const riskStatus = this.riskManager.getStatus();
@@ -471,6 +478,7 @@ export class PlatformStateStore {
   }
 
   private publish(): void {
+    for (const subscriber of this.invalidationSubscribers) subscriber();
     if (this.subscribers.size === 0) return;
     const snapshot = this.snapshot();
     for (const subscriber of this.subscribers) subscriber(snapshot);
