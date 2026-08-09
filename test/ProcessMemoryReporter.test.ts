@@ -19,6 +19,30 @@ describe('processMemoryReporter', () => {
     );
   });
 
+  it('reports immediately with optional bounded execution metrics', () => {
+    const messages: string[] = [];
+    const reporter = startProcessMemoryReporter({
+      intervalMs: 60_000,
+      readMemoryUsage: () => ({
+        rss: 1,
+        heapTotal: 2,
+        heapUsed: 1,
+        external: 0,
+        arrayBuffers: 0,
+      }),
+      additionalMetrics: () => ({
+        orderBookUpdates: 250_000,
+        executionBookMaterializations: 1,
+      }),
+      log: (message) => messages.push(message),
+    });
+    reporter.stop();
+
+    expect(messages).toEqual([
+      '[MEMORY] rss=0.0MB heapUsed=0.0MB heapTotal=0.0MB external=0.0MB arrayBuffers=0.0MB orderBookUpdates=250000 executionBookMaterializations=1',
+    ]);
+  });
+
   it('reports immediately and rejects invalid intervals', () => {
     const messages: string[] = [];
     const reporter = startProcessMemoryReporter({
