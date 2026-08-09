@@ -16,6 +16,8 @@ FROM node:24-bookworm-slim AS runtime
 ARG APP_GIT_COMMIT
 ARG APP_IMAGE_VERSION
 WORKDIR /app
+LABEL org.opencontainers.image.revision=${APP_GIT_COMMIT}
+LABEL org.opencontainers.image.version=${APP_IMAGE_VERSION}
 ENV NODE_ENV=production
 ENV DASHBOARD_HOST=0.0.0.0
 ENV DASHBOARD_PORT=4173

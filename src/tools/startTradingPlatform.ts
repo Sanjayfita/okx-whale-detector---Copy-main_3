@@ -20,6 +20,40 @@ const parseBoolean = (value: string | undefined, fallback = false): boolean => {
   throw new Error(`invalid boolean value ${value}`);
 };
 
+export interface TradingPlatformStartupSafety {
+  readonly mode: PlatformMode;
+  readonly remotePaperOnly: boolean;
+}
+
+/**
+ * Production paper trading must remain safe even when the image is invoked
+ * without the repository's Compose file. Development keeps the existing
+ * monitoring-only LIVE selector, which still has no order execution adapter.
+ */
+export const resolveTradingPlatformStartupSafety = (
+  environment: NodeJS.ProcessEnv,
+): TradingPlatformStartupSafety => {
+  const remotePaperOnly = parseBoolean(environment.REMOTE_PAPER_ONLY, false);
+  const production = environment.NODE_ENV?.trim().toLowerCase() === 'production';
+  const requestedMode = parseMode(environment.TRADING_MODE);
+
+  if (production && !remotePaperOnly) {
+    throw new Error(
+      'Production startup requires REMOTE_PAPER_ONLY=true; refusing to start',
+    );
+  }
+  if (remotePaperOnly && requestedMode !== 'PAPER') {
+    throw new Error(
+      'REMOTE_PAPER_ONLY=true is incompatible with TRADING_MODE=LIVE',
+    );
+  }
+
+  return {
+    mode: remotePaperOnly ? 'PAPER' : requestedMode,
+    remotePaperOnly,
+  };
+};
+
 const parsePositiveNumber = (
   value: string | undefined,
   fallback: number,
@@ -36,7 +70,7 @@ const parsePositiveNumber = (
 export const startTradingPlatform = async (
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<void> => {
-  const remotePaperOnly = parseBoolean(environment.REMOTE_PAPER_ONLY, false);
+  const safety = resolveTradingPlatformStartupSafety(environment);
   const dataDirectory = environment.PLATFORM_DATA_DIR?.trim() || 'data';
   const paperStatePath =
     environment.PAPER_STATE_PATH?.trim() ||
@@ -49,7 +83,7 @@ export const startTradingPlatform = async (
   });
 
   const platform = new TradingPlatformApplication({
-    mode: remotePaperOnly ? 'PAPER' : parseMode(environment.TRADING_MODE),
+    mode: safety.mode,
     startingEquity: parsePositiveNumber(
       environment.PAPER_STARTING_EQUITY,
       10_000,
@@ -70,7 +104,7 @@ export const startTradingPlatform = async (
       'PLATFORM_HEALTH_CHECK_INTERVAL_MS',
     ),
     dataDirectory,
-    remotePaperOnly,
+    remotePaperOnly: safety.remotePaperOnly,
     server: {
       host: environment.DASHBOARD_HOST?.trim() || '0.0.0.0',
       port: parsePositiveNumber(environment.DASHBOARD_PORT, 4173, 'DASHBOARD_PORT'),

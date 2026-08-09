@@ -48,12 +48,18 @@ restart_platform_if_allowed() {
 healthy_pass=1
 health_body=''
 if health_body=$(curl -sS --max-time 10 "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null); then
-  if printf '%s' "$health_body" | grep -q '"application":"FAILED"'; then
+  if ! printf '%s' "$health_body" | grep -q '"liveExecutionAllowed":false'; then
+    healthy_pass=0
+    alert "Platform health response did not prove that live execution is disabled."
+  elif printf '%s' "$health_body" | grep -q '"application":"FAILED"'; then
     healthy_pass=0
     alert "Platform reports FAILED health. Inspect persistence/paper-engine status before restarting."
   elif printf '%s' "$health_body" | grep -q '"application":"DEGRADED"'; then
     healthy_pass=0
     alert "Platform reports DEGRADED health. Inspect OKX connectivity, stale market data, risk state, and disk status."
+  elif ! printf '%s' "$health_body" | grep -q '"application":"RUNNING"'; then
+    healthy_pass=0
+    alert "Platform returned an unrecognized health response."
   fi
 else
   healthy_pass=0
