@@ -98,15 +98,20 @@ if [ "${SKIP_CONTAINER_CONTROL:-0}" != "1" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d platform
 
   attempts=0
-  until curl -fsS "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" >/dev/null; do
+  health_body=""
+  until health_body="$(curl -fsS "http://127.0.0.1:${DASHBOARD_PORT:-4173}/api/health" 2>/dev/null)" && \
+    printf '%s' "$health_body" | grep -q '"application":"RUNNING"'; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 30 ]; then
-      echo "Platform did not become healthy after restore" >&2
+      echo "Platform did not reach application=RUNNING after restore" >&2
+      if [ -n "$health_body" ]; then
+        echo "Last health response: $health_body" >&2
+      fi
       exit 1
     fi
     sleep 2
   done
-  echo "Restore procedure completed and platform health endpoint recovered from: $SOURCE"
+  echo "Restore procedure completed and platform reached application=RUNNING from: $SOURCE"
 else
   echo "Restore file copy completed in test mode from: $SOURCE"
 fi
