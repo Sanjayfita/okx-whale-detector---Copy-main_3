@@ -21,7 +21,7 @@ mkdir -p "$DATA_DIR/platform"
 
 cleanup() {
   docker compose -p "$PROJECT_NAME" --env-file "$ENV_FILE" \
-    -f docker-compose.production.yml down --remove-orphans >/dev/null 2>&1 || true
+    -f docker-compose.production.yml down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$TEMP_ROOT"
 }
 trap cleanup EXIT INT TERM
@@ -157,5 +157,40 @@ case "$database_data_mount" in
     ;;
 esac
 
-echo "Production container configuration verification passed."
-echo "This proves Compose/container configuration only; it is not real VPS lifecycle acceptance."
+# Exercise the actual production Compose database and migration services without
+# starting the market-data platform. This catches production wiring failures
+# while avoiding any claim that CI simulates the real OKX/VPS lifecycle.
+docker compose -p "$PROJECT_NAME" --env-file "$ENV_FILE" \
+  -f docker-compose.production.yml up -d database >/dev/null
+attempts=0
+until [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$database_id")" = "healthy" ]; do
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge 30 ]; then
+    echo "Production PostgreSQL service did not become healthy" >&2
+    docker compose -p "$PROJECT_NAME" --env-file "$ENV_FILE" \
+      -f docker-compose.production.yml logs database >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+
+docker compose -p "$PROJECT_NAME" --env-file "$ENV_FILE" \
+  -f docker-compose.production.yml run --rm migrations >/dev/null
+migration_count="$(
+  docker compose -p "$PROJECT_NAME" --env-file "$ENV_FILE" \
+    -f docker-compose.production.yml exec -T database \
+    psql -U paperapp -d research -Atc 'SELECT count(*) FROM research.schema_migrations;'
+)"
+case "$migration_count" in
+  ''|*[!0-9]*)
+    echo "Could not verify production migrations" >&2
+    exit 1
+    ;;
+esac
+if [ "$migration_count" -le 0 ]; then
+  echo "Production migrations recorded no schema versions" >&2
+  exit 1
+fi
+
+echo "Production container configuration and database/migration verification passed."
+echo "This proves Compose/container/database configuration only; it is not real VPS lifecycle acceptance."
