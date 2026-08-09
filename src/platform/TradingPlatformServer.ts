@@ -13,6 +13,7 @@ import type { PlatformHealthSnapshot } from './PlatformHealth';
 import type {
   DashboardSettings,
   PlatformLogLevel,
+  TradingPlatformSnapshot,
 } from './PlatformContracts';
 import { PlatformSettingsRepository } from './PlatformSettingsRepository';
 import { PlatformStateStore } from './PlatformStateStore';
@@ -25,10 +26,21 @@ export interface TradingPlatformServerOptions {
   readonly settingsRepository?: PlatformSettingsRepository;
   readonly healthProvider?: () => PlatformHealthSnapshot;
   readonly allowLiveMonitoringMode?: boolean;
+  readonly snapshotBroadcastIntervalMs?: number;
+  readonly maximumClientBufferedBytes?: number;
   readonly onSettingsChanged?: (
     previous: DashboardSettings,
     next: DashboardSettings,
   ) => Promise<void> | void;
+}
+
+export interface DashboardSnapshotTransportMetrics {
+  readonly snapshotInvalidations: number;
+  readonly snapshotBroadcasts: number;
+  readonly snapshotBackpressureSkips: number;
+  readonly dashboardClients: number;
+  readonly dashboardBufferedBytes: number;
+  readonly lastSnapshotPayloadBytes: number;
 }
 
 type MutableSettingsPatch = {
@@ -43,6 +55,9 @@ const contentTypes: Readonly<Record<string, string>> = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
 };
+
+const DEFAULT_SNAPSHOT_BROADCAST_INTERVAL_MS = 1_000;
+const DEFAULT_MAXIMUM_CLIENT_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 const sendJson = (
   response: ServerResponse,
@@ -145,10 +160,18 @@ export class TradingPlatformServer {
   private readonly onSettingsChanged?: TradingPlatformServerOptions['onSettingsChanged'];
   private readonly healthProvider?: TradingPlatformServerOptions['healthProvider'];
   private readonly allowLiveMonitoringMode: boolean;
+  private readonly snapshotBroadcastIntervalMs: number;
+  private readonly maximumClientBufferedBytes: number;
   private readonly websocket = new WebSocketServer({ noServer: true });
   private server: Server | null = null;
   private unsubscribe?: () => void;
   private settingsLoaded = false;
+  private pendingSnapshot: TradingPlatformSnapshot | null = null;
+  private snapshotBroadcastTimer: NodeJS.Timeout | null = null;
+  private snapshotInvalidations = 0;
+  private snapshotBroadcasts = 0;
+  private snapshotBackpressureSkips = 0;
+  private lastSnapshotPayloadBytes = 0;
 
   public constructor(
     private readonly store: PlatformStateStore,
@@ -163,8 +186,24 @@ export class TradingPlatformServer {
     this.onSettingsChanged = options.onSettingsChanged;
     this.healthProvider = options.healthProvider;
     this.allowLiveMonitoringMode = options.allowLiveMonitoringMode ?? true;
+    this.snapshotBroadcastIntervalMs =
+      options.snapshotBroadcastIntervalMs ?? DEFAULT_SNAPSHOT_BROADCAST_INTERVAL_MS;
+    this.maximumClientBufferedBytes =
+      options.maximumClientBufferedBytes ?? DEFAULT_MAXIMUM_CLIENT_BUFFERED_BYTES;
     if (!Number.isSafeInteger(this.port) || this.port < 0 || this.port > 65_535) {
       throw new Error('dashboard port must be between 0 and 65535');
+    }
+    if (
+      !Number.isSafeInteger(this.snapshotBroadcastIntervalMs) ||
+      this.snapshotBroadcastIntervalMs <= 0
+    ) {
+      throw new Error('snapshotBroadcastIntervalMs must be a positive safe integer');
+    }
+    if (
+      !Number.isSafeInteger(this.maximumClientBufferedBytes) ||
+      this.maximumClientBufferedBytes <= 0
+    ) {
+      throw new Error('maximumClientBufferedBytes must be a positive safe integer');
     }
   }
 
@@ -206,13 +245,13 @@ export class TradingPlatformServer {
       });
     });
     this.websocket.on('connection', (client) => {
-      client.send(JSON.stringify({ type: 'snapshot', data: this.store.snapshot() }));
+      const payload = this.serializeSnapshot(this.store.snapshot());
+      client.send(payload);
     });
     this.unsubscribe = this.store.subscribe((snapshot) => {
-      const payload = JSON.stringify({ type: 'snapshot', data: snapshot });
-      for (const client of this.websocket.clients) {
-        if (client.readyState === WebSocket.OPEN) client.send(payload);
-      }
+      this.snapshotInvalidations += 1;
+      this.pendingSnapshot = snapshot;
+      this.scheduleSnapshotBroadcast();
     });
 
     await new Promise<void>((resolvePromise, reject) => {
@@ -232,6 +271,11 @@ export class TradingPlatformServer {
   public async close(): Promise<void> {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    if (this.snapshotBroadcastTimer !== null) {
+      clearTimeout(this.snapshotBroadcastTimer);
+      this.snapshotBroadcastTimer = null;
+    }
+    this.pendingSnapshot = null;
     for (const client of this.websocket.clients) client.close();
     this.websocket.close();
     const server = this.server;
@@ -249,11 +293,78 @@ export class TradingPlatformServer {
     return `http://${publicHost}:${this.getBoundPort()}`;
   }
 
+  public getSnapshotTransportMetrics(): DashboardSnapshotTransportMetrics {
+    let dashboardClients = 0;
+    let dashboardBufferedBytes = 0;
+    for (const client of this.websocket.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      dashboardClients += 1;
+      dashboardBufferedBytes += client.bufferedAmount;
+    }
+    return {
+      snapshotInvalidations: this.snapshotInvalidations,
+      snapshotBroadcasts: this.snapshotBroadcasts,
+      snapshotBackpressureSkips: this.snapshotBackpressureSkips,
+      dashboardClients,
+      dashboardBufferedBytes,
+      lastSnapshotPayloadBytes: this.lastSnapshotPayloadBytes,
+    };
+  }
+
   private getBoundPort(): number {
     const address = this.server?.address();
     return typeof address === 'object' && address !== null
       ? (address as AddressInfo).port
       : this.port;
+  }
+
+  private serializeSnapshot(snapshot: TradingPlatformSnapshot): string {
+    const payload = JSON.stringify({ type: 'snapshot', data: snapshot });
+    this.lastSnapshotPayloadBytes = Buffer.byteLength(payload, 'utf8');
+    return payload;
+  }
+
+  private scheduleSnapshotBroadcast(): void {
+    if (this.snapshotBroadcastTimer !== null) return;
+    this.snapshotBroadcastTimer = setTimeout(() => {
+      this.snapshotBroadcastTimer = null;
+      this.flushPendingSnapshot();
+    }, this.snapshotBroadcastIntervalMs);
+    this.snapshotBroadcastTimer.unref();
+  }
+
+  private flushPendingSnapshot(): void {
+    const snapshot = this.pendingSnapshot;
+    this.pendingSnapshot = null;
+    if (snapshot === null) return;
+
+    const clients = [...this.websocket.clients].filter(
+      (client) => client.readyState === WebSocket.OPEN,
+    );
+    if (clients.length === 0) return;
+
+    const payload = this.serializeSnapshot(snapshot);
+    const payloadBytes = this.lastSnapshotPayloadBytes;
+    let sent = false;
+
+    for (const client of clients) {
+      const queueLimit = Math.max(this.maximumClientBufferedBytes, payloadBytes);
+      if (
+        client.bufferedAmount > 0 &&
+        client.bufferedAmount + payloadBytes > queueLimit
+      ) {
+        this.snapshotBackpressureSkips += 1;
+        continue;
+      }
+      try {
+        client.send(payload);
+        sent = true;
+      } catch {
+        client.terminate();
+      }
+    }
+
+    if (sent) this.snapshotBroadcasts += 1;
   }
 
   private async handleRequest(
