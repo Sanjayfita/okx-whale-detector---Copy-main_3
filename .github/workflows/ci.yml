@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Type-check, lint, and test
         run: npm run check
 
@@ -78,11 +81,18 @@ jobs:
       - name: Validate production operations scripts
         run: |
           sh -n ops/backup-production.sh
+          sh -n ops/check-production-health.sh
+          sh -n ops/capture-acceptance-evidence.sh
           sh -n ops/restore-production.sh
           sh -n ops/watchdog.sh
           sh -n ops/preflight-production.sh
           sh -n ops/measure-resources.sh
           sh -n ops/deploy-production.sh
           sh -n ops/rollback-production.sh
+          sh -n ops/upload-offsite-backup.sh
           sh -n ops/verify-backup-restore.sh
+          sh -n ops/verify-database-backup-restore.sh
           sh ops/verify-backup-restore.sh
+
+      - name: Verify PostgreSQL backup and disposable restore
+        run: sh ops/verify-database-backup-restore.sh
