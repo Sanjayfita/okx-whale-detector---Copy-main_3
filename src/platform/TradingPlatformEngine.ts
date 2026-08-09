@@ -1,7 +1,6 @@
 import {
   estimateLinearLiquidationPrice,
   simulateMarketOrder,
-  type ExecutionOrderBook,
 } from '../backtest/ExecutionSimulator';
 import type { OKXCandle } from '../clients/okx/OKXCandleWebSocketClient';
 import type { TradingTimeframe } from '../config/tradingTimeframes';
@@ -17,6 +16,10 @@ import type {
 } from '../strategy/EmaTrendStrategy';
 import type { StrategySignalResult } from '../strategies/TradingStrategy';
 import type { MarketInstrumentConfig } from '../types/instrument';
+import {
+  LazyExecutionBookStore,
+  type ExecutionBookMaterializationMetrics,
+} from './LazyExecutionBookStore';
 import type {
   DashboardStrategyStatus,
   DashboardStrategyTelemetry,
@@ -68,23 +71,6 @@ const emptyStrategyTelemetry = (): MutableStrategyTelemetry => ({
   positionAlreadyOpen: 0,
   entryReady: 0,
 });
-
-const toExecutionBook = (state: ExecutionMarketState): ExecutionOrderBook | null => {
-  if (!state.orderBookManager.isUsableForSignals()) return null;
-  const book = state.orderBookManager.getOrderBook();
-  const baseUnitsPerSize = state.instrument.baseUnitsPerSize;
-  return {
-    observedAt: book.updatedAt,
-    bids: [...book.bids.values()].map((level) => ({
-      price: level.price,
-      quantity: level.size * baseUnitsPerSize,
-    })),
-    asks: [...book.asks.values()].map((level) => ({
-      price: level.price,
-      quantity: level.size * baseUnitsPerSize,
-    })),
-  };
-};
 
 const toEmaCandle = (candle: OKXCandle): EmaTrendCandle => ({
   timestamp: candle.timestamp,
@@ -183,7 +169,7 @@ const statusFromDecision = (
 };
 
 export class TradingPlatformEngine {
-  private readonly books = new Map<string, ExecutionOrderBook>();
+  private readonly books = new LazyExecutionBookStore();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
   private readonly executionResumeAfter = new Map<string, number>();
   private readonly strategyTelemetry = new Map<string, MutableStrategyTelemetry>();
@@ -261,10 +247,14 @@ export class TradingPlatformEngine {
     );
   }
 
+  public getExecutionBookMetrics(): ExecutionBookMaterializationMetrics {
+    return this.books.getMetrics();
+  }
+
   public onOrderBook(instrumentId: string, state: ExecutionMarketState): void {
-    const book = toExecutionBook(state);
-    if (book === null) return;
-    this.books.set(instrumentId, book);
+    this.books.observe(instrumentId, state);
+    if (!state.orderBookManager.isUsableForSignals()) return;
+
     const midpoint = state.orderBookManager.getMidPrice();
     const position = this.store.account.getOpenPosition(instrumentId);
     if (midpoint === undefined || position === undefined) return;
@@ -272,7 +262,7 @@ export class TradingPlatformEngine {
     const marked = this.store.account.markPosition({
       instrumentId,
       price: midpoint,
-      timestamp: book.observedAt,
+      timestamp: state.orderBookManager.getOrderBook().updatedAt,
     });
     this.evaluateProtectiveExit(marked);
   }
@@ -480,8 +470,9 @@ export class TradingPlatformEngine {
       });
       return;
     }
-    const executionBook = this.books.get(result.instrumentId);
-    if (executionBook === undefined) {
+
+    const observedAt = this.books.getObservedAt(result.instrumentId);
+    if (observedAt === undefined) {
       this.store.log(
         'WARNING',
         'Paper entry missed because no usable order book is available',
@@ -493,21 +484,19 @@ export class TradingPlatformEngine {
       return;
     }
 
-    const account = this.store.account.snapshot(executionBook.observedAt);
-    const realizedPnlToday = this.store.account.getRealizedPnlForDay(
-      executionBook.observedAt,
-    );
+    const account = this.store.account.snapshot(observedAt);
+    const realizedPnlToday = this.store.account.getRealizedPnlForDay(observedAt);
     const startingDayEquity = Math.max(
       Number.EPSILON,
       account.equity - realizedPnlToday - account.unrealizedPnl,
     );
     const riskDecision = this.store.riskManager.evaluateNewTrade({
-      timestamp: executionBook.observedAt,
+      timestamp: observedAt,
       startingDayEquity,
       currentEquity: account.equity,
       peakEquity: account.peakEquity,
       openPositions: account.openPositions.length,
-      tradesToday: this.store.account.getTradesForDay(executionBook.observedAt),
+      tradesToday: this.store.account.getTradesForDay(observedAt),
       realizedPnlToday,
       requestedRiskPercent: this.store.getSettings().riskPerTradePercent,
       requestedLeverage: this.paperLeverage,
@@ -517,6 +506,19 @@ export class TradingPlatformEngine {
         instrumentId: result.instrumentId,
         reasons: riskDecision.reasons.join(','),
       });
+      return;
+    }
+
+    const executionBook = this.books.get(result.instrumentId);
+    if (executionBook === undefined) {
+      this.store.log(
+        'WARNING',
+        'Paper entry missed because no usable order book is available',
+        {
+          instrumentId: result.instrumentId,
+          strategyId: result.strategyId,
+        },
+      );
       return;
     }
 
@@ -565,10 +567,14 @@ export class TradingPlatformEngine {
         recordedAt: executionBook.observedAt,
       })
     ) {
-      this.store.log('ERROR', 'Paper entry blocked because trace context was not persisted', {
-        tradeId,
-        instrumentId: result.instrumentId,
-      });
+      this.store.log(
+        'ERROR',
+        'Paper entry blocked because trace context was not persisted',
+        {
+          tradeId,
+          instrumentId: result.instrumentId,
+        },
+      );
       return;
     }
     const opened = this.store.account.openPositionFromFill({
