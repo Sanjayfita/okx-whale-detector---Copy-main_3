@@ -17,22 +17,22 @@ type StrategyStatus = {
   telemetry: StrategyTelemetry;
 };
 
-type SnapshotEnvelope = {
-  type: 'snapshot';
-  data: {
-    strategies: { id: string; active: boolean }[];
-    strategyStatus: Record<string, StrategyStatus>;
-  };
+type Snapshot = {
+  strategies: { id: string; active: boolean }[];
+  strategyStatus: Record<string, StrategyStatus>;
 };
 
-const isSnapshotEnvelope = (value: unknown): value is SnapshotEnvelope => {
+const isSnapshot = (value: unknown): value is Snapshot => {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
-  return record.type === 'snapshot' && typeof record.data === 'object' && record.data !== null;
+  return Array.isArray(record.strategies) &&
+    typeof record.strategyStatus === 'object' &&
+    record.strategyStatus !== null;
 };
 
 let latestStatus: StrategyStatus | null = null;
 let renderQueued = false;
+let polling = false;
 
 const telemetryRows = (telemetry: StrategyTelemetry): readonly [string, number][] => [
   ['Evaluations', telemetry.evaluations],
@@ -102,22 +102,35 @@ const queueRender = (): void => {
   queueMicrotask(render);
 };
 
+const refresh = async (): Promise<void> => {
+  if (polling || document.hidden) return;
+  polling = true;
+  try {
+    const response = await fetch('/api/snapshot', { cache: 'no-store' });
+    if (!response.ok) return;
+    const parsed = (await response.json()) as unknown;
+    if (!isSnapshot(parsed)) return;
+    const active = parsed.strategies.find((strategy) => strategy.active);
+    latestStatus = active === undefined ? null : parsed.strategyStatus[active.id] ?? null;
+    queueRender();
+  } catch {
+    // The main dashboard owns connection/error UX; this module is display-only.
+  } finally {
+    polling = false;
+  }
+};
+
 const app = document.querySelector('#app');
 if (app !== null) {
   const observer = new MutationObserver(queueRender);
   observer.observe(app, { childList: true, subtree: true });
 }
 
-const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-socket.addEventListener('message', (event) => {
-  try {
-    const parsed = JSON.parse(String(event.data)) as unknown;
-    if (!isSnapshotEnvelope(parsed)) return;
-    const active = parsed.data.strategies.find((strategy) => strategy.active);
-    latestStatus = active === undefined ? null : parsed.data.strategyStatus[active.id] ?? null;
-    queueRender();
-  } catch {
-    // The main dashboard owns connection/error UX; this module is display-only.
-  }
+void refresh();
+const refreshTimer = window.setInterval(() => void refresh(), 5_000);
+window.addEventListener('pagehide', () => window.clearInterval(refreshTimer), {
+  once: true,
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) void refresh();
 });
