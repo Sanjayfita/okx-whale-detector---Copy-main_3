@@ -139,6 +139,9 @@ export interface PaperAccountRestoreResult {
   readonly warnings: readonly string[];
 }
 
+const EQUITY_SAMPLE_INTERVAL_MS = 60_000;
+const MAXIMUM_EQUITY_CURVE_POINTS = 50_000;
+
 const requireTimestamp = (value: number, name: string): void => {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${name} must be a non-negative safe integer`);
@@ -199,6 +202,18 @@ const uniqueBy = <T>(
   return { values: unique, duplicates };
 };
 
+const boundEquityCurve = (
+  curve: readonly EquityPoint[],
+): readonly EquityPoint[] => {
+  if (curve.length <= MAXIMUM_EQUITY_CURVE_POINTS) return curve;
+  const first = curve[0];
+  if (first === undefined) return [];
+  return [
+    first,
+    ...curve.slice(-(MAXIMUM_EQUITY_CURVE_POINTS - 1)),
+  ];
+};
+
 /**
  * Account and journal bookkeeping for paper/shadow execution.
  *
@@ -226,7 +241,7 @@ export class PaperAccountLedger {
     this.startingEquity = startingEquity;
     this.cashBalance = startingEquity;
     this.peakEquity = startingEquity;
-    this.recordEquity(0);
+    this.recordEquity(0, true);
   }
 
   public openPosition(input: {
@@ -291,7 +306,7 @@ export class PaperAccountLedger {
     };
     this.cashBalance -= input.entryFee;
     this.positions.set(input.instrumentId, position);
-    this.recordEquity(input.openedAt);
+    this.recordEquity(input.openedAt, true);
     return position;
   }
 
@@ -450,7 +465,7 @@ export class PaperAccountLedger {
     };
     this.cashBalance += input.fundingPnl;
     this.positions.set(input.instrumentId, updated);
-    this.recordEquity(input.timestamp);
+    this.recordEquity(input.timestamp, true);
     return updated;
   }
 
@@ -559,7 +574,7 @@ export class PaperAccountLedger {
     this.cashBalance += grossPnl - input.exitFee;
     this.positions.delete(input.instrumentId);
     this.trades.push(trade);
-    this.recordEquity(input.closedAt);
+    this.recordEquity(input.closedAt, true);
     return trade;
   }
 
@@ -657,7 +672,6 @@ export class PaperAccountLedger {
 
   public snapshot(timestamp = Date.now()): PaperAccountSnapshot {
     requireTimestamp(timestamp, 'timestamp');
-    this.recordEquity(timestamp);
     const positions = [...this.positions.values()].sort((left, right) =>
       left.instrumentId.localeCompare(right.instrumentId),
     );
@@ -794,6 +808,16 @@ export class PaperAccountLedger {
     const restoredCurve = [...curveByTimestamp.values()].sort(
       (left, right) => left.timestamp - right.timestamp,
     );
+    const restoredPeakEquity = restoredCurve.reduce(
+      (peak, point) => Math.max(peak, point.equity),
+      state.startingEquity,
+    );
+    const boundedRestoredCurve = boundEquityCurve(restoredCurve);
+    if (boundedRestoredCurve.length < restoredCurve.length) {
+      warnings.push(
+        `Trimmed persisted equity curve from ${restoredCurve.length} to ${boundedRestoredCurve.length} points`,
+      );
+    }
 
     const derivedCash =
       state.startingEquity +
@@ -835,7 +859,11 @@ export class PaperAccountLedger {
     for (const event of this.fundingEvents) this.fundingIds.add(event.fundingId);
     this.ledgerEventIds.clear();
     for (const event of this.ledgerEvents) this.ledgerEventIds.add(event.eventId);
-    this.equityCurve.splice(0, this.equityCurve.length, ...restoredCurve);
+    this.equityCurve.splice(
+      0,
+      this.equityCurve.length,
+      ...boundedRestoredCurve,
+    );
 
     const currentUnrealized = restoredPositions.reduce(
       (sum, position) => sum + position.unrealizedPnl,
@@ -845,12 +873,12 @@ export class PaperAccountLedger {
     this.peakEquity = Math.max(
       state.startingEquity,
       currentEquity,
-      ...restoredCurve.map((point) => point.equity),
+      restoredPeakEquity,
     );
     if (!approximatelyEqual(this.peakEquity, state.peakEquity)) {
       warnings.push('Recalculated peak equity from persisted equity evidence');
     }
-    if (this.equityCurve.length === 0) this.recordEquity(0);
+    if (this.equityCurve.length === 0) this.recordEquity(0, true);
 
     return {
       positionsRestored: restoredPositions.length,
@@ -896,7 +924,7 @@ export class PaperAccountLedger {
     return position;
   }
 
-  private recordEquity(timestamp: number): void {
+  private recordEquity(timestamp: number, force = false): void {
     const unrealizedPnl = [...this.positions.values()].reduce(
       (sum, position) => sum + position.unrealizedPnl,
       0,
@@ -908,6 +936,20 @@ export class PaperAccountLedger {
       this.equityCurve[this.equityCurve.length - 1] = { timestamp, equity };
       return;
     }
+    if (
+      !force &&
+      last !== undefined &&
+      timestamp > last.timestamp &&
+      timestamp - last.timestamp < EQUITY_SAMPLE_INTERVAL_MS
+    ) {
+      return;
+    }
     this.equityCurve.push({ timestamp, equity });
+    if (this.equityCurve.length > MAXIMUM_EQUITY_CURVE_POINTS) {
+      const excess = this.equityCurve.length - MAXIMUM_EQUITY_CURVE_POINTS;
+      // Preserve the original starting point while retaining the most recent
+      // bounded history needed by dashboard and performance analytics.
+      this.equityCurve.splice(1, excess);
+    }
   }
 }
