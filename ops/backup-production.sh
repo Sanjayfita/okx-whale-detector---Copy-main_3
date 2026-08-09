@@ -60,7 +60,6 @@ read_running_platform_env() {
   if [ -z "$PLATFORM_CONTAINER_ID" ]; then
     return 0
   fi
-  docker image inspect >/dev/null 2>&1 || true
   docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$PLATFORM_CONTAINER_ID" 2>/dev/null |
     sed -n "s/^${variable_name}=//p" |
     tail -n 1
