@@ -4,6 +4,7 @@ import type {
 } from '../analytics/PerformanceAnalytics';
 import type { TradingTimeframe } from '../config/tradingTimeframes';
 import type { StrategyDescriptor } from '../strategies/StrategyRegistry';
+import type { StrategyDecisionState } from '../strategies/TradingStrategy';
 
 export type PlatformMode = 'PAPER' | 'LIVE';
 export type PlatformSignal = 'BUY' | 'SELL' | 'WAIT';
@@ -63,14 +64,28 @@ export interface DashboardTrade {
 
 export interface DashboardStrategyStatus {
   readonly strategyId: string;
+  readonly instrumentId: string;
+  readonly state: StrategyDecisionState;
   readonly signal: PlatformSignal;
   readonly reasons: readonly string[];
+  readonly primaryReason: string | null;
   readonly checks: readonly {
     readonly label: string;
-    readonly passed: boolean;
+    readonly passed: boolean | null;
     readonly detail: string;
   }[];
   readonly updatedAt: number | null;
+}
+
+export interface DashboardStrategyTelemetry {
+  readonly evaluations: number;
+  readonly insufficientHistory: number;
+  readonly noFreshEmaCrossover: number;
+  readonly priceTrendMismatch: number;
+  readonly rsiFilter: number;
+  readonly atrFilter: number;
+  readonly positionAlreadyOpen: number;
+  readonly entryReady: number;
 }
 
 export interface DashboardLogEntry {
@@ -122,6 +137,7 @@ export interface TradingPlatformSnapshot {
   readonly equityCurve: readonly EquityPoint[];
   readonly candles: Readonly<Record<string, readonly DashboardCandle[]>>;
   readonly strategyStatus: Readonly<Record<string, DashboardStrategyStatus>>;
+  readonly strategyTelemetry: Readonly<Record<string, DashboardStrategyTelemetry>>;
   readonly logs: readonly DashboardLogEntry[];
   readonly analytics: PerformanceAnalyticsReport;
   readonly settings: DashboardSettings;
