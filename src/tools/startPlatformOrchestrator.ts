@@ -1,11 +1,26 @@
 import { spawn, spawnSync } from 'node:child_process';
 
-const argumentsSet = new Set(process.argv.slice(2));
-const mode = argumentsSet.has('--live') ? 'LIVE' : 'PAPER';
-const development = argumentsSet.has('--dev');
-const withDatabase =
-  argumentsSet.has('--with-database') && !argumentsSet.has('--skip-database');
-const noBrowser = argumentsSet.has('--no-browser');
+export interface PlatformStartupFeatures {
+  readonly mode: 'PAPER' | 'LIVE';
+  readonly development: boolean;
+  readonly withDatabase: boolean;
+  readonly withResearch: boolean;
+  readonly noBrowser: boolean;
+}
+
+export const resolvePlatformStartupFeatures = (
+  args: readonly string[],
+): PlatformStartupFeatures => {
+  const argumentsSet = new Set(args);
+  return {
+    mode: argumentsSet.has('--live') ? 'LIVE' : 'PAPER',
+    development: argumentsSet.has('--dev'),
+    withDatabase:
+      argumentsSet.has('--with-database') && !argumentsSet.has('--skip-database'),
+    withResearch: argumentsSet.has('--with-research'),
+    noBrowser: argumentsSet.has('--no-browser'),
+  };
+};
 
 const isWindowsShellCommand = (name: string): boolean =>
   process.platform === 'win32' && (name === 'npm' || name === 'npx');
@@ -56,8 +71,11 @@ const startDatabase = (): void => {
   run('docker', ['compose', 'run', '--rm', 'migrations']);
 };
 
-export const startPlatformOrchestrator = (): void => {
-  if (withDatabase) {
+export const startPlatformOrchestrator = (
+  args: readonly string[] = process.argv.slice(2),
+): void => {
+  const features = resolvePlatformStartupFeatures(args);
+  if (features.withDatabase) {
     startDatabase();
   } else {
     console.log(
@@ -65,7 +83,12 @@ export const startPlatformOrchestrator = (): void => {
     );
   }
 
-  if (development) {
+  console.log(
+    `Startup profile: ${features.withResearch ? 'PAPER TRADING + RESEARCH' : 'LEAN PAPER TRADING'}`,
+  );
+  console.log(`Research runtime: ${features.withResearch ? 'enabled' : 'disabled'}`);
+
+  if (features.development) {
     console.log('Building dashboard assets...');
     run('npm', ['run', 'build:dashboard']);
   } else {
@@ -75,21 +98,20 @@ export const startPlatformOrchestrator = (): void => {
 
   const port = process.env.DASHBOARD_PORT?.trim() || '4173';
   const url = `http://127.0.0.1:${port}`;
-  const child = development
+  const childEnvironment = {
+    ...process.env,
+    TRADING_MODE: features.mode,
+    WITH_RESEARCH_RUNTIME: features.withResearch ? 'true' : 'false',
+  };
+  const child = features.development
     ? spawn('npx', ['tsx', 'watch', 'src/tools/startTradingPlatform.ts'], {
         stdio: 'inherit',
-        env: {
-          ...process.env,
-          TRADING_MODE: mode,
-        },
+        env: childEnvironment,
         shell: isWindowsShellCommand('npx'),
       })
     : spawn(process.execPath, ['dist/tools/startTradingPlatform.js'], {
         stdio: 'inherit',
-        env: {
-          ...process.env,
-          TRADING_MODE: mode,
-        },
+        env: childEnvironment,
       });
 
   child.on('error', (error) => {
@@ -101,8 +123,8 @@ export const startPlatformOrchestrator = (): void => {
   });
 
   console.log(`Trading platform URL: ${url}`);
-  console.log(`Mode: ${mode}. Real order execution remains disabled.`);
-  if (!noBrowser) {
+  console.log(`Mode: ${features.mode}. Real order execution remains disabled.`);
+  if (!features.noBrowser) {
     const timer = setTimeout(() => openBrowser(url), 1_200);
     timer.unref();
   }
@@ -113,7 +135,8 @@ if (require.main === module) {
     startPlatformOrchestrator();
   } catch (error: unknown) {
     console.error('One-click platform startup failed:', error);
-    if (withDatabase) {
+    const features = resolvePlatformStartupFeatures(process.argv.slice(2));
+    if (features.withDatabase) {
       console.error(
         'Docker Desktop / Docker Engine is required only when --with-database is used.',
       );
