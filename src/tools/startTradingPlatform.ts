@@ -131,7 +131,13 @@ export const startTradingPlatform = async (
       60_000,
       'PROCESS_MEMORY_REPORT_INTERVAL_MS',
     ),
-    additionalMetrics: () => platform.engine.getExecutionBookMetrics(),
+    additionalMetrics: () => {
+      const metrics = platform.engine.getExecutionBookMetrics();
+      return {
+        orderBookUpdates: metrics.orderBookUpdates,
+        executionBookMaterializations: metrics.executionBookMaterializations,
+      };
+    },
   });
 
   await platform.start();
