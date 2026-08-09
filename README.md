@@ -189,6 +189,9 @@ Portfolio exposure is netted by instrument before gross exposure, net exposure, 
 
 ## Documentation
 
+- [Phase 12 Linux VPS paper-trading runbook](docs/phase12-remote-paper-trading.md)
+- [Phase 12 repository audit](docs/phase12-repository-audit.md)
+- [Phase 12 acceptance matrix](docs/phase12-acceptance-matrix.md)
 - [Primary EMA trend strategy](docs/ema-trend-primary-strategy.md)
 - [Phase 6 autonomous quantitative research laboratory](docs/phase6-autonomous-quantitative-research.md)
 - [Empirical research hardening audit](docs/empirical-research-hardening.md)

@@ -51,6 +51,17 @@ Remote production uses:
 
 The production runtime does not require the Windows PC, PowerShell, VS Code, or a manually running npm command.
 
+A VPS is a Linux server that keeps running in the provider's data center when the operator's Windows PC is shut down. The PC is only used to administer it over SSH and to view the private dashboard through a temporary tunnel. Choose a supported Linux image, configure SSH-key access, retain provider-console access, and expose only SSH in the provider firewall/security group.
+
+The runtime environments are deliberately distinct:
+
+| Environment | Purpose | Execution safety |
+| --- | --- | --- |
+| Development | Local coding and monitoring | Defaults to paper; the `LIVE` selector is monitoring-only and has no order adapter. |
+| Testing | Deterministic unit/integration/simulation fixtures | No exchange orders or private credentials. |
+| Production paper trading | Unattended VPS operation | Requires `NODE_ENV=production`, `REMOTE_PAPER_ONLY=true`, and `TRADING_MODE=PAPER`; contradictory/missing safety configuration refuses startup. |
+| Live trading | Real private exchange order placement | Not implemented, not configured, and out of scope. |
+
 ## Production data locations
 
 Recommended VPS layout:
@@ -64,6 +75,7 @@ Recommended VPS layout:
       trade-contexts.json       per-trade deployment/config traceability
       settings.json             dashboard/strategy settings
   backups/                      daily backups; mode 0700 recommended
+  acceptance/                   checksummed VPS acceptance evidence
 ```
 
 `PLATFORM_DATA_DIR=/opt/okx-whale-detector/data` is bind-mounted to `/app/data`.
@@ -84,21 +96,32 @@ Notification credentials are optional environment variables. They must remain in
 
 ## First VPS setup
 
-Install Git, Docker Engine, and the Docker Compose plugin using the VPS provider/OS supported procedure. Ensure the Docker service is enabled at boot.
+Install Git, Docker Engine, and the Docker Compose plugin using the current Docker-supported procedure for the selected Linux distribution. Do not use an unreviewed convenience script. Enable Docker at boot, then verify the prerequisites:
+
+```sh
+git --version
+docker --version
+docker compose version
+curl --version
+sha256sum --version
+sudo systemctl enable --now docker
+systemctl is-enabled docker
+```
 
 Create the deployment directories:
 
 ```sh
-sudo mkdir -p /opt/okx-whale-detector/{data/platform,backups}
+sudo mkdir -p /opt/okx-whale-detector/{data/platform,backups,acceptance}
 sudo chown -R "$USER":"$USER" /opt/okx-whale-detector
 ```
 
-Clone the repository and enter the actual Node project:
+Clone the repository. The Node project is at the repository root (the project was
+flattened; do not change into the obsolete nested project path):
 
 ```sh
 cd /opt/okx-whale-detector
 git clone https://github.com/Sanjayfita/okx-whale-detector---Copy-main_3.git repo
-cd repo/okx-whale-detector---Copy-main
+cd repo
 git switch agent/trading-platform-foundation
 ```
 
@@ -115,6 +138,7 @@ Set at minimum:
 - `POSTGRES_PASSWORD`
 - the matching URL-safe password inside `DATABASE_URL`
 - `PLATFORM_DATA_DIR=/opt/okx-whale-detector/data`
+- `REMOTE_PAPER_ONLY=true` (never change this on the production VPS)
 - deployment metadata values if not using the deployment script overrides
 
 The platform container runs as UID/GID 1000 by default. Prepare the data directory before deployment:
@@ -123,6 +147,7 @@ The platform container runs as UID/GID 1000 by default. Prepare the data directo
 sudo chown -R 1000:1000 /opt/okx-whale-detector/data
 sudo chmod -R u+rwX,go-rwx /opt/okx-whale-detector/data
 chmod 700 /opt/okx-whale-detector/backups
+chmod 700 /opt/okx-whale-detector/acceptance
 ```
 
 Run preflight:
@@ -131,7 +156,7 @@ Run preflight:
 sh ops/preflight-production.sh
 ```
 
-Preflight verifies Docker/Compose, production configuration, non-placeholder DB credentials, absence of unnecessary OKX private credentials, persistent-directory writeability, UTC/NTP state where available, and available disk information.
+Preflight verifies Docker/Compose and required host tools, Docker boot enablement, environment-file permissions, matching database configuration, exact `REMOTE_PAPER_ONLY=true`, absence of unnecessary OKX private credentials, persistent-directory ownership/writeability, private dashboard/database Compose bindings, UTC/NTP state where available, and available disk information.
 
 ## Deployment
 
@@ -152,11 +177,19 @@ Git checkout
   -> resume paper trading
 ```
 
-Run:
+On the first deployment only, explicitly authorize creation of the new paper account:
+
+```sh
+ALLOW_NEW_PAPER_ACCOUNT=1 sh ops/deploy-production.sh
+```
+
+The successful deployment writes a persistent account marker. Every later deployment uses the normal command:
 
 ```sh
 sh ops/deploy-production.sh
 ```
+
+If the marker exists but `paper-state.json` is missing, deployment stops. Do not remove the marker or reuse the first-deployment override to hide a missing account; restore the account from a verified backup.
 
 The script stamps the current Git commit into the image/runtime and uses image version `phase12-<12-char-sha>` unless explicitly overridden.
 
@@ -185,6 +218,20 @@ http://127.0.0.1:4173
 ```
 
 Authentication and authorization are therefore provided by the VPS SSH boundary. A network client that is not authenticated to the VPS cannot reach the dashboard/API port.
+
+On the VPS, verify the effective binding without printing the resolved Compose configuration, which contains the database password:
+
+```sh
+docker compose --env-file .env.production -f docker-compose.production.yml port platform 4173
+```
+
+The result must begin with `127.0.0.1:`. From a separate external machine, a direct connection to port 4173 must fail. Through the SSH tunnel, verify that a live-mode change is rejected:
+
+```powershell
+curl.exe -i -X PATCH -H "content-type: application/json" -d '{"mode":"LIVE"}' http://127.0.0.1:4173/api/settings
+```
+
+The response must be HTTP 400 with `REMOTE_PAPER_ONLY` and `liveExecutionAllowed: false`.
 
 Prefer SSH keys and disable password SSH login once key access has been verified. Only the SSH port needs to be internet-reachable for this design.
 
@@ -271,7 +318,7 @@ sh ops/watchdog.sh
 Recommended cron cadence:
 
 ```cron
-*/5 * * * * cd /opt/okx-whale-detector/repo/okx-whale-detector---Copy-main && sh ops/watchdog.sh 2>&1 | logger -t okx-paper-watchdog
+*/5 * * * * cd /opt/okx-whale-detector/repo && sh ops/watchdog.sh 2>&1 | logger -t okx-paper-watchdog
 ```
 
 A watchdog running on the VPS cannot notify if the entire VPS/provider is offline. For that failure class, use the VPS provider's external monitoring or an external dead-man/heartbeat service. That is an external operational dependency, not something the trading container can truthfully self-detect while powered off.
@@ -284,13 +331,15 @@ Daily backup command:
 BACKUP_DIR=/opt/okx-whale-detector/backups sh ops/backup-production.sh
 ```
 
-The backup includes when present:
+The backup refuses to run without `paper-state.json`. A completed backup includes:
 
 - `paper-state.json`
 - `trade-contexts.json`
 - `settings.json`
+- the durable paper-account marker
 - PostgreSQL `research.dump`
 - non-secret deployment manifest
+- `checksums.sha256`
 
 `.env.production` is intentionally not copied.
 
@@ -299,10 +348,21 @@ Default retention is 14 days. Override with `BACKUP_RETENTION_DAYS` if required.
 Recommended daily cron:
 
 ```cron
-15 2 * * * cd /opt/okx-whale-detector/repo/okx-whale-detector---Copy-main && BACKUP_DIR=/opt/okx-whale-detector/backups sh ops/backup-production.sh 2>&1 | logger -t okx-paper-backup
+15 2 * * * cd /opt/okx-whale-detector/repo && BACKUP_DIR=/opt/okx-whale-detector/backups sh ops/backup-production.sh 2>&1 | logger -t okx-paper-backup
 ```
 
-For disk/server-loss protection, copy encrypted backups off the VPS using the provider backup service or another controlled destination. Local daily backups protect against accidental/corrupt state replacement but not total VPS disk loss.
+### Off-server backup
+
+Local daily backups protect against accidental/corrupt state replacement but not total VPS loss. Configure either provider snapshots that include both the Docker volume and `/opt/okx-whale-detector/data`, or an encrypted `rclone` destination such as an S3-compatible service or another controlled server. Keep rclone credentials/configuration outside the repository with owner-only permissions.
+
+After independently verifying encryption and retention, upload one completed backup:
+
+```sh
+export OFFSITE_RCLONE_DESTINATION='<configured-remote>:<private-prefix>'
+sh ops/upload-offsite-backup.sh /opt/okx-whale-detector/backups/<timestamp>
+```
+
+The upload script validates local checksums, refuses environment files, uses immutable/checksum transfer, and runs a remote check. Acceptance remains `NOT CONFIGURED — deployment task remains` until a real remote object survives a download and restore drill on a replacement/test VPS.
 
 ## Restore procedure
 
@@ -312,22 +372,26 @@ List backups:
 ls -lah /opt/okx-whale-detector/backups
 ```
 
-Restore paper state/config/context from one backup:
+Never test restore against the only production account. First create a separate Compose project, separate host data directory, different loopback dashboard port, and a copy of `.env.production` with those values. Then restore into that controlled copy and capture its account/database evidence. Only an actual disaster should use the production environment file directly.
+
+The restore command for the controlled environment is:
 
 ```sh
+COMPOSE_PROJECT_NAME=okx-paper-restore-drill \
+ENV_FILE=.env.restore-drill RESTORE_RESEARCH_DB=1 SKIP_PRE_RESTORE_BACKUP=1 \
 sh ops/restore-production.sh /opt/okx-whale-detector/backups/<timestamp>
 ```
 
 The restore procedure:
 
-1. validates JSON before touching current state;
-2. stops the platform;
-3. replaces each state file through a temporary sibling file;
-4. preserves configured container UID/GID ownership;
-5. starts the database;
-6. reruns idempotent migrations;
-7. starts the platform;
-8. waits for the local health endpoint.
+1. verifies backup checksums and rejects secret files;
+2. validates JSON before touching current state;
+3. creates a safety backup unless explicitly skipped for a fresh drill;
+4. stops the selected platform;
+5. atomically replaces the state files and preserves UID/GID ownership;
+6. optionally restores PostgreSQL with exit-on-error;
+7. reruns idempotent migrations and starts the selected platform;
+8. waits for operationally ready health with live execution disabled. A strategy paused solely by a restored kill switch/circuit breaker is preserved and accepted; the script never clears risk state to manufacture `RUNNING`.
 
 Research DB restoration is intentionally opt-in:
 
@@ -335,7 +399,7 @@ Research DB restoration is intentionally opt-in:
 RESTORE_RESEARCH_DB=1 sh ops/restore-production.sh /opt/okx-whale-detector/backups/<timestamp>
 ```
 
-CI runs `ops/verify-backup-restore.sh`, which creates paper state, backs it up, corrupts the live copy, restores it, and byte-compares the recovered account/context files. This makes the restore procedure tested rather than documentation-only.
+CI runs a checksummed file round trip across account, context, settings, and marker, and separately restores the real custom-format PostgreSQL dump into a disposable database and queries its marker/schema migrations. VPS acceptance must still restore into the controlled Compose project and compare the API account snapshot, trades, risk state, configuration traceability, and research database.
 
 ## Time synchronization
 
@@ -357,10 +421,10 @@ Do not select a final production size from an unmeasured guess.
 After the platform has been running under representative load, collect actual host/container usage:
 
 ```sh
-sh ops/measure-resources.sh
+RESOURCE_SAMPLE_COUNT=12 RESOURCE_SAMPLE_INTERVAL_SECONDS=300 sh ops/measure-resources.sh
 ```
 
-The report includes host CPU count, RAM, disk, per-container CPU/memory/network/block I/O, total persistent-data size, and the individual state-file sizes.
+The report includes host CPU/RAM/disk, per-container CPU/memory/network/block I/O, paper-data sizes, PostgreSQL database bytes, and Docker storage. Repeated timestamped samples allow growth and recovery peaks to be measured.
 
 Collect at least several samples during normal operation and during history recovery. Only then set a minimum/recommended VPS size and optional hard Compose CPU/RAM limits.
 
@@ -378,6 +442,7 @@ curl -s http://127.0.0.1:4173/api/health
 Capture the current snapshot/paper state, then kill only the platform process/container:
 
 ```sh
+ACCEPTANCE_EVIDENCE_DIR=/opt/okx-whale-detector/acceptance sh ops/capture-acceptance-evidence.sh before-container-kill
 docker kill "$(docker compose --env-file .env.production -f docker-compose.production.yml ps -q platform)"
 ```
 
@@ -387,7 +452,8 @@ Verify:
 
 ```sh
 docker compose --env-file .env.production -f docker-compose.production.yml ps
-curl -s http://127.0.0.1:4173/api/health
+sh ops/check-production-health.sh
+ACCEPTANCE_EVIDENCE_DIR=/opt/okx-whale-detector/acceptance sh ops/capture-acceptance-evidence.sh after-container-kill
 ```
 
 Confirm positions, trade history, equity, risk state, stops, targets and trailing stop are unchanged except for legitimate new market marks/events after restart.
@@ -399,8 +465,9 @@ Do this only after SSH access and provider console access are confirmed.
 Before reboot:
 
 ```sh
-curl -s http://127.0.0.1:4173/api/health
+sh ops/check-production-health.sh
 docker compose --env-file .env.production -f docker-compose.production.yml ps
+ACCEPTANCE_EVIDENCE_DIR=/opt/okx-whale-detector/acceptance sh ops/capture-acceptance-evidence.sh before-reboot
 ```
 
 Then:
@@ -412,10 +479,11 @@ sudo reboot
 After the server is reachable again:
 
 ```sh
-cd /opt/okx-whale-detector/repo/okx-whale-detector---Copy-main
+cd /opt/okx-whale-detector/repo
 docker compose --env-file .env.production -f docker-compose.production.yml ps
-curl -s http://127.0.0.1:4173/api/health
+sh ops/check-production-health.sh
 docker compose --env-file .env.production -f docker-compose.production.yml logs --tail=200 platform
+ACCEPTANCE_EVIDENCE_DIR=/opt/okx-whale-detector/acceptance sh ops/capture-acceptance-evidence.sh after-reboot
 ```
 
 Evidence must show Docker started, the platform container started automatically, paper reconciliation ran, missing candles were recovered, OKX reconnected, and the paper account remained intact.
@@ -424,7 +492,16 @@ Evidence must show Docker started, the platform container started automatically,
 
 Prefer doing this while the strategy is on a short timeframe so stale detection can be observed without waiting hours.
 
-Record health and paper-state checksums first. Then temporarily disconnect only the platform container from its Compose network from the VPS host. Keep provider console access available in case of mistakes.
+Record evidence first. If the provider offers a controlled application-network fault, prefer it. Otherwise, and only while provider-console access is confirmed, disconnect the platform container (not the host/VPS network) from its Compose network. Record both values before disconnecting so the exact reconnect command is ready. Do not alter the SSH interface, host route, or VPS firewall.
+
+```sh
+sh ops/capture-acceptance-evidence.sh before-network-test
+platform_id="$(docker compose --env-file .env.production -f docker-compose.production.yml ps -q platform)"
+network_name="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$platform_id")"
+docker network disconnect "$network_name" "$platform_id"
+# Wait long enough to exceed the selected timeframe's stale threshold, then:
+docker network connect "$network_name" "$platform_id"
+```
 
 After reconnecting the network, verify logs show WebSocket reconnect and candle history reconciliation, then verify:
 
@@ -434,6 +511,8 @@ After reconnecting the network, verify logs show WebSocket reconnect and candle 
 - risk state did not reset;
 - no retroactive historical trades;
 - health returned from `DEGRADED` to `RUNNING`.
+
+After reconnect, run `sh ops/check-production-health.sh` and capture `after-network-test`. If the exact reconnect command or console fallback is not available, do not run this test; mark it `BLOCKED` rather than risking VPS access.
 
 Phase 11 idempotency tests remain the deterministic duplicate-event proof; this remote test adds operational evidence around the real container/network lifecycle.
 
@@ -465,6 +544,27 @@ sh ops/rollback-production.sh <previous-image-version>
 ```
 
 If a future release contains a non-backward-compatible database/state migration, it must define its own rollback/migration policy. Phase 12 does not introduce a DB schema migration.
+
+Capture evidence before the update, after the update, and after rollback. Compare paper balance, positions, trade/fill/funding counts, risk state, and configuration fingerprints. Older images without the OCI Git-revision label require an explicitly verified `ROLLBACK_GIT_COMMIT`; never guess it.
+
+## Safe shutdown
+
+Capture evidence and create a verified backup first. Stop the paper application so its graceful shutdown writes a final checkpoint, then stop the database:
+
+```sh
+sh ops/capture-acceptance-evidence.sh before-safe-shutdown
+BACKUP_DIR=/opt/okx-whale-detector/backups sh ops/backup-production.sh
+docker compose --env-file .env.production -f docker-compose.production.yml stop platform
+docker compose --env-file .env.production -f docker-compose.production.yml stop database
+```
+
+To recreate containers while preserving state, `docker compose down` without `--volumes` is permitted after a backup. Never run `docker compose down --volumes`, never remove `postgres-data`, and never delete the host data directory during normal shutdown, update, or rollback.
+
+## Acceptance records
+
+`ops/capture-acceptance-evidence.sh <label>` records host/OS/Docker/Git/image identity, Compose state, health, account snapshot, recent logs, resource use, disk, and state checksums. It deliberately does not record `.env.production` or container environment values. Store these records outside Git and copy them to controlled off-server evidence storage.
+
+Use [the Phase 12 acceptance matrix](phase12-acceptance-matrix.md) as the source of truth. A script exit code or green CI run is repository evidence, not VPS acceptance.
 
 ## Per-trade version/config traceability
 
@@ -509,26 +609,26 @@ Repository/CI readiness and real VPS acceptance are separate milestones.
 
 ### Infrastructure
 
-- remote deployment tooling: **DONE (repository side); VPS execution NOT STARTED**
-- monitoring: **DONE (application + host watchdog); external host-down monitor NOT STARTED**
-- alerts: **DONE when a notification channel is configured; external host-down alert NOT STARTED**
-- backups: **DONE locally on VPS; off-host copy NOT STARTED**
-- log rotation: **DONE**
-- authentication: **DONE by SSH/private loopback design; VPS SSH hardening requires deployment evidence**
-- health checks: **DONE**
-- automatic process/container recovery: **DONE**
+- remote deployment tooling: **REPOSITORY VERIFIED; VPS execution NOT STARTED**
+- monitoring: **IMPLEMENTED; VPS watchdog/alert delivery NOT TESTED**
+- alerts: **IMPLEMENTED; no real notification or external host-down monitor configured**
+- backups: **LOCAL SYNTHETIC ROUND TRIP PASS; real VPS and off-server backups NOT CONFIGURED**
+- log rotation: **CONFIGURED; Docker runtime evidence NOT TESTED**
+- authentication: **SSH/loopback design verified; VPS SSH/firewall evidence NOT TESTED**
+- health checks: **IMPLEMENTATION/TESTS PASS; production response NOT CAPTURED**
+- automatic process/container recovery: **CONFIGURED; kill/reboot tests NOT STARTED**
 - actual server-reboot evidence: **NOT STARTED**
 
 ### Trading-data correctness
 
 - real OKX funding settlement ingestion: **BLOCKED** pending verified settlement-time mark/notional evidence
-- candle synchronization/restart recovery: **DONE**
-- WebSocket heartbeat/reconnect: **DONE**
-- stale-stream detection/recovery: **DONE**
-- temporary REST retry/backoff: **DONE**
-- slippage modeling: **DONE in existing execution simulator**
-- spread modeling: **DONE in existing execution simulator**
-- latency modeling: **DONE in existing execution simulator**
+- candle synchronization/restart recovery: **REPOSITORY TESTS PASS; VPS NOT TESTED**
+- WebSocket heartbeat/reconnect: **REPOSITORY TESTS PASS; VPS NOT TESTED**
+- stale-stream detection/recovery: **REPOSITORY TESTS PASS; VPS NOT TESTED**
+- temporary REST retry/backoff: **REPOSITORY TESTS PASS; VPS NOT TESTED**
+- slippage modeling: **IMPLEMENTED in existing execution simulator; strategy validity separate**
+- spread modeling: **IMPLEMENTED in existing execution simulator; strategy validity separate**
+- latency modeling: **IMPLEMENTED in existing execution simulator; strategy validity separate**
 
 ### Strategy validation
 
