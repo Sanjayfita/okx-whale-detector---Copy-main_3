@@ -3,7 +3,6 @@ import {
   tradingTimeframeSpec,
   type TradingTimeframe,
 } from '../config/tradingTimeframes';
-import type { MarketState } from '../core/MarketState';
 import { createNotificationServiceFromEnvironment } from '../notifications/createNotificationService';
 import type { NotificationService } from '../notifications/NotificationService';
 import type { PaperStateRepository } from '../paper/PaperStateRepository';
@@ -22,6 +21,7 @@ import { PlatformStateStore } from './PlatformStateStore';
 import { TradeExecutionContextRepository } from './TradeExecutionContextRepository';
 import {
   TradingPlatformEngine,
+  type ExecutionMarketState,
   type PaperEntryTraceContext,
 } from './TradingPlatformEngine';
 import type {
@@ -211,7 +211,7 @@ export class TradingPlatformApplication implements TradingPlatformObserver {
     await this.queueRebuild(timeframe, this.symbols);
   }
 
-  public onOrderBook(instrumentId: string, state: MarketState): void {
+  public onOrderBook(instrumentId: string, state: ExecutionMarketState): void {
     try {
       this.engine.onOrderBook(instrumentId, state);
       this.paperEngineError = null;
