@@ -150,6 +150,24 @@ export class EvidenceCollectionRuntime {
       throw normalizedError;
     }
     this.initialized = true;
+    // Immediately process any due observations recovered from persistent state
+    // before starting the recurring polling timer. This ensures near-due jobs
+    // are evaluated promptly after restart instead of waiting for the first
+    // timer tick which can push short-horizon jobs past their allowed window.
+    try {
+      const now = this.clock();
+      const initialResult = await this.enqueue(async () => {
+        await this.options.collector.processDueObservations(now);
+      });
+      if (!initialResult.succeeded) {
+        throw initialResult.error ?? new Error('initial outcome processing failed');
+      }
+    } catch (error: unknown) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      await this.failClosed(normalized, 'OUTCOME_PROCESSING_FAILED');
+      throw normalized;
+    }
+
     this.timer = this.setIntervalFn(() => {
       const now = this.clock();
       this.prunePendingAlphaEvidence(now);

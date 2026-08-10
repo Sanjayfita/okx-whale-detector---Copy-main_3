@@ -142,11 +142,7 @@ describe('EvidenceCollectionRuntime', () => {
       setIntervalFn: () => 123 as unknown as NodeJS.Timeout,
       clearIntervalFn: vi.fn(),
     });
-    await runtime.start();
-
-    await expect(runtime.processNow()).rejects.toThrow('scheduler failed');
-    await runtime.stop();
-
+    await expect(runtime.start()).rejects.toThrow('scheduler failed');
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'scheduler failed' }),
     );
