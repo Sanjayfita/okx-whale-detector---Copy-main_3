@@ -10,6 +10,7 @@ export type ManagedPositionDirection = 'LONG' | 'SHORT';
 export type PaperLedgerEventType =
   | 'FILL'
   | 'POSITION_OPEN'
+  | 'POSITION_REDUCE'
   | 'POSITION_CLOSE'
   | 'FEE'
   | 'FUNDING'
@@ -23,9 +24,7 @@ export interface PaperLedgerEvent {
   readonly type: PaperLedgerEventType;
   readonly timestamp: number;
   readonly instrumentId: string;
-  readonly details: Readonly<
-    Record<string, string | number | boolean | null>
-  >;
+  readonly details: Readonly<Record<string, string | number | boolean | null>>;
 }
 
 export interface PaperFillRecord {
@@ -174,8 +173,9 @@ const unrealized = (
   currentPrice: number,
   quantity: number,
 ): number =>
-  (direction === 'LONG' ? currentPrice - entryPrice : entryPrice - currentPrice) *
-  quantity;
+  (direction === 'LONG'
+    ? currentPrice - entryPrice
+    : entryPrice - currentPrice) * quantity;
 
 const utcDay = (timestamp: number): string =>
   new Date(timestamp).toISOString().slice(0, 10);
@@ -208,10 +208,7 @@ const boundEquityCurve = (
   if (curve.length <= MAXIMUM_EQUITY_CURVE_POINTS) return curve;
   const first = curve[0];
   if (first === undefined) return [];
-  return [
-    first,
-    ...curve.slice(-(MAXIMUM_EQUITY_CURVE_POINTS - 1)),
-  ];
+  return [first, ...curve.slice(-(MAXIMUM_EQUITY_CURVE_POINTS - 1))];
 };
 
 /**
@@ -274,7 +271,10 @@ export class PaperAccountLedger {
     requirePositiveFinite(input.riskAmount, 'riskAmount');
     requireNonNegativeFinite(input.entryFee, 'entryFee');
     requireNonEmpty(input.entryReason, 'entryReason');
-    if (input.entrySlippageBps !== undefined && input.entrySlippageBps !== null) {
+    if (
+      input.entrySlippageBps !== undefined &&
+      input.entrySlippageBps !== null
+    ) {
       requireFinite(input.entrySlippageBps, 'entrySlippageBps');
     }
 
@@ -327,7 +327,10 @@ export class PaperAccountLedger {
     readonly strategyId: string;
     readonly timeframe: TradingTimeframe;
     readonly tradeId: string;
-  }): { readonly applied: boolean; readonly position: PaperManagedPosition | null } {
+  }): {
+    readonly applied: boolean;
+    readonly position: PaperManagedPosition | null;
+  } {
     requireNonEmpty(input.fillId, 'fillId');
     if (this.fillIds.has(input.fillId)) {
       return {
@@ -335,7 +338,8 @@ export class PaperAccountLedger {
         position: this.positions.get(input.instrumentId) ?? null,
       };
     }
-    if (input.slippageBps !== null) requireFinite(input.slippageBps, 'slippageBps');
+    if (input.slippageBps !== null)
+      requireFinite(input.slippageBps, 'slippageBps');
     const position = this.openPosition({
       ...input,
       entryFillId: input.fillId,
@@ -422,7 +426,8 @@ export class PaperAccountLedger {
       input.trailingStopPrice === undefined
         ? position.trailingStopPrice
         : input.trailingStopPrice;
-    if (nextTrailing !== null) requirePositiveFinite(nextTrailing, 'trailingStopPrice');
+    if (nextTrailing !== null)
+      requirePositiveFinite(nextTrailing, 'trailingStopPrice');
     const updated: PaperManagedPosition = {
       ...position,
       currentPrice: input.price,
@@ -476,7 +481,10 @@ export class PaperAccountLedger {
     readonly fundingRatePercent: number;
     readonly positionNotional: number;
     readonly timestamp: number;
-  }): { readonly applied: boolean; readonly position: PaperManagedPosition | null } {
+  }): {
+    readonly applied: boolean;
+    readonly position: PaperManagedPosition | null;
+  } {
     requireNonEmpty(input.fundingId, 'fundingId');
     if (this.fundingIds.has(input.fundingId)) {
       return {
@@ -587,34 +595,111 @@ export class PaperAccountLedger {
     readonly exitReason: string;
     readonly exitFee: number;
     readonly slippageBps: number | null;
-  }): { readonly applied: boolean; readonly trade: PaperJournalTrade | null } {
+  }): {
+    readonly applied: boolean;
+    readonly trade: PaperJournalTrade | null;
+    readonly remainingPosition: PaperManagedPosition | null;
+  } {
     requireNonEmpty(input.fillId, 'fillId');
     if (this.fillIds.has(input.fillId)) {
       return {
         applied: false,
-        trade: this.trades.find((trade) => trade.exitFillId === input.fillId) ?? null,
+        trade:
+          this.trades.find((trade) => trade.exitFillId === input.fillId) ??
+          null,
+        remainingPosition: this.positions.get(input.instrumentId) ?? null,
       };
     }
     const position = this.requirePosition(input.instrumentId);
-    if (input.quantityBaseUnits + Number.EPSILON < position.quantityBaseUnits) {
-      throw new Error('closing fill does not cover the full paper position');
+    requirePositiveFinite(input.exitPrice, 'exitPrice');
+    requirePositiveFinite(input.quantityBaseUnits, 'quantityBaseUnits');
+    requireTimestamp(input.closedAt, 'closedAt');
+    requireNonEmpty(input.exitReason, 'exitReason');
+    requireNonNegativeFinite(input.exitFee, 'exitFee');
+    if (input.closedAt < position.openedAt) {
+      throw new Error('closedAt must not precede openedAt');
     }
-    if (input.slippageBps !== null) requireFinite(input.slippageBps, 'slippageBps');
-    const trade = this.closePosition({
-      instrumentId: input.instrumentId,
-      exitPrice: input.exitPrice,
+    if (input.quantityBaseUnits > position.quantityBaseUnits + Number.EPSILON) {
+      throw new Error('closing fill exceeds the open paper position');
+    }
+    if (input.slippageBps !== null)
+      requireFinite(input.slippageBps, 'slippageBps');
+    const closingQuantity = Math.min(
+      input.quantityBaseUnits,
+      position.quantityBaseUnits,
+    );
+    const closingFraction = closingQuantity / position.quantityBaseUnits;
+    const fullyClosed =
+      position.quantityBaseUnits - closingQuantity <= Number.EPSILON;
+    const allocatedEntryFee = position.entryFee * closingFraction;
+    const allocatedFundingPnl = position.fundingPnl * closingFraction;
+    const allocatedRiskAmount = position.riskAmount * closingFraction;
+    const grossPnl = unrealized(
+      position.direction,
+      position.entryPrice,
+      input.exitPrice,
+      closingQuantity,
+    );
+    const fees = allocatedEntryFee + input.exitFee;
+    const netPnl = grossPnl - fees + allocatedFundingPnl;
+    const trade: PaperJournalTrade = {
+      tradeId: fullyClosed
+        ? position.tradeId
+        : `${position.tradeId}:partial:${input.fillId}`,
+      instrumentId: position.instrumentId,
+      direction: position.direction,
+      openedAt: position.openedAt,
       closedAt: input.closedAt,
+      entryPrice: position.entryPrice,
+      exitPrice: input.exitPrice,
+      quantityBaseUnits: closingQuantity,
+      entryReason: position.entryReason,
       exitReason: input.exitReason,
-      exitFee: input.exitFee,
+      grossPnl,
+      fees,
+      fundingPnl: allocatedFundingPnl,
+      netPnl,
+      riskAmount: allocatedRiskAmount,
+      rMultiple: allocatedRiskAmount > 0 ? netPnl / allocatedRiskAmount : null,
+      durationMs: input.closedAt - position.openedAt,
+      strategyId: position.strategyId,
+      timeframe: position.timeframe,
+      entryFillId: position.entryFillId,
       exitFillId: input.fillId,
+      entrySlippageBps: position.entrySlippageBps,
       exitSlippageBps: input.slippageBps,
-    });
+    };
+    this.cashBalance += grossPnl - input.exitFee;
+    this.trades.push(trade);
+
+    const remainingPosition: PaperManagedPosition | null = fullyClosed
+      ? null
+      : {
+          ...position,
+          quantityBaseUnits: position.quantityBaseUnits - closingQuantity,
+          entryFee: position.entryFee - allocatedEntryFee,
+          fundingPnl: position.fundingPnl - allocatedFundingPnl,
+          riskAmount: position.riskAmount - allocatedRiskAmount,
+          unrealizedPnl: unrealized(
+            position.direction,
+            position.entryPrice,
+            position.currentPrice,
+            position.quantityBaseUnits - closingQuantity,
+          ),
+        };
+    if (remainingPosition === null) {
+      this.positions.delete(input.instrumentId);
+    } else {
+      this.positions.set(input.instrumentId, remainingPosition);
+    }
+    this.recordEquity(input.closedAt, true);
+
     const fill: PaperFillRecord = {
       fillId: input.fillId,
       instrumentId: input.instrumentId,
       side: position.direction === 'LONG' ? 'SELL' : 'BUY',
       timestamp: input.closedAt,
-      quantityBaseUnits: position.quantityBaseUnits,
+      quantityBaseUnits: closingQuantity,
       averagePrice: input.exitPrice,
       fee: input.exitFee,
       slippageBps: input.slippageBps,
@@ -646,8 +731,8 @@ export class PaperAccountLedger {
       });
     }
     this.recordAuditEvent({
-      eventId: `position-close:${trade.tradeId}:${input.closedAt}`,
-      type: 'POSITION_CLOSE',
+      eventId: `${fullyClosed ? 'position-close' : 'position-reduce'}:${trade.tradeId}:${input.closedAt}`,
+      type: fullyClosed ? 'POSITION_CLOSE' : 'POSITION_REDUCE',
       timestamp: input.closedAt,
       instrumentId: input.instrumentId,
       details: {
@@ -655,9 +740,10 @@ export class PaperAccountLedger {
         exitPrice: trade.exitPrice,
         exitReason: trade.exitReason,
         netPnl: trade.netPnl,
+        remainingQuantityBaseUnits: remainingPosition?.quantityBaseUnits ?? 0,
       },
     });
-    return { applied: true, trade };
+    return { applied: true, trade, remainingPosition };
   }
 
   public recordAuditEvent(event: PaperLedgerEvent): boolean {
@@ -713,7 +799,9 @@ export class PaperAccountLedger {
       startingEquity: this.startingEquity,
       cashBalance: this.cashBalance,
       peakEquity: this.peakEquity,
-      openPositions: [...this.positions.values()].map((position) => ({ ...position })),
+      openPositions: [...this.positions.values()].map((position) => ({
+        ...position,
+      })),
       trades: this.trades.map((trade) => ({ ...trade })),
       fills: this.fills.map((fill) => ({ ...fill })),
       fundingEvents: this.fundingEvents.map((event) => ({ ...event })),
@@ -725,8 +813,11 @@ export class PaperAccountLedger {
     };
   }
 
-  public restoreState(state: PaperAccountPersistedState): PaperAccountRestoreResult {
-    if (state.schemaVersion !== 1) throw new Error('unsupported paper account schema');
+  public restoreState(
+    state: PaperAccountPersistedState,
+  ): PaperAccountRestoreResult {
+    if (state.schemaVersion !== 1)
+      throw new Error('unsupported paper account schema');
     requirePositiveFinite(state.startingEquity, 'persisted.startingEquity');
     requireFinite(state.cashBalance, 'persisted.cashBalance');
     requirePositiveFinite(state.peakEquity, 'persisted.peakEquity');
@@ -738,17 +829,16 @@ export class PaperAccountLedger {
       state.fundingEvents,
       (event) => event.fundingId,
     );
-    const uniqueEvents = uniqueBy(
-      state.ledgerEvents,
-      (event) => event.eventId,
-    );
+    const uniqueEvents = uniqueBy(state.ledgerEvents, (event) => event.eventId);
     const duplicateEvents =
       uniqueTrades.duplicates +
       uniqueFills.duplicates +
       uniqueFunding.duplicates +
       uniqueEvents.duplicates;
     if (duplicateEvents > 0) {
-      warnings.push(`Removed ${duplicateEvents} duplicate persisted event records`);
+      warnings.push(
+        `Removed ${duplicateEvents} duplicate persisted event records`,
+      );
     }
 
     const positionIds = new Set<string>();
@@ -756,15 +846,23 @@ export class PaperAccountLedger {
     for (const position of state.openPositions) {
       requireNonEmpty(position.instrumentId, 'persisted.position.instrumentId');
       if (positionIds.has(position.instrumentId)) {
-        throw new Error(`duplicate persisted position for ${position.instrumentId}`);
+        throw new Error(
+          `duplicate persisted position for ${position.instrumentId}`,
+        );
       }
       positionIds.add(position.instrumentId);
-      requirePositiveFinite(position.entryPrice, 'persisted.position.entryPrice');
+      requirePositiveFinite(
+        position.entryPrice,
+        'persisted.position.entryPrice',
+      );
       requirePositiveFinite(
         position.quantityBaseUnits,
         'persisted.position.quantityBaseUnits',
       );
-      requirePositiveFinite(position.currentPrice, 'persisted.position.currentPrice');
+      requirePositiveFinite(
+        position.currentPrice,
+        'persisted.position.currentPrice',
+      );
       requireTimestamp(position.openedAt, 'persisted.position.openedAt');
       const calculatedUnrealized = unrealized(
         position.direction,
@@ -839,7 +937,11 @@ export class PaperAccountLedger {
       this.positions.set(position.instrumentId, position);
     }
     this.trades.splice(0, this.trades.length, ...restoredTrades);
-    this.fills.splice(0, this.fills.length, ...uniqueFills.values.map((fill) => ({ ...fill })));
+    this.fills.splice(
+      0,
+      this.fills.length,
+      ...uniqueFills.values.map((fill) => ({ ...fill })),
+    );
     this.fundingEvents.splice(
       0,
       this.fundingEvents.length,
@@ -856,9 +958,11 @@ export class PaperAccountLedger {
     this.fillIds.clear();
     for (const fill of this.fills) this.fillIds.add(fill.fillId);
     this.fundingIds.clear();
-    for (const event of this.fundingEvents) this.fundingIds.add(event.fundingId);
+    for (const event of this.fundingEvents)
+      this.fundingIds.add(event.fundingId);
     this.ledgerEventIds.clear();
-    for (const event of this.ledgerEvents) this.ledgerEventIds.add(event.eventId);
+    for (const event of this.ledgerEvents)
+      this.ledgerEventIds.add(event.eventId);
     this.equityCurve.splice(
       0,
       this.equityCurve.length,
@@ -904,7 +1008,9 @@ export class PaperAccountLedger {
     return this.trades.filter((trade) => utcDay(trade.openedAt) === day).length;
   }
 
-  public getOpenPosition(instrumentId: string): PaperManagedPosition | undefined {
+  public getOpenPosition(
+    instrumentId: string,
+  ): PaperManagedPosition | undefined {
     return this.positions.get(instrumentId);
   }
 

@@ -95,4 +95,61 @@ describe('paper ledger idempotency', () => {
     });
     expect(snapshot.equity).toBeCloseTo(10_018);
   });
+
+  it('journals every partial exit fill and preserves residual exposure', () => {
+    const ledger = new PaperAccountLedger(10_000);
+    ledger.openPositionFromFill(openInput);
+
+    const partial = ledger.closePositionFromFill({
+      fillId: 'fill-exit-partial-1',
+      instrumentId: 'BTC-USDT-SWAP',
+      exitPrice: 110,
+      quantityBaseUnits: 0.5,
+      closedAt: 2_000,
+      exitReason: 'TAKE_PROFIT',
+      exitFee: 0.25,
+      slippageBps: 1,
+    });
+
+    expect(partial.applied).toBe(true);
+    expect(partial.remainingPosition?.quantityBaseUnits).toBe(1.5);
+    expect(partial.trade).toMatchObject({
+      quantityBaseUnits: 0.5,
+      grossPnl: 5,
+      fees: 0.5,
+      netPnl: 4.5,
+      exitFillId: 'fill-exit-partial-1',
+    });
+
+    const afterPartial = ledger.snapshot(2_000);
+    expect(afterPartial.openPositions[0]).toMatchObject({
+      quantityBaseUnits: 1.5,
+      entryFee: 0.75,
+      riskAmount: 7.5,
+    });
+    expect(afterPartial.fills).toHaveLength(2);
+    expect(afterPartial.trades).toHaveLength(1);
+    expect(
+      afterPartial.ledgerEvents.filter(
+        (event) => event.type === 'POSITION_REDUCE',
+      ),
+    ).toHaveLength(1);
+
+    const final = ledger.closePositionFromFill({
+      fillId: 'fill-exit-final-1',
+      instrumentId: 'BTC-USDT-SWAP',
+      exitPrice: 108,
+      quantityBaseUnits: 1.5,
+      closedAt: 3_000,
+      exitReason: 'TRAILING_STOP',
+      exitFee: 0.75,
+      slippageBps: 1.5,
+    });
+    expect(final.remainingPosition).toBeNull();
+    expect(ledger.snapshot(3_000)).toMatchObject({
+      cashBalance: 10_015,
+      equity: 10_015,
+    });
+    expect(ledger.snapshot(3_000).trades).toHaveLength(2);
+  });
 });

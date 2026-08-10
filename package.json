@@ -57,6 +57,7 @@
     "evidence:progress": "npm run build --silent && node dist/tools/inspectEvidenceProgress.js",
     "evidence:finalize": "npm run build --silent && node dist/tools/finalizeEvidenceDataset.js",
     "evidence:verify": "npm run build --silent && node dist/tools/verifyEvidenceDataset.js",
+    "evidence:research": "npm run build --silent && node dist/tools/researchEvidenceDataset.js",
     "evidence:profitability": "npm run build --silent && node dist/tools/generateEvidenceProfitability.js",
     "evidence:statistics": "npm run build --silent && node dist/tools/generateStatisticalValidation.js",
     "evidence:dashboard": "npm run build --silent && node dist/tools/serveEvidenceDashboard.js",

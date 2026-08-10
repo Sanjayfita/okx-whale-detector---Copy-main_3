@@ -22,7 +22,9 @@ describe('evidence evaluation definition', () => {
       minimumQualifiedAlertsInterpretation: 'INDEPENDENT_EPISODES',
     });
     expect(EVIDENCE_PRIMARY_HORIZON_MINUTES).toBe(15);
-    expect(definition.horizonsMinutes).toEqual([1, 5, 15, 30, 60]);
+    expect(definition.horizonsMinutes).toEqual([
+      0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
+    ]);
     expect(definition.minimumQualifiedAlerts).toBe(1_000);
     expect(definition.minimumCollectionDays).toBe(30);
     expect(definition.minimumInstruments).toBeGreaterThanOrEqual(2);

@@ -15,20 +15,19 @@ const compareAlerts = (
   left: Pick<QualifiedAlertEvidenceRecord, 'detectedAt' | 'alertId'>,
   right: Pick<QualifiedAlertEvidenceRecord, 'detectedAt' | 'alertId'>,
 ): number =>
-  left.detectedAt - right.detectedAt || left.alertId.localeCompare(right.alertId);
+  left.detectedAt - right.detectedAt ||
+  left.alertId.localeCompare(right.alertId);
 
 const validateHorizonWindow = (horizonsMinutes: readonly number[]): number => {
   if (
     horizonsMinutes.length === 0 ||
-    horizonsMinutes.some(
-      (horizon) => !Number.isSafeInteger(horizon) || horizon <= 0,
-    )
+    horizonsMinutes.some((horizon) => !Number.isFinite(horizon) || horizon <= 0)
   ) {
-    throw new Error('Evidence outcome horizons must be positive safe integers');
+    throw new Error('Evidence outcome horizons must be positive finite values');
   }
 
   const maximumOutcomeHorizonMinutes = Math.max(...horizonsMinutes);
-  const labelWindowMs = maximumOutcomeHorizonMinutes * 60_000;
+  const labelWindowMs = Math.round(maximumOutcomeHorizonMinutes * 60_000);
   if (!Number.isSafeInteger(labelWindowMs)) {
     throw new Error('Maximum evidence outcome horizon is too large');
   }
@@ -64,7 +63,10 @@ export const selectIndependentEvidenceAlertIds = (
     }
     seenAlertIds.add(alert.alertId);
     const instrumentAlerts = alertsByInstrument.get(alert.instrumentId) ?? [];
-    instrumentAlerts.push({ alertId: alert.alertId, detectedAt: alert.detectedAt });
+    instrumentAlerts.push({
+      alertId: alert.alertId,
+      detectedAt: alert.detectedAt,
+    });
     alertsByInstrument.set(alert.instrumentId, instrumentAlerts);
   }
 

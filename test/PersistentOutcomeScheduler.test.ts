@@ -36,7 +36,7 @@ const makeDirectory = async (): Promise<string> => {
 };
 
 describe('PersistentOutcomeScheduler', () => {
-  it('creates exactly five persistent horizon jobs in chronological order', async () => {
+  it('creates all standardized persistent horizon jobs in chronological order', async () => {
     const directory = await makeDirectory();
     const scheduler = new PersistentOutcomeScheduler(directory);
     await scheduler.initialize();
@@ -44,15 +44,15 @@ describe('PersistentOutcomeScheduler', () => {
     const created = await scheduler.scheduleAlert(makeEvidence());
 
     expect(created.map((job) => job.horizonMinutes)).toEqual([
-      1, 5, 15, 30, 60,
+      0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
     ]);
-    expect(scheduler.getPendingJobs()).toHaveLength(5);
-    expect(scheduler.getPendingJobs()[0]?.dueAt).toBe(1_060_000);
+    expect(scheduler.getPendingJobs()).toHaveLength(9);
+    expect(scheduler.getPendingJobs()[0]?.dueAt).toBe(1_005_000);
 
     const persisted = JSON.parse(
       await readFile(join(directory, 'pending-observations.json'), 'utf8'),
     ) as { pending: unknown[] };
-    expect(persisted.pending).toHaveLength(5);
+    expect(persisted.pending).toHaveLength(9);
   });
 
   it('is idempotent when the same alert is scheduled twice', async () => {
@@ -63,7 +63,7 @@ describe('PersistentOutcomeScheduler', () => {
     const duplicateJobs = await scheduler.scheduleAlert(makeEvidence());
 
     expect(duplicateJobs).toHaveLength(0);
-    expect(scheduler.getPendingJobs()).toHaveLength(5);
+    expect(scheduler.getPendingJobs()).toHaveLength(9);
   });
 
   it('schedules only the horizons frozen for the evaluation', async () => {
@@ -88,8 +88,8 @@ describe('PersistentOutcomeScheduler', () => {
       scheduler.scheduleAlert(makeEvidence()),
     ]);
 
-    expect(first.length + second.length).toBe(5);
-    expect(scheduler.getPendingJobs()).toHaveLength(5);
+    expect(first.length + second.length).toBe(9);
+    expect(scheduler.getPendingJobs()).toHaveLength(9);
   });
 
   it('recovers pending jobs after a restart and returns only due jobs', async () => {
@@ -101,11 +101,11 @@ describe('PersistentOutcomeScheduler', () => {
     const recovered = new PersistentOutcomeScheduler(directory);
     await recovered.initialize();
 
-    expect(recovered.getPendingJobs()).toHaveLength(5);
-    expect(recovered.getDueJobs(1_059_999)).toHaveLength(0);
+    expect(recovered.getPendingJobs()).toHaveLength(9);
+    expect(recovered.getDueJobs(1_004_999)).toHaveLength(0);
     expect(
-      recovered.getDueJobs(1_060_000).map((job) => job.horizonMinutes),
-    ).toEqual([1]);
+      recovered.getDueJobs(1_005_000).map((job) => job.horizonMinutes),
+    ).toEqual([0.08333333333333333]);
   });
 
   it('reconstructs jobs when a crash occurs after the alert append', async () => {
@@ -119,9 +119,9 @@ describe('PersistentOutcomeScheduler', () => {
     const recovered = new PersistentOutcomeScheduler(directory);
     await recovered.initialize();
 
-    expect(recovered.getPendingJobs()).toHaveLength(5);
+    expect(recovered.getPendingJobs()).toHaveLength(9);
     expect(recovered.getLastReconciliation()).toEqual({
-      addedMissingJobs: 5,
+      addedMissingJobs: 9,
       removedCompletedJobs: 0,
       unchangedJobs: 0,
     });
@@ -169,11 +169,11 @@ describe('PersistentOutcomeScheduler', () => {
     const recovered = new PersistentOutcomeScheduler(directory);
     await recovered.initialize();
 
-    expect(recovered.getPendingJobs()).toHaveLength(4);
+    expect(recovered.getPendingJobs()).toHaveLength(8);
     expect(recovered.getLastReconciliation()).toEqual({
       addedMissingJobs: 0,
       removedCompletedJobs: 1,
-      unchangedJobs: 4,
+      unchangedJobs: 8,
     });
   });
 
@@ -200,7 +200,7 @@ describe('PersistentOutcomeScheduler', () => {
 
     await scheduler.completeObservation(observation);
 
-    expect(scheduler.getPendingJobs()).toHaveLength(4);
+    expect(scheduler.getPendingJobs()).toHaveLength(8);
     expect(
       await readFile(join(directory, 'outcomes.ndjson'), 'utf8'),
     ).toContain('"horizonMinutes":1');

@@ -13,9 +13,10 @@ export interface LivePriceSnapshot {
   instrumentId: string;
   observedAt: number;
   price: number;
-  maximumFavorableExcursionPercent: number;
-  maximumAdverseExcursionPercent: number;
-  excursionMeasurement: ExcursionMeasurement;
+  /** Optional only for injected/replay readers. Live OKX paths are derived. */
+  maximumFavorableExcursionPercent?: number;
+  maximumAdverseExcursionPercent?: number;
+  excursionMeasurement?: ExcursionMeasurement;
 }
 
 export interface LiveEvidenceCollectorDependencies {
@@ -93,9 +94,14 @@ export class LiveEvidenceCollector {
     const jobsByInstrument = new Map<string, PendingOutcomeJob[]>();
     for (const job of this.dependencies.scheduler.getDueJobs(now)) {
       if (now - job.dueAt > this.maximumObservationDelayMs) {
+        await this.dependencies.scheduler.markObservationMissed(
+          job,
+          now,
+          'OBSERVATION_WINDOW_EXPIRED',
+        );
         this.reportObservationErrorOnce(
           new Error(
-            'Outcome observation window expired; the job remains pending for integrity reporting',
+            'Outcome observation window expired; the job was durably marked MISSED',
           ),
           job,
         );
@@ -189,6 +195,60 @@ export class LiveEvidenceCollector {
     const directionAdjustedReturnPercent =
       job.direction === 'BEARISH' ? -rawReturnPercent : rawReturnPercent;
 
+    const pathPoints = [
+      ...this.dependencies.scheduler
+        .getCompletedObservations(job.alertId)
+        .map((observation) => ({
+          observedAt: observation.observedAt,
+          rawReturnPercent: observation.rawReturnPercent,
+        })),
+      { observedAt: snapshot.observedAt, rawReturnPercent },
+    ];
+    const maximumUpwardExcursionPercent = Math.max(
+      0,
+      ...pathPoints.map((point) => point.rawReturnPercent),
+    );
+    const maximumDownwardExcursionPercent = Math.max(
+      0,
+      ...pathPoints.map((point) => -point.rawReturnPercent),
+    );
+    const upwardPoint = pathPoints.find(
+      (point) => point.rawReturnPercent === maximumUpwardExcursionPercent,
+    );
+    const downwardPoint = pathPoints.find(
+      (point) => -point.rawReturnPercent === maximumDownwardExcursionPercent,
+    );
+    const timeToMaximumUpwardExcursionMs =
+      maximumUpwardExcursionPercent === 0
+        ? 0
+        : (upwardPoint?.observedAt ?? snapshot.observedAt) - job.detectedAt;
+    const timeToMaximumDownwardExcursionMs =
+      maximumDownwardExcursionPercent === 0
+        ? 0
+        : (downwardPoint?.observedAt ?? snapshot.observedAt) - job.detectedAt;
+    const maximumFavorableExcursionPercent =
+      snapshot.excursionMeasurement === 'OBSERVED_PATH' &&
+      snapshot.maximumFavorableExcursionPercent !== undefined
+        ? snapshot.maximumFavorableExcursionPercent
+        : job.direction === 'BULLISH'
+          ? maximumUpwardExcursionPercent
+          : maximumDownwardExcursionPercent;
+    const maximumAdverseExcursionPercent =
+      snapshot.excursionMeasurement === 'OBSERVED_PATH' &&
+      snapshot.maximumAdverseExcursionPercent !== undefined
+        ? snapshot.maximumAdverseExcursionPercent
+        : job.direction === 'BULLISH'
+          ? maximumDownwardExcursionPercent
+          : maximumUpwardExcursionPercent;
+    const timeToMaximumFavorableExcursionMs =
+      job.direction === 'BULLISH'
+        ? timeToMaximumUpwardExcursionMs
+        : timeToMaximumDownwardExcursionMs;
+    const timeToMaximumAdverseExcursionMs =
+      job.direction === 'BULLISH'
+        ? timeToMaximumDownwardExcursionMs
+        : timeToMaximumUpwardExcursionMs;
+
     const observation = createAlertOutcomeObservation({
       evaluationId: job.evaluationId,
       alertId: job.alertId,
@@ -200,11 +260,17 @@ export class LiveEvidenceCollector {
       observedPrice: snapshot.price,
       rawReturnPercent,
       directionAdjustedReturnPercent,
-      maximumFavorableExcursionPercent:
-        snapshot.maximumFavorableExcursionPercent,
-      maximumAdverseExcursionPercent:
-        snapshot.maximumAdverseExcursionPercent,
-      excursionMeasurement: snapshot.excursionMeasurement,
+      maximumFavorableExcursionPercent,
+      maximumAdverseExcursionPercent,
+      maximumUpwardExcursionPercent,
+      maximumDownwardExcursionPercent,
+      timeToMaximumFavorableExcursionMs,
+      timeToMaximumAdverseExcursionMs,
+      timeToMaximumUpwardExcursionMs,
+      timeToMaximumDownwardExcursionMs,
+      pathSampleCount: pathPoints.length,
+      pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
+      excursionMeasurement: 'OBSERVED_PATH',
     });
 
     await this.dependencies.scheduler.completeObservation(observation);

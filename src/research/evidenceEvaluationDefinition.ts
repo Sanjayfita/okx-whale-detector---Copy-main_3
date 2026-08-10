@@ -25,7 +25,9 @@ export const createCurrentEvidenceEvaluationDefinition =
   (): EvidenceEvaluationDefinition => {
     const alphaResearchConfig = createAlphaResearchConfig();
     const instruments = Object.freeze([...new Set(WATCHLIST)].sort());
-    const horizonsMinutes = Object.freeze([1, 5, 15, 30, 60] as const);
+    const horizonsMinutes = Object.freeze([
+      0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
+    ] as const);
     const minimumCollectionDays = 30;
     const minimumQualifiedAlerts = 1_000;
     const minimumInstruments = Math.min(2, instruments.length);

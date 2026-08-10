@@ -17,7 +17,9 @@ describe('createEvaluationSessionManifest', () => {
     });
 
     expect(manifest.instruments).toEqual(['BTC-USDT', 'XRP-USDT']);
-    expect(manifest.horizonsMinutes).toEqual([1, 5, 15, 30, 60]);
+    expect(manifest.horizonsMinutes).toEqual([
+      0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
+    ]);
     expect(manifest.minimumCollectionDays).toBe(30);
     expect(manifest.minimumQualifiedAlerts).toBe(1_000);
     expect(manifest.minimumInstruments).toBe(2);

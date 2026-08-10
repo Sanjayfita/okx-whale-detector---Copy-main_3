@@ -52,6 +52,50 @@ const createEvidence = (
   });
 
 describe('LiveEvidenceCollector', () => {
+  it('builds a restart-recoverable sampled path with raw extrema and timing', async () => {
+    const directory = await createEvaluationDirectory();
+    const horizons = [0.08333333333333333, 0.25] as const;
+    const scheduler = new PersistentOutcomeScheduler(directory, horizons);
+    let price = 101;
+    const collector = new LiveEvidenceCollector({
+      recorder: new QualifiedAlertRecorder({ evaluationDirectory: directory }),
+      scheduler,
+      readPrice: async (instrumentId, dueAt) => ({
+        instrumentId,
+        observedAt: dueAt,
+        price,
+      }),
+    });
+    await collector.initialize();
+    await collector.recordQualifiedAlert(createEvidence());
+
+    expect(await collector.processDueObservations(6_000)).toBe(1);
+    price = 99;
+    expect(await collector.processDueObservations(16_000)).toBe(1);
+
+    const persisted = (
+      await readFile(join(directory, 'outcomes.ndjson'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(persisted[1]).toMatchObject({
+      maximumUpwardExcursionPercent: 1,
+      maximumDownwardExcursionPercent: 1,
+      maximumFavorableExcursionPercent: 1,
+      maximumAdverseExcursionPercent: 1,
+      timeToMaximumUpwardExcursionMs: 5_000,
+      timeToMaximumDownwardExcursionMs: 15_000,
+      pathSampleCount: 2,
+      pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
+    });
+
+    const recovered = new PersistentOutcomeScheduler(directory, horizons);
+    await recovered.initialize();
+    expect(recovered.getCompletedObservations('alert-1')).toHaveLength(2);
+    expect(recovered.getPendingJobs()).toHaveLength(0);
+  });
+
   it('records an alert, schedules horizons, and completes due observations', async () => {
     const directory = await createEvaluationDirectory();
     const scheduler = new PersistentOutcomeScheduler(directory);
@@ -71,9 +115,9 @@ describe('LiveEvidenceCollector', () => {
     await collector.initialize();
     await collector.recordQualifiedAlert(createEvidence());
 
-    expect(scheduler.getPendingJobs()).toHaveLength(5);
-    expect(await collector.processDueObservations(61_000)).toBe(1);
-    expect(scheduler.getPendingJobs()).toHaveLength(4);
+    expect(scheduler.getPendingJobs()).toHaveLength(9);
+    expect(await collector.processDueObservations(6_000)).toBe(1);
+    expect(scheduler.getPendingJobs()).toHaveLength(8);
 
     const alerts = await readFile(
       join(directory, 'qualified-alerts.ndjson'),
@@ -81,7 +125,7 @@ describe('LiveEvidenceCollector', () => {
     );
     const outcomes = await readFile(join(directory, 'outcomes.ndjson'), 'utf8');
     expect(alerts).toContain('"alertId":"alert-1"');
-    expect(outcomes).toContain('"horizonMinutes":1');
+    expect(outcomes).toContain('"horizonMinutes":0.08333333333333333');
     expect(outcomes).toContain('"directionAdjustedReturnPercent":1');
     expect(outcomes).toContain('"excursionMeasurement":"OBSERVED_PATH"');
   });
@@ -103,7 +147,10 @@ describe('LiveEvidenceCollector', () => {
 
   it('keeps an expired job pending without repeated ticker calls or logs', async () => {
     const directory = await createEvaluationDirectory();
-    const scheduler = new PersistentOutcomeScheduler(directory);
+    const scheduler = new PersistentOutcomeScheduler(
+      directory,
+      [1, 5, 15, 30, 60],
+    );
     const onObservationError = vi.fn();
     const readPrice = vi.fn(async () => {
       throw new Error('expired jobs must not call the ticker');
@@ -127,11 +174,25 @@ describe('LiveEvidenceCollector', () => {
       expect.objectContaining({ message: expect.stringContaining('expired') }),
     );
     expect(scheduler.getPendingJobs()).toHaveLength(5);
+    expect(scheduler.getPendingJobs()[0]).toMatchObject({
+      status: 'MISSED',
+      failureReason: 'OBSERVATION_WINDOW_EXPIRED',
+    });
+
+    const recovered = new PersistentOutcomeScheduler(
+      directory,
+      [1, 5, 15, 30, 60],
+    );
+    await recovered.initialize();
+    expect(recovered.getDueJobs(63_000)).toHaveLength(0);
   });
 
   it('continues processing unrelated instruments after one ticker fails', async () => {
     const directory = await createEvaluationDirectory();
-    const scheduler = new PersistentOutcomeScheduler(directory);
+    const scheduler = new PersistentOutcomeScheduler(
+      directory,
+      [1, 5, 15, 30, 60],
+    );
     const onObservationError = vi.fn();
     const collector = new LiveEvidenceCollector({
       recorder: new QualifiedAlertRecorder({ evaluationDirectory: directory }),
@@ -169,7 +230,10 @@ describe('LiveEvidenceCollector', () => {
 
   it('shares one ticker snapshot across same-instrument due jobs', async () => {
     const directory = await createEvaluationDirectory();
-    const scheduler = new PersistentOutcomeScheduler(directory);
+    const scheduler = new PersistentOutcomeScheduler(
+      directory,
+      [1, 5, 15, 30, 60],
+    );
     const readPrice = vi.fn(async (instrumentId: string, dueAt: number) => ({
       instrumentId,
       observedAt: dueAt,
@@ -186,7 +250,9 @@ describe('LiveEvidenceCollector', () => {
 
     await collector.initialize();
     await collector.recordQualifiedAlert(createEvidence());
-    await collector.recordQualifiedAlert(createEvidence({ alertId: 'alert-2' }));
+    await collector.recordQualifiedAlert(
+      createEvidence({ alertId: 'alert-2' }),
+    );
 
     expect(await collector.processDueObservations(61_000)).toBe(2);
     expect(readPrice).toHaveBeenCalledOnce();
@@ -196,7 +262,10 @@ describe('LiveEvidenceCollector', () => {
 
   it('validates exchange timestamps against request completion time', async () => {
     const directory = await createEvaluationDirectory();
-    const scheduler = new PersistentOutcomeScheduler(directory);
+    const scheduler = new PersistentOutcomeScheduler(
+      directory,
+      [1, 5, 15, 30, 60],
+    );
     let clockNow = 61_000;
     const collector = new LiveEvidenceCollector({
       recorder: new QualifiedAlertRecorder({ evaluationDirectory: directory }),

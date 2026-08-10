@@ -35,10 +35,6 @@ export const createQualifiedAlertOutcomeBundle = (input: {
     return parsed;
   });
 
-  if (observations.length !== ALERT_OUTCOME_HORIZONS_MINUTES.length) {
-    throw new Error('Exactly five alert outcome observations are required');
-  }
-
   const horizons = new Set<number>();
 
   for (const observation of observations) {
@@ -72,6 +68,12 @@ export const createQualifiedAlertOutcomeBundle = (input: {
     }
 
     horizons.add(observation.horizonMinutes);
+  }
+
+  if (observations.length !== ALERT_OUTCOME_HORIZONS_MINUTES.length) {
+    throw new Error(
+      `Exactly ${ALERT_OUTCOME_HORIZONS_MINUTES.length} alert outcome observations are required`,
+    );
   }
 
   for (const requiredHorizon of ALERT_OUTCOME_HORIZONS_MINUTES) {

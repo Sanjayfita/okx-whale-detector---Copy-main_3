@@ -7,10 +7,10 @@ inputs without placing orders. A whale alert remains the event generator. Every
 confirmation feature is captured for later analysis and remains disabled in
 production.
 
-The repository currently contains no empirical evaluation directory. The supplied
-baseline (344 qualified alerts, 1,581 completed observations, 10.0569% win rate,
--0.1799 USDT net expectancy) cannot be regenerated because its source data and date
-range are absent. Profitability remains unproven.
+The repository currently contains no qualifying immutable empirical release.
+Legacy summaries cannot substitute for the source events, point-in-time snapshots,
+future observations, and hashes required by this workflow. Profitability remains
+unproven.
 
 ## Lifecycle
 
@@ -20,15 +20,18 @@ registry version, outcome horizons, and acceptance targets. Collection and final
 analysis refuse to run from another commit, a dirty worktree, or a changed
 configuration.
 
-```bash
-npm run evidence:init -- eval-YYYY-MM-DD-v1
-npm run evidence:collect -- eval-YYYY-MM-DD-v1
+```powershell
+cd "C:\path\to\okx-whale-detector---Copy-main_3"
+$EvaluationId = "eval-YYYY-MM-DD-v1"
+npm.cmd run evidence:init -- $EvaluationId
+npm.cmd run evidence:collect -- $EvaluationId
 ```
 
 Inspect health from another terminal:
 
-```bash
-npm run evidence:progress -- eval-YYYY-MM-DD-v1
+```powershell
+npm.cmd run evidence:progress -- $EvaluationId
+npm.cmd run evidence:progress -- $EvaluationId --json
 ```
 
 Stop the collector gracefully with `Ctrl+C` before finalization. If the process was
@@ -44,12 +47,21 @@ while an immutable release is being copied. A same-host lock is archived under
 foreign-host, mismatched, or apparently live lock is never stolen; investigate it
 manually rather than deleting it blindly.
 
-Once the readiness gate passes, create an immutable release and run the unchanged
-alpha analysis automatically:
+Verify an active evaluation at any time. This checks integrity without claiming
+that the sample is large enough:
 
-```bash
-npm run evidence:finalize -- eval-YYYY-MM-DD-v1
-npm run evidence:verify -- eval-YYYY-MM-DD-v1 <release-fingerprint>
+```powershell
+npm.cmd run evidence:verify -- $EvaluationId
+```
+
+Once `Readiness status: RESEARCH_READY` appears, stop the collector, finalize,
+verify the immutable release, and open its pre-registered research report:
+
+```powershell
+npm.cmd run evidence:finalize -- $EvaluationId
+$ReleaseFingerprint = "<64-character fingerprint printed by finalize>"
+npm.cmd run evidence:verify -- $EvaluationId $ReleaseFingerprint
+npm.cmd run evidence:research -- "${EvaluationId}:${ReleaseFingerprint}"
 ```
 
 Finalization never enables a feature. It can produce `COMPLETE`,
@@ -60,11 +72,11 @@ means that the configured analysis could run, not that the strategy is profitabl
 
 Each accepted alert has three independent evidence components:
 
-| Component        | File                      | Contract                                                                                                                                  |
-| ---------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Qualified event  | `qualified-alerts.ndjson` | Alert identity, direction, contemporaneous spread/reference price, frozen source commit, and configuration fingerprint                    |
-| Event-time state | `alpha-snapshots.ndjson`  | Confirmed candles, synchronized uncrossed book, public trades, whale lifecycle state, and all 50 extracted feature values as of the alert |
-| Future labels    | `outcomes.ndjson`         | Terminal returns at the frozen 1/5/15/30/60-minute horizons, appended only after each horizon is due                                      |
+| Component        | File                      | Contract                                                                                                                                                                                                     |
+| ---------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Qualified event  | `qualified-alerts.ndjson` | Evaluation/event identity, instrument type, exchange/source/reference/local timestamps, direction, spread/reference price, source commit, and configuration fingerprint                                      |
+| Event-time state | `alpha-snapshots.ndjson`  | Confirmed candles, synchronized bounded book, public trades, whale price/size/notional/distance/lifecycle state, 50 persisted feature values, temporal-integrity proof, and explicit derivatives missingness |
+| Future labels    | `outcomes.ndjson`         | Raw and direction-adjusted returns at 5s/15s/30s/1m/3m/5m/15m/30m/60m plus sampled up/down and favorable/adverse excursions and time-to-extrema                                                              |
 
 The event-time snapshot stores both the raw inputs and the complete feature vector.
 On every read, features are recomputed with the frozen configuration and compared
@@ -76,11 +88,17 @@ Unavailable data remains explicit. Missing features are `null`; they are never
 backfilled from the outcome period. A missing snapshot remains a visible incomplete
 observation and is never reconstructed with later market state.
 
-The public ticker sampled at a terminal horizon does not observe the full price path.
-Such outcomes set `excursionMeasurement` to `UNAVAILABLE`. Their zero MFE/MAE
-placeholders are excluded from excursion and retrospective volatility summaries.
-Legacy zero/zero records without measurement provenance normalize to
-`LEGACY_UNSPECIFIED` and are also excluded. Terminal return labels remain usable.
+The collector builds a compact path from the nine pre-registered horizon samples.
+It persists raw upward/downward excursion separately from alert-direction MFE/MAE,
+including sample count and time-to-extrema. This supports coarse entry-delay and
+time-exit research without reducing events to WIN/LOSS. It is not tick replay:
+intra-sample extrema can be missed and must never be described as continuous-path
+MFE/MAE. Legacy unavailable path values remain excluded from finalization.
+
+Funding and open interest are explicitly `null` with missing-data flags. They are
+not backfilled later and their absence does not crash collection. Adding them
+requires a separately versioned, rate-limited, point-in-time OKX adapter and a new
+evaluation version.
 
 ## Durability and ordering
 
@@ -97,6 +115,8 @@ Legacy zero/zero records without measurement provenance normalize to
 - Pending alpha contexts are bounded and expire with diagnostics. A missing context
   callback cannot cause unbounded memory growth.
 - Outcome jobs use only the horizons frozen in the evaluation manifest.
+- Jobs that miss their allowed timestamp window are atomically changed to durable
+  `MISSED` state with a reason. Restarts do not retry or silently discard them.
 - Collection acquires the evaluation lease before opening evidence writers and
   releases it only after ingestion stops and queued evidence drains. A failed drain
   deliberately leaves the lease in place for conservative crash recovery.
@@ -113,13 +133,16 @@ The default empirical target is:
 - at least two observed instruments;
 - one valid, non-synthetic event snapshot and persisted feature vector per alert;
 - all configured terminal outcomes for every alert;
+- verified event-time timestamp metadata and sampled path excursions;
 - no pending or overdue outcome jobs;
 - no scheduler coverage gaps, unmatched records, or malformed/inconsistent records.
 
-`evidence:progress` reports raw counts, snapshot and outcome completeness, instrument
+`evidence:progress` reports `INSUFFICIENT_DATA`, `COLLECTING`, `RESEARCH_READY`, or
+`FINALIZED`, plus raw counts, snapshot and outcome completeness, instrument
 coverage, feature-value availability, path-excursion availability, overdue work,
-health reasons, active-lease status, and a SHA-256 fingerprint of the current
-evidence sources. An active lease blocks final readiness even when all evidence is
+side/event-type distribution, byte size, health reasons, active-lease status, and a
+SHA-256 fingerprint of the current evidence sources. `--json` is the machine-readable
+quality report. An active lease blocks final readiness even when all evidence is
 complete. A low feature-value availability rate is not automatically corruption: a
 feature can be legitimately unavailable because its warm-up history or event-time
 source was missing. Missing persisted feature vectors are a readiness failure.
@@ -158,6 +181,10 @@ an existing target. `evidence:verify` recomputes source, dataset, report, qualit
 and content-address identities so later corruption is detectable.
 Creating a new version never overwrites an earlier version.
 
+`alpha-dataset.json` is deterministically ordered by event time. The bundled alpha
+report uses expanding chronological folds, purge based on outcome availability,
+embargo, and an untouched final holdout. Rows are never randomly shuffled.
+
 The standalone exploratory command also uses a non-overwriting, fingerprinted path:
 
 ```text
@@ -168,15 +195,43 @@ The immutable release is the authoritative artifact for final empirical review.
 
 ## Remaining limitations
 
-- Public ticker polling supplies terminal midpoint labels, not executable fills.
+- Public ticker polling supplies sampled midpoint labels, not executable fills.
   The 0.20% round-trip cost remains a fixed research assumption and does not model
   observation-specific spread, depth slippage, latency, partial fills, funding,
   minimum size, leverage, or liquidation.
-- Full MFE/MAE requires a separately validated path-sampling design; terminal
-  sampling deliberately reports it as unavailable.
+- Full tick-path MFE/MAE and flexible intrahorizon entry simulation require a
+  separately designed bounded raw-path recorder. Current excursions cover only the
+  nine standardized samples and are labeled accordingly.
 - Alert span and instrument counts do not prove balanced coverage across every
   volatility, liquidity, or trend regime. Fold stability, instrument results, drift,
   and final-holdout diagnostics must be reviewed before any production proposal.
 - Evaluation data is ignored by Git. Back it up using an access-controlled,
   append-preserving storage process; do not commit potentially large market evidence
   blindly.
+
+## Windows operating procedure
+
+1. Commit the implementation and confirm `git status --short` prints nothing.
+   Initialization and collection intentionally fail on a dirty or different commit.
+2. Open VS Code's PowerShell terminal in the repository and run the initialization
+   and collection commands above. Leave that terminal open; Windows sleep, network
+   loss, or closing the terminal stops collection.
+3. Open a second terminal for `evidence:progress` and `evidence:verify`. Watch
+   `Malformed records`, `Missing point-in-time metadata`, `Missed observation
+windows`, `Overdue observations`, instrument coverage, snapshot completeness,
+   outcome completeness, and the readiness state.
+4. To restart after a normal stop, press `Ctrl+C`, wait for shutdown, and run the
+   exact same collect command from the exact frozen commit. After a crash or reboot,
+   run the same command; reconciliation reconstructs missing pending jobs and loads
+   completed sampled paths before collection resumes.
+5. Do not finalize while collection is running. Finalize only after the progress
+   state is `RESEARCH_READY`, then verify and research the printed release ID.
+6. Back up the entire `data\evaluations\<evaluation-id>\` directory, including
+   `manifest.json`, all NDJSON files, `pending-observations.json`, `lease-history`,
+   and `datasets`. Preserve bytes and filenames; do not open-and-save NDJSON in an
+   editor that may rewrite line endings.
+
+Problem indicators are any `UNHEALTHY` state, malformed/unmatched/duplicate record,
+missing snapshot, missed or overdue window, scheduler gap, fingerprint mismatch,
+or unexpectedly absent instrument/side/event-type coverage. Stop and investigate;
+do not edit evidence files to make the counters pass.

@@ -55,6 +55,92 @@ describe('TradingPlatformEngine', () => {
     expect(snapshot.trades[0]?.fees).toBeGreaterThan(0);
   });
 
+  it('uses the executable exit side instead of midpoint for protective triggers', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+    store.account.openPosition({
+      instrumentId: 'BTC-USDT-SWAP',
+      direction: 'LONG',
+      openedAt: 1_000,
+      entryPrice: 100,
+      quantityBaseUnits: 1,
+      stopLossPrice: 95,
+      takeProfitPrice: 110.5,
+      riskAmount: 5,
+      entryReason: 'TEST_ENTRY',
+      entryFee: 0,
+    });
+
+    const state = new MarketState(resolveSymbolConfig('BTC-USDT-SWAP'), {
+      instId: 'BTC-USDT-SWAP',
+      instType: 'SWAP',
+      quoteCurrency: 'USDT',
+      baseUnitsPerSize: 1,
+    });
+    expect(
+      state.orderBookManager.applyUpdate(
+        [['110', '10', '0', '1']],
+        [['111', '10', '0', '1']],
+        2_000,
+        1,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+
+    engine.onOrderBook('BTC-USDT-SWAP', state);
+    expect(store.account.getOpenPosition('BTC-USDT-SWAP')).toBeDefined();
+    expect(store.account.snapshot(2_000).trades).toHaveLength(0);
+  });
+
+  it('journals a partial protective exit and leaves only residual exposure', () => {
+    const store = new PlatformStateStore({ now: () => 2_000 });
+    const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
+    store.account.openPosition({
+      instrumentId: 'BTC-USDT-SWAP',
+      direction: 'LONG',
+      openedAt: 1_000,
+      entryPrice: 100,
+      quantityBaseUnits: 1,
+      stopLossPrice: 95,
+      takeProfitPrice: 110,
+      riskAmount: 5,
+      entryReason: 'TEST_ENTRY',
+      entryFee: 0,
+    });
+
+    const state = new MarketState(resolveSymbolConfig('BTC-USDT-SWAP'), {
+      instId: 'BTC-USDT-SWAP',
+      instType: 'SWAP',
+      quoteCurrency: 'USDT',
+      baseUnitsPerSize: 1,
+    });
+    expect(
+      state.orderBookManager.applyUpdate(
+        [['110', '2', '0', '1']],
+        [['111', '10', '0', '1']],
+        2_000,
+        1,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+
+    engine.onOrderBook('BTC-USDT-SWAP', state);
+    const snapshot = store.account.snapshot(2_000);
+    expect(snapshot.openPositions[0]?.quantityBaseUnits).toBeCloseTo(0.5);
+    expect(snapshot.trades).toHaveLength(1);
+    expect(snapshot.trades[0]).toMatchObject({
+      exitReason: 'TAKE_PROFIT',
+      quantityBaseUnits: 0.5,
+    });
+    expect(snapshot.fills).toHaveLength(1);
+    expect(snapshot.fills[0]).toMatchObject({
+      reduceOnly: true,
+      quantityBaseUnits: 0.5,
+    });
+  });
+
   it('does not materialize execution depth for ordinary order-book updates', () => {
     const store = new PlatformStateStore({ now: () => 2_000 });
     const engine = new TradingPlatformEngine(store, { now: () => 2_000 });
@@ -128,7 +214,9 @@ describe('TradingPlatformEngine', () => {
       ),
     ).toBe(true);
     engine.onOrderBook('BTC-USDT-SWAP', state);
-    expect(engine.getExecutionBookMetrics().executionBookMaterializations).toBe(0);
+    expect(engine.getExecutionBookMetrics().executionBookMaterializations).toBe(
+      0,
+    );
 
     const closes = [100, 98, 96, 94, 94.5, 96.5, 98.5] as const;
     closes.forEach((close, index) => {
@@ -289,12 +377,16 @@ describe('TradingPlatformEngine', () => {
     });
 
     const snapshot = store.snapshot(2_000);
-    expect(snapshot.strategyStatus['ema-trend-crossover-v1']?.signal).toBe('BUY');
+    expect(snapshot.strategyStatus['ema-trend-crossover-v1']?.signal).toBe(
+      'BUY',
+    );
     expect(snapshot.positions).toHaveLength(0);
     expect(snapshot.trades).toHaveLength(0);
     expect(
       snapshot.logs.some((entry) =>
-        entry.message.includes('Paper entry missed because no usable order book'),
+        entry.message.includes(
+          'Paper entry missed because no usable order book',
+        ),
       ),
     ).toBe(false);
   });

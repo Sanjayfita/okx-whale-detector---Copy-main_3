@@ -49,7 +49,9 @@ export class OrderBookManager {
       !Number.isSafeInteger(timestamp) ||
       timestamp < 0 ||
       !Number.isSafeInteger(seqId) ||
-      !Number.isSafeInteger(prevSeqId)
+      !Number.isSafeInteger(prevSeqId) ||
+      !this.areLevelsValid(bids) ||
+      !this.areLevelsValid(asks)
     ) {
       this.markInvalid();
       return false;
@@ -75,6 +77,7 @@ export class OrderBookManager {
       !this.orderBook.initialized ||
       this.orderBook.lastSeqId === null ||
       prevSeqId !== this.orderBook.lastSeqId ||
+      seqId <= prevSeqId ||
       timestamp < this.orderBook.updatedAt
     ) {
       this.markInvalid();
@@ -121,22 +124,11 @@ export class OrderBookManager {
     for (const level of levels) {
       const rawPrice = level[0];
       const rawSize = level[1];
-
-      if (rawPrice === undefined || rawSize === undefined) {
-        continue;
-      }
-
+      // applyUpdate validates the complete batch before mutating either side.
+      // These fields are therefore present and finite here.
+      if (rawPrice === undefined || rawSize === undefined) return;
       const price = Number(rawPrice);
       const size = Number(rawSize);
-
-      if (
-        !Number.isFinite(price) ||
-        price <= 0 ||
-        !Number.isFinite(size) ||
-        size < 0
-      ) {
-        continue;
-      }
 
       if (size === 0) {
         side.delete(price);
@@ -144,10 +136,6 @@ export class OrderBookManager {
       }
 
       const notionalQuote = price * size * this.instrument.baseUnitsPerSize;
-
-      if (!Number.isFinite(notionalQuote) || notionalQuote <= 0) {
-        continue;
-      }
 
       side.set(price, {
         price,
@@ -159,6 +147,30 @@ export class OrderBookManager {
         updatedAt: timestamp,
       });
     }
+  }
+
+  private areLevelsValid(levels: readonly OrderBookLevel[]): boolean {
+    for (const level of levels) {
+      const rawPrice = level[0];
+      const rawSize = level[1];
+      if (rawPrice === undefined || rawSize === undefined) return false;
+
+      const price = Number(rawPrice);
+      const size = Number(rawSize);
+      if (
+        !Number.isFinite(price) ||
+        price <= 0 ||
+        !Number.isFinite(size) ||
+        size < 0
+      ) {
+        return false;
+      }
+      if (size === 0) continue;
+
+      const notionalQuote = price * size * this.instrument.baseUnitsPerSize;
+      if (!Number.isFinite(notionalQuote) || notionalQuote <= 0) return false;
+    }
+    return true;
   }
 
   private pruneDepth(): boolean {
@@ -249,7 +261,12 @@ export class OrderBookManager {
   }
 
   private markInvalid(): void {
+    this.orderBook.bids.clear();
+    this.orderBook.asks.clear();
+    this.orderBook.lastSeqId = null;
     this.orderBook.status = 'INVALID';
     this.orderBook.initialized = false;
+    this.orderBook.updatedAt = 0;
+    this.lastUpdatePrunedDepth = false;
   }
 }

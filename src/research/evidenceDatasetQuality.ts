@@ -27,10 +27,13 @@ export interface EvidenceInstrumentQuality {
 }
 
 export interface EvidenceDatasetQualityMetrics {
+  readonly rawEventCount: number;
   readonly qualifiedAlertCount: number;
   readonly snapshotCount: number;
   readonly capturedFeatureSnapshotCount: number;
   readonly missingCapturedFeatureSnapshotCount: number;
+  readonly missingSnapshotIntegrityCount: number;
+  readonly missingDerivativeMetadataCount: number;
   readonly missingSnapshotCount: number;
   readonly unmatchedSnapshotCount: number;
   readonly completedObservationCount: number;
@@ -42,6 +45,7 @@ export interface EvidenceDatasetQualityMetrics {
   readonly completeBundleCount: number;
   readonly incompleteBundleCount: number;
   readonly pendingObservationCount: number;
+  readonly missedObservationCount: number;
   readonly overduePendingObservationCount: number;
   readonly schedulerCoverageGapCount: number;
   readonly unmatchedObservationCount: number;
@@ -56,6 +60,11 @@ export interface EvidenceDatasetQualityMetrics {
   readonly snapshotCompletenessRate: number | null;
   readonly outcomeCompletenessRate: number | null;
   readonly instruments: readonly EvidenceInstrumentQuality[];
+  readonly sideDistribution: Readonly<{
+    bullish: number;
+    bearish: number;
+  }>;
+  readonly signalTypeDistribution: Readonly<Record<string, number>>;
   readonly integrityValid: boolean;
   readonly snapshotRequirementMet: boolean;
   readonly outcomeRequirementMet: boolean;
@@ -123,6 +132,8 @@ export const evaluateEvidenceDatasetQuality = (input: {
   let availableFeatureValueCount = 0;
   let missingFeatureValueCount = 0;
   let capturedFeatureSnapshotCount = 0;
+  let missingSnapshotIntegrityCount = 0;
+  let missingDerivativeMetadataCount = 0;
   for (const snapshot of input.snapshots) {
     const alert = alertById.get(snapshot.evidence.alertId);
     if (
@@ -141,6 +152,19 @@ export const evaluateEvidenceDatasetQuality = (input: {
       missingFeatureValueCount += features.missingFeatureCount;
       if (snapshot.capturedFeatures !== undefined) {
         capturedFeatureSnapshotCount += 1;
+      }
+      if (
+        snapshot.integrity === undefined ||
+        snapshot.integrity.eventTimestamp !== alert.detectedAt ||
+        snapshot.integrity.featureTimestamp > alert.detectedAt ||
+        snapshot.integrity.maximumSourceAvailabilityTimestamp >
+          alert.detectedAt ||
+        !snapshot.integrity.temporalIntegrityVerified
+      ) {
+        missingSnapshotIntegrityCount += 1;
+      }
+      if (snapshot.derivatives === undefined) {
+        missingDerivativeMetadataCount += 1;
       }
       snapshotByAlertId.set(snapshot.evidence.alertId, snapshot);
     } catch {
@@ -180,6 +204,7 @@ export const evaluateEvidenceDatasetQuality = (input: {
 
   const pendingKeys = new Set<string>();
   let pendingObservationCount = 0;
+  let missedObservationCount = 0;
   let overduePendingObservationCount = 0;
   for (const job of input.pendingJobs) {
     const key = jobKey(job);
@@ -200,7 +225,11 @@ export const evaluateEvidenceDatasetQuality = (input: {
     }
     pendingKeys.add(key);
     pendingObservationCount += 1;
-    if (input.now > job.dueAt + input.maximumObservationDelayMs) {
+    if (job.status === 'MISSED') missedObservationCount += 1;
+    if (
+      job.status === 'MISSED' ||
+      input.now > job.dueAt + input.maximumObservationDelayMs
+    ) {
       overduePendingObservationCount += 1;
     }
   }
@@ -262,11 +291,13 @@ export const evaluateEvidenceDatasetQuality = (input: {
     missingSnapshotCount === 0 &&
     unmatchedSnapshotCount === 0 &&
     missingCapturedFeatureSnapshotCount === 0;
+  const pointInTimeRequirementMet = missingSnapshotIntegrityCount === 0;
   const outcomeRequirementMet =
     integrity.alerts.length > 0 &&
     completeBundleCount === integrity.alerts.length &&
     missingObservationCount === 0 &&
-    pendingObservationCount === 0;
+    pendingObservationCount === 0 &&
+    observedPathExcursionCount === integrity.outcomes.length;
   const integrityValid =
     malformedRecordCount === 0 &&
     integrity.unmatchedObservations === 0 &&
@@ -299,6 +330,18 @@ export const evaluateEvidenceDatasetQuality = (input: {
     healthReasons.push(
       `${missingCapturedFeatureSnapshotCount} snapshot(s) missing persisted feature values`,
     );
+  if (missingSnapshotIntegrityCount > 0)
+    healthReasons.push(
+      `${missingSnapshotIntegrityCount} snapshot(s) missing verified point-in-time metadata`,
+    );
+  if (missingDerivativeMetadataCount > 0)
+    healthReasons.push(
+      `${missingDerivativeMetadataCount} snapshot(s) missing explicit derivatives availability metadata`,
+    );
+  if (unavailablePathExcursionCount > 0)
+    healthReasons.push(
+      `${unavailablePathExcursionCount} outcome(s) missing sampled path excursions`,
+    );
   if (!minimumInstrumentsMet)
     healthReasons.push(
       `only ${observedInstrumentCount}/${input.manifest.minimumInstruments} required instruments observed`,
@@ -306,15 +349,29 @@ export const evaluateEvidenceDatasetQuality = (input: {
 
   const health: EvidenceCollectionHealth = !integrityValid
     ? 'UNHEALTHY'
-    : missingSnapshotCount > 0 || missingCapturedFeatureSnapshotCount > 0
+    : missingSnapshotCount > 0 ||
+        missingCapturedFeatureSnapshotCount > 0 ||
+        !pointInTimeRequirementMet
       ? 'DEGRADED'
       : 'HEALTHY';
 
+  const signalTypeDistribution: Record<string, number> = {};
+  for (const alert of integrity.alerts) {
+    signalTypeDistribution[alert.signalType] =
+      (signalTypeDistribution[alert.signalType] ?? 0) + 1;
+  }
+  const bullish = integrity.alerts.filter(
+    (alert) => alert.direction === 'BULLISH',
+  ).length;
+
   return Object.freeze({
+    rawEventCount: integrity.alerts.length,
     qualifiedAlertCount: integrity.alerts.length,
     snapshotCount: snapshotByAlertId.size,
     capturedFeatureSnapshotCount,
     missingCapturedFeatureSnapshotCount,
+    missingSnapshotIntegrityCount,
+    missingDerivativeMetadataCount,
     missingSnapshotCount,
     unmatchedSnapshotCount,
     completedObservationCount: integrity.joined.length,
@@ -329,6 +386,7 @@ export const evaluateEvidenceDatasetQuality = (input: {
     completeBundleCount,
     incompleteBundleCount: integrity.alerts.length - completeBundleCount,
     pendingObservationCount,
+    missedObservationCount,
     overduePendingObservationCount,
     schedulerCoverageGapCount,
     unmatchedObservationCount: integrity.unmatchedObservations,
@@ -352,8 +410,13 @@ export const evaluateEvidenceDatasetQuality = (input: {
         ? null
         : integrity.joined.length / expectedObservationCount,
     instruments: Object.freeze(instrumentMetrics),
+    sideDistribution: Object.freeze({
+      bullish,
+      bearish: integrity.alerts.length - bullish,
+    }),
+    signalTypeDistribution: Object.freeze(signalTypeDistribution),
     integrityValid,
-    snapshotRequirementMet,
+    snapshotRequirementMet: snapshotRequirementMet && pointInTimeRequirementMet,
     outcomeRequirementMet,
     health,
     healthReasons: Object.freeze(healthReasons),

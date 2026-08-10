@@ -1,4 +1,4 @@
-import { access, readFile } from 'node:fs/promises';
+import { access, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { isErrorWithCode } from '../core/errorGuards';
@@ -27,6 +27,9 @@ import {
 import { parseQualifiedAlertEvidenceRecord } from './qualifiedAlertEvidence';
 
 export interface EvidenceProgressReport extends EvidenceDatasetQualityMetrics {
+  readonly readinessStatus:
+    'INSUFFICIENT_DATA' | 'COLLECTING' | 'RESEARCH_READY' | 'FINALIZED';
+  readonly datasetSizeBytes: number;
   readonly evaluationId: string;
   readonly collectionStartedAt: number;
   readonly collectionDays: number;
@@ -98,6 +101,34 @@ const pathExists = async (filePath: string): Promise<boolean> => {
   try {
     await access(filePath);
     return true;
+  } catch (error: unknown) {
+    if (isErrorWithCode(error, 'ENOENT')) return false;
+    throw error;
+  }
+};
+
+const fileSize = async (filePath: string): Promise<number> => {
+  try {
+    return (await stat(filePath)).size;
+  } catch (error: unknown) {
+    if (isErrorWithCode(error, 'ENOENT')) return 0;
+    throw error;
+  }
+};
+
+const hasFinalizedRelease = async (
+  evaluationDirectory: string,
+): Promise<boolean> => {
+  try {
+    const entries = await readdir(join(evaluationDirectory, 'datasets'), {
+      withFileTypes: true,
+    });
+    return entries.some(
+      (entry) =>
+        entry.isDirectory() &&
+        !entry.name.startsWith('.') &&
+        /^[a-f0-9]{64}$/u.test(entry.name),
+    );
   } catch (error: unknown) {
     if (isErrorWithCode(error, 'ENOENT')) return false;
     throw error;
@@ -192,6 +223,8 @@ export const inspectEvidenceProgress = async (
     pending,
     evidenceSource,
     evaluationLeaseActive,
+    finalizedReleaseExists,
+    sourceFileSizes,
   ] = await Promise.all([
     readOptionalNdjson(
       join(evaluationDirectory, 'qualified-alerts.ndjson'),
@@ -208,6 +241,14 @@ export const inspectEvidenceProgress = async (
     readPendingJobs(evaluationDirectory),
     createEvidenceSourceFingerprint(evaluationDirectory),
     pathExists(join(evaluationDirectory, 'evaluation.lock')),
+    hasFinalizedRelease(evaluationDirectory),
+    Promise.all([
+      fileSize(join(evaluationDirectory, 'manifest.json')),
+      fileSize(join(evaluationDirectory, 'qualified-alerts.ndjson')),
+      fileSize(join(evaluationDirectory, 'alpha-snapshots.ndjson')),
+      fileSize(join(evaluationDirectory, 'outcomes.ndjson')),
+      fileSize(join(evaluationDirectory, 'pending-observations.json')),
+    ]),
   ]);
 
   const configuredAlphaFingerprint =
@@ -275,9 +316,19 @@ export const inspectEvidenceProgress = async (
     quality.integrityValid &&
     !evaluationLeaseActive &&
     !evidenceSource.files.some((file) => file.missing);
+  const readinessStatus: EvidenceProgressReport['readinessStatus'] =
+    finalizedReleaseExists
+      ? 'FINALIZED'
+      : readyForFinalEvaluation
+        ? 'RESEARCH_READY'
+        : evaluationLeaseActive || quality.qualifiedAlertCount > 0
+          ? 'COLLECTING'
+          : 'INSUFFICIENT_DATA';
 
   return Object.freeze({
     ...quality,
+    readinessStatus,
+    datasetSizeBytes: sourceFileSizes.reduce((sum, size) => sum + size, 0),
     evaluationId: manifest.evaluationId,
     collectionStartedAt: manifest.createdAt,
     collectionDays,
@@ -293,8 +344,7 @@ export const inspectEvidenceProgress = async (
     ),
     minimumCollectionDays: manifest.minimumCollectionDays,
     minimumQualifiedAlerts: manifest.minimumQualifiedAlerts,
-    maximumOutcomeHorizonMinutes:
-      independence.maximumOutcomeHorizonMinutes,
+    maximumOutcomeHorizonMinutes: independence.maximumOutcomeHorizonMinutes,
     independentAlertCount: independence.independentAlertCount,
     dependentAlertCount: independence.dependentAlertCount,
     durationRequirementMet,

@@ -497,6 +497,16 @@ export class MarketEngine {
       whale,
       alert.createdAt,
     );
+    const bestBid = Math.max(...orderBook.bids.keys());
+    const bestAsk = Math.min(...orderBook.asks.keys());
+    if (
+      !Number.isFinite(bestBid) ||
+      !Number.isFinite(bestAsk) ||
+      bestAsk <= bestBid
+    ) {
+      return undefined;
+    }
+    const midpoint = bestBid + (bestAsk - bestBid) / 2;
     const candles = state.candleHistory
       .getAll()
       .filter(
@@ -540,6 +550,13 @@ export class MarketEngine {
       trades: state.tradeFlowTracker.getResearchTrades(alert.createdAt),
       whale: Object.freeze({
         availabilityTimestamp: alert.createdAt,
+        wallId: whale.wallId,
+        side: whale.side,
+        price: whale.price,
+        size: whale.size,
+        distanceFromMidPercent:
+          (Math.abs(whale.price - midpoint) / midpoint) * 100,
+        updateCount: whale.updateCount ?? null,
         wallPersistenceMs:
           whale.ageSeconds === undefined ? null : whale.ageSeconds * 1_000,
         refillCount: state.whaleRefillDetector.getRefillCount(whale),

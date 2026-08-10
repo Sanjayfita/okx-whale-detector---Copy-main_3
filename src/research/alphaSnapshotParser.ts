@@ -7,6 +7,8 @@ import type {
   AlphaCapturedFeatureValues,
   AlphaFeatureValueMap,
   AlphaWhaleFeatureContext,
+  AlphaDerivativeContext,
+  AlphaSnapshotIntegrityMetadata,
 } from './alphaFeatureTypes';
 import {
   ALPHA_CAPTURED_FEATURE_VALUES_SCHEMA_VERSION,
@@ -189,12 +191,74 @@ const parseWhale = (value: unknown): AlphaWhaleFeatureContext | undefined => {
   }
   return Object.freeze({
     availabilityTimestamp: value.availabilityTimestamp,
+    ...(typeof value.wallId === 'string' ? { wallId: value.wallId } : {}),
+    ...(value.side === 'BID' || value.side === 'ASK'
+      ? { side: value.side }
+      : {}),
+    ...(typeof value.price === 'number' ? { price: value.price } : {}),
+    ...(typeof value.size === 'number' ? { size: value.size } : {}),
+    ...(typeof value.distanceFromMidPercent === 'number'
+      ? { distanceFromMidPercent: value.distanceFromMidPercent }
+      : {}),
+    ...(value.updateCount === null || typeof value.updateCount === 'number'
+      ? { updateCount: value.updateCount }
+      : {}),
     wallPersistenceMs: value.wallPersistenceMs,
     refillCount: value.refillCount,
     spoofProbability: value.spoofProbability,
     absorptionScore: value.absorptionScore,
     executionRatio: value.executionRatio,
     whaleNotionalQuote: value.whaleNotionalQuote,
+  });
+};
+
+const parseDerivatives = (
+  value: unknown,
+): AlphaDerivativeContext | undefined => {
+  if (
+    !isRecord(value) ||
+    typeof value.availabilityTimestamp !== 'number' ||
+    !numberOrNull(value.fundingRate) ||
+    !numberOrNull(value.nextFundingTimestamp) ||
+    !numberOrNull(value.openInterest) ||
+    !numberOrNull(value.openInterestChange) ||
+    value.missing !== true
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    availabilityTimestamp: value.availabilityTimestamp,
+    fundingRate: value.fundingRate,
+    nextFundingTimestamp: value.nextFundingTimestamp,
+    openInterest: value.openInterest,
+    openInterestChange: value.openInterestChange,
+    missing: true,
+  });
+};
+
+const parseIntegrity = (
+  value: unknown,
+): AlphaSnapshotIntegrityMetadata | undefined => {
+  if (
+    !isRecord(value) ||
+    typeof value.eventTimestamp !== 'number' ||
+    typeof value.featureTimestamp !== 'number' ||
+    typeof value.maximumSourceAvailabilityTimestamp !== 'number' ||
+    value.featureRegistryVersion !== 'alpha-feature-registry-v1' ||
+    value.temporalIntegrityVerified !== true ||
+    !Array.isArray(value.dataQualityFlags) ||
+    !value.dataQualityFlags.every((flag) => typeof flag === 'string')
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    eventTimestamp: value.eventTimestamp,
+    featureTimestamp: value.featureTimestamp,
+    maximumSourceAvailabilityTimestamp:
+      value.maximumSourceAvailabilityTimestamp,
+    featureRegistryVersion: 'alpha-feature-registry-v1',
+    temporalIntegrityVerified: true,
+    dataQualityFlags: Object.freeze([...value.dataQualityFlags]),
   });
 };
 
@@ -216,6 +280,12 @@ export const parseAlphaResearchEventSnapshot = (
   const orderBook = parseBook(value.orderBook);
   const trades = value.trades.map(parseTrade);
   const whale = parseWhale(value.whale);
+  const derivatives =
+    value.derivatives === undefined
+      ? undefined
+      : parseDerivatives(value.derivatives);
+  const integrity =
+    value.integrity === undefined ? undefined : parseIntegrity(value.integrity);
   const capturedFeatures =
     value.capturedFeatures === undefined
       ? undefined
@@ -226,6 +296,8 @@ export const parseAlphaResearchEventSnapshot = (
     orderBook === undefined ||
     trades.some((trade) => trade === undefined) ||
     whale === undefined ||
+    (value.derivatives !== undefined && derivatives === undefined) ||
+    (value.integrity !== undefined && integrity === undefined) ||
     (value.capturedFeatures !== undefined && capturedFeatures === undefined)
   ) {
     return undefined;
@@ -245,6 +317,8 @@ export const parseAlphaResearchEventSnapshot = (
       ),
     ),
     whale,
+    ...(derivatives === undefined ? {} : { derivatives }),
+    ...(integrity === undefined ? {} : { integrity }),
     ...(capturedFeatures === undefined ? {} : { capturedFeatures }),
     synthetic: value.synthetic,
     liveOrderExecutionAllowed: false,

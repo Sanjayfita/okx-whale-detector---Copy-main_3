@@ -90,21 +90,69 @@ describe('OrderBookManager', () => {
     expect(manager.getOrderBook().status).toBe('INVALID');
   });
 
-  it('ignores levels whose quote notional overflows', () => {
+  it('invalidates the entire book when a level quote notional overflows', () => {
     const manager = new OrderBookManager();
 
-    manager.applyUpdate(
-      [level('1e308', '1e308')],
-      [level('101', '10')],
-      1,
-      1,
-      -1,
-      'snapshot',
-    );
+    expect(
+      manager.applyUpdate(
+        [level('1e308', '1e308')],
+        [level('101', '10')],
+        1,
+        1,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(false);
 
     expect(manager.getBestBid()).toBeUndefined();
-    expect(manager.getBestAsk()?.price).toBe(101);
+    expect(manager.getBestAsk()).toBeUndefined();
+    expect(manager.getOrderBook().status).toBe('INVALID');
     expect(manager.isUsableForSignals()).toBe(false);
+  });
+
+  it('rejects malformed batches atomically instead of skipping bad levels', () => {
+    const manager = new OrderBookManager();
+    expect(
+      manager.applyUpdate(
+        [level('100', '10')],
+        [level('101', '10')],
+        1,
+        10,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+
+    expect(
+      manager.applyUpdate(
+        [level('100.5', '10'), level('not-a-price', '2')],
+        [],
+        2,
+        11,
+        10,
+        'update',
+      ),
+    ).toBe(false);
+    expect(manager.getOrderBook().status).toBe('INVALID');
+    expect(manager.getOrderBook().bids.size).toBe(0);
+    expect(manager.getOrderBook().asks.size).toBe(0);
+  });
+
+  it('rejects duplicate or non-advancing update sequence identifiers', () => {
+    const manager = new OrderBookManager();
+    expect(
+      manager.applyUpdate(
+        [level('100', '10')],
+        [level('101', '10')],
+        1,
+        10,
+        -1,
+        'snapshot',
+      ),
+    ).toBe(true);
+
+    expect(manager.applyUpdate([], [], 2, 10, 10, 'update')).toBe(false);
+    expect(manager.getOrderBook().status).toBe('INVALID');
   });
 
   it('uses base-asset size directly for spot notional', () => {

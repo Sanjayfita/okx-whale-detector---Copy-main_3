@@ -4,7 +4,10 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { createAlertOutcomeObservation } from '../src/research/alertOutcomeObservation';
+import {
+  ALERT_OUTCOME_HORIZONS_MINUTES,
+  createAlertOutcomeObservation,
+} from '../src/research/alertOutcomeObservation';
 import { captureAlphaFeatureValues } from '../src/research/alphaCapturedFeatures';
 import { createAlphaResearchConfig } from '../src/research/alphaResearchConfig';
 import { createAlphaResearchConfigurationFingerprint } from '../src/research/alphaResearchFingerprint';
@@ -111,6 +114,25 @@ const createSnapshot = (
         executionRatio: null,
         whaleNotionalQuote: 1_000_000,
       }),
+      derivatives: Object.freeze({
+        availabilityTimestamp: alert.detectedAt,
+        fundingRate: null,
+        nextFundingTimestamp: null,
+        openInterest: null,
+        openInterestChange: null,
+        missing: true as const,
+      }),
+      integrity: Object.freeze({
+        eventTimestamp: alert.detectedAt,
+        featureTimestamp: alert.detectedAt,
+        maximumSourceAvailabilityTimestamp: alert.detectedAt,
+        featureRegistryVersion: 'alpha-feature-registry-v1' as const,
+        temporalIntegrityVerified: true as const,
+        dataQualityFlags: Object.freeze([
+          'DERIVATIVES_FUNDING_MISSING',
+          'DERIVATIVES_OPEN_INTEREST_MISSING',
+        ]),
+      }),
       synthetic: false,
       liveOrderExecutionAllowed: false,
     }),
@@ -133,26 +155,24 @@ const writeCompleteEvidence = async (
   );
   await writeFile(
     join(directory, 'outcomes.ndjson'),
-    ([1, 5, 15, 30, 60] as const)
-      .map((horizonMinutes) =>
-        JSON.stringify(
-          createAlertOutcomeObservation({
-            evaluationId: alert.evaluationId,
-            alertId: alert.alertId,
-            instrumentId: alert.instrumentId,
-            detectedAt: alert.detectedAt,
-            horizonMinutes,
-            observedAt: alert.detectedAt + horizonMinutes * 60_000,
-            referencePrice: 100,
-            observedPrice: 101,
-            rawReturnPercent: 1,
-            directionAdjustedReturnPercent: 1,
-            maximumFavorableExcursionPercent: 1.2,
-            maximumAdverseExcursionPercent: 0.2,
-          }),
-        ),
-      )
-      .join('\n') + '\n',
+    ALERT_OUTCOME_HORIZONS_MINUTES.map((horizonMinutes) =>
+      JSON.stringify(
+        createAlertOutcomeObservation({
+          evaluationId: alert.evaluationId,
+          alertId: alert.alertId,
+          instrumentId: alert.instrumentId,
+          detectedAt: alert.detectedAt,
+          horizonMinutes,
+          observedAt: alert.detectedAt + Math.round(horizonMinutes * 60_000),
+          referencePrice: 100,
+          observedPrice: 101,
+          rawReturnPercent: 1,
+          directionAdjustedReturnPercent: 1,
+          maximumFavorableExcursionPercent: 1.2,
+          maximumAdverseExcursionPercent: 0.2,
+        }),
+      ),
+    ).join('\n') + '\n',
     'utf8',
   );
 };
@@ -166,7 +186,7 @@ describe('inspectEvidenceProgress', () => {
 
     expect(report.qualifiedAlertCount).toBe(1);
     expect(report.snapshotCount).toBe(1);
-    expect(report.completedObservationCount).toBe(5);
+    expect(report.completedObservationCount).toBe(9);
     expect(report.completeBundleCount).toBe(1);
     expect(report.pendingObservationCount).toBe(0);
     expect(report.malformedRecordCount).toBe(0);
@@ -206,7 +226,7 @@ describe('inspectEvidenceProgress', () => {
     const report = await inspectEvidenceProgress(directory, START + 86_400_000);
 
     expect(report.missingSnapshotCount).toBe(1);
-    expect(report.missingObservationCount).toBe(5);
+    expect(report.missingObservationCount).toBe(9);
     expect(report.incompleteBundleCount).toBe(1);
     expect(report.snapshotRequirementMet).toBe(false);
     expect(report.outcomeRequirementMet).toBe(false);

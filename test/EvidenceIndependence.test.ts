@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { measureEvidenceIndependence } from '../src/research/evidenceIndependence';
 
-const alert = (
-  alertId: string,
-  instrumentId: string,
-  detectedAt: number,
-) => ({ alertId, instrumentId, detectedAt });
+const alert = (alertId: string, instrumentId: string, detectedAt: number) => ({
+  alertId,
+  instrumentId,
+  detectedAt,
+});
 
 describe('measureEvidenceIndependence', () => {
   it('counts only non-overlapping maximum-horizon windows per instrument', () => {
@@ -51,10 +51,10 @@ describe('measureEvidenceIndependence', () => {
 
   it('rejects invalid outcome horizons', () => {
     expect(() => measureEvidenceIndependence([], [])).toThrow(
-      'positive safe integers',
+      'positive finite values',
     );
     expect(() => measureEvidenceIndependence([], [0])).toThrow(
-      'positive safe integers',
+      'positive finite values',
     );
   });
 });

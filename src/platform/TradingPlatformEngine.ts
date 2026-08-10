@@ -172,7 +172,10 @@ export class TradingPlatformEngine {
   private readonly books = new LazyExecutionBookStore();
   private readonly candles = new Map<string, EmaTrendCandle[]>();
   private readonly executionResumeAfter = new Map<string, number>();
-  private readonly strategyTelemetry = new Map<string, MutableStrategyTelemetry>();
+  private readonly strategyTelemetry = new Map<
+    string,
+    MutableStrategyTelemetry
+  >();
   private readonly maximumStrategyCandles: number;
   private readonly paperLeverage: number;
   private readonly maintenanceMarginRate: number;
@@ -208,7 +211,9 @@ export class TradingPlatformEngine {
       this.maintenanceMarginRate < 0 ||
       this.maintenanceMarginRate >= 1 / this.paperLeverage
     ) {
-      throw new Error('maintenanceMarginRate is incompatible with paperLeverage');
+      throw new Error(
+        'maintenanceMarginRate is incompatible with paperLeverage',
+      );
     }
   }
 
@@ -229,7 +234,10 @@ export class TradingPlatformEngine {
     lastHistoricalTimestampByInstrument: ReadonlyMap<string, number>,
   ): void {
     this.executionResumeAfter.clear();
-    for (const [instrumentId, timestamp] of lastHistoricalTimestampByInstrument) {
+    for (const [
+      instrumentId,
+      timestamp,
+    ] of lastHistoricalTimestampByInstrument) {
       this.executionResumeAfter.set(instrumentId, timestamp);
     }
     this.rebuildingTimeframe = false;
@@ -239,7 +247,10 @@ export class TradingPlatformEngine {
     );
   }
 
-  public failTimeframeRebuild(timeframe: TradingTimeframe, message: string): void {
+  public failTimeframeRebuild(
+    timeframe: TradingTimeframe,
+    message: string,
+  ): void {
     this.rebuildingTimeframe = true;
     this.store.setTimeframeState(
       'ERROR',
@@ -259,12 +270,18 @@ export class TradingPlatformEngine {
     const position = this.store.account.getOpenPosition(instrumentId);
     if (midpoint === undefined || position === undefined) return;
 
+    const executableExitPrice =
+      position.direction === 'LONG'
+        ? state.orderBookManager.getBestBid()?.price
+        : state.orderBookManager.getBestAsk()?.price;
+    if (executableExitPrice === undefined) return;
+
     const marked = this.store.account.markPosition({
       instrumentId,
       price: midpoint,
       timestamp: state.orderBookManager.getOrderBook().updatedAt,
     });
-    this.evaluateProtectiveExit(marked);
+    this.evaluateProtectiveExit(marked, executableExitPrice);
   }
 
   public onCandle(candle: OKXCandle): void {
@@ -444,7 +461,10 @@ export class TradingPlatformEngine {
         telemetry.priceTrendMismatch += 1;
       } else if (reason === 'RSI_FILTER_NOT_CONFIRMED') {
         telemetry.rsiFilter += 1;
-      } else if (reason === 'LOW_VOLATILITY' || reason === 'EXTREME_VOLATILITY') {
+      } else if (
+        reason === 'LOW_VOLATILITY' ||
+        reason === 'EXTREME_VOLATILITY'
+      ) {
         telemetry.atrFilter += 1;
       } else if (reason === 'POSITION_ALREADY_OPEN') {
         telemetry.positionAlreadyOpen += 1;
@@ -485,7 +505,8 @@ export class TradingPlatformEngine {
     }
 
     const account = this.store.account.snapshot(observedAt);
-    const realizedPnlToday = this.store.account.getRealizedPnlForDay(observedAt);
+    const realizedPnlToday =
+      this.store.account.getRealizedPnlForDay(observedAt);
     const startingDayEquity = Math.max(
       Number.EPSILON,
       account.equity - realizedPnlToday - account.unrealizedPnl,
@@ -626,17 +647,14 @@ export class TradingPlatformEngine {
       quantity: position.quantityBaseUnits,
       book,
     });
-    if (
-      fill.status !== 'FILLED' ||
-      fill.averagePrice === null ||
-      fill.filledQuantity < position.quantityBaseUnits - Number.EPSILON
-    ) {
+    if (fill.averagePrice === null || fill.filledQuantity <= 0) {
       this.store.log(
         'WARNING',
-        'Paper exit could not be fully filled; position remains open',
+        'Paper exit could not be filled; position remains open',
         {
           instrumentId,
           fillRatio: fill.fillRatio,
+          reason: fill.rejectionReasons.join(','),
         },
       );
       return;
@@ -647,7 +665,7 @@ export class TradingPlatformEngine {
       fillId,
       instrumentId,
       exitPrice: fill.averagePrice,
-      quantityBaseUnits: position.quantityBaseUnits,
+      quantityBaseUnits: fill.filledQuantity,
       closedAt: book.observedAt,
       exitReason,
       exitFee: fill.fee,
@@ -655,11 +673,31 @@ export class TradingPlatformEngine {
     });
     if (!closed.applied || closed.trade === null) return;
     const trade = closed.trade;
+    this.store.persistPaperState(book.observedAt);
+    if (closed.remainingPosition !== null) {
+      this.store.log('TRADE', 'Paper position partially reduced', {
+        instrumentId,
+        exitReason,
+        filledQuantity: fill.filledQuantity,
+        remainingQuantity: closed.remainingPosition.quantityBaseUnits,
+        realizedNetPnl: trade.netPnl,
+        fees: trade.fees,
+      });
+      this.store.log(
+        'WARNING',
+        'Residual paper exposure remains after a partial exit fill',
+        {
+          instrumentId,
+          fillRatio: fill.fillRatio,
+          remainingQuantity: closed.remainingPosition.quantityBaseUnits,
+        },
+      );
+      return;
+    }
     this.store.riskManager.recordClosedTrade({
       closedAt: trade.closedAt,
       netPnl: trade.netPnl,
     });
-    this.store.persistPaperState(book.observedAt);
     this.store.log('TRADE', 'Paper position closed', {
       instrumentId,
       exitReason,
@@ -667,7 +705,9 @@ export class TradingPlatformEngine {
       fees: trade.fees,
       fundingPnl: trade.fundingPnl,
     });
-    const notificationType: TradingNotificationType = exitReason.includes('STOP')
+    const notificationType: TradingNotificationType = exitReason.includes(
+      'STOP',
+    )
       ? 'STOP_HIT'
       : exitReason.includes('TAKE_PROFIT')
         ? 'TAKE_PROFIT'
@@ -684,8 +724,11 @@ export class TradingPlatformEngine {
     );
   }
 
-  private evaluateProtectiveExit(position: PaperManagedPosition): void {
-    const price = position.currentPrice;
+  private evaluateProtectiveExit(
+    position: PaperManagedPosition,
+    executableExitPrice: number,
+  ): void {
+    const price = executableExitPrice;
     const stopHit =
       position.direction === 'LONG'
         ? price <= position.stopLossPrice

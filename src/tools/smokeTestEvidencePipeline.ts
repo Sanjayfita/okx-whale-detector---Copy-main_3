@@ -156,7 +156,7 @@ export const runEvidencePipelineSmokeTest =
       );
 
       for (const horizonMinutes of manifest.horizonsMinutes) {
-        observationNow = detectedAt + horizonMinutes * 60_000;
+        observationNow = detectedAt + Math.round(horizonMinutes * 60_000);
         await collector.processDueObservations(observationNow);
       }
 
@@ -170,7 +170,7 @@ export const runEvidencePipelineSmokeTest =
 
       if (
         progress.qualifiedAlertCount !== 1 ||
-        outcomes.length !== 5 ||
+        outcomes.length !== manifest.horizonsMinutes.length ||
         progress.completeBundleCount !== 1 ||
         progress.pendingObservationCount !== 0 ||
         progress.malformedRecordCount !== 0

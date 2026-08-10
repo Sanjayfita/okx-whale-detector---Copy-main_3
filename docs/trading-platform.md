@@ -163,28 +163,36 @@ For market-style paper orders it models or accounts for:
 - funding PnL through `TradingPlatformEngine.onFunding()`;
 - mark-to-market unrealized PnL;
 - leveraged liquidation threshold checks;
-- residual position protection when a full exit cannot be simulated.
+- immediate journaling of every non-zero exit fill and continued protection of
+  any residual position.
 
 `PaperFeeModel` additionally defines explicit maker and taker schedules. The maintained EMA execution path currently submits simulated market orders and therefore uses taker-style fills. A future passive-limit execution policy can use the maker schedule without changing the account journal.
 
 ### Funding integration note
 
-Historical platform backtests accept `fundingRatePercent` on candles. The live paper engine exposes `onFunding()` and correctly debits longs / credits shorts for positive rates (and reverses that for negative rates). A live funding-rate source must call that hook at the exchange funding event. If no live funding source is connected, the dashboard must not pretend funding was charged.
+Historical platform backtests reject candle-level funding rates because they do
+not identify a settlement. A versioned dataset supplies separate funding events
+with an event ID, settlement timestamp, rate, and point-in-time mark price. The
+backtester charges only exposure held at that boundary. The live paper engine
+exposes `onFunding()` with the same event-driven contract and correctly debits
+longs / credits shorts for positive rates (and reverses that for negative
+rates). If no funding source is connected, the dashboard must not pretend
+funding was charged.
 
 ## Dedicated risk manager
 
 Default fail-closed policy:
 
-| Control | Default |
-| --- | ---: |
-| Maximum risk per trade | 1% equity |
-| Daily realized loss limit | 3% |
-| Maximum peak-to-current drawdown | 10% |
-| Maximum open positions | 3 |
-| Cooldown after a losing trade | 30 minutes |
+| Control                                           |                         Default |
+| ------------------------------------------------- | ------------------------------: |
+| Maximum risk per trade                            |                       1% equity |
+| Daily realized loss limit                         |                              3% |
+| Maximum peak-to-current drawdown                  |                             10% |
+| Maximum open positions                            |                               3 |
+| Cooldown after a losing trade                     |                      30 minutes |
 | Maximum leverage used by platform paper execution | 5x ceiling; platform default 2x |
-| Daily trade limit | 12 |
-| Consecutive-loss circuit breaker | 4 |
+| Daily trade limit                                 |                              12 |
+| Consecutive-loss circuit breaker                  |                               4 |
 
 The dashboard also exposes a manual kill switch. Kill switch and circuit breaker block new entries; they do not erase open positions or historical evidence.
 
@@ -275,7 +283,7 @@ npm run dev
 npm run paper
 npm run live
 npm run dashboard
-npm run backtest -- ./candles.json BTC-USDT-SWAP
+npm run backtest -- ./backtest-dataset.json BTC-USDT-SWAP
 npm run replay -- <existing replay arguments>
 npm test
 ```
@@ -310,42 +318,77 @@ The platform is kept in one process because its state, WebSocket fanout, paper a
 
 ## Backtesting
 
-Input can be a JSON array or NDJSON records containing:
+The CLI requires a versioned JSON dataset. Its instrument specification is
+point-in-time evidence, not a default inferred from current exchange metadata.
+`lotSizeBaseUnits` and `minimumOrderBaseUnits` must already be converted from
+contracts into base units:
 
 ```json
 {
-  "timestamp": 1700000000000,
-  "open": 42000,
-  "high": 42100,
-  "low": 41900,
-  "close": 42050,
-  "confirm": true,
-  "fundingRatePercent": 0.01
+  "schemaVersion": 1,
+  "datasetId": "btc-usdt-swap-5m-2026q2-v1",
+  "createdAt": 1786320000000,
+  "expectedCandleIntervalMs": 300000,
+  "instrumentSpecification": {
+    "instrumentId": "BTC-USDT-SWAP",
+    "tickSize": 0.1,
+    "lotSizeBaseUnits": 0.001,
+    "minimumOrderBaseUnits": 0.001,
+    "minimumOrderValue": 1,
+    "maximumLeverage": 100
+  },
+  "candles": [
+    {
+      "timestamp": 1711929600000,
+      "open": 70000,
+      "high": 70100,
+      "low": 69900,
+      "close": 70050,
+      "confirm": true
+    }
+  ],
+  "fundingEvents": [
+    {
+      "eventId": "BTC-USDT-SWAP:funding:1711958400000",
+      "timestamp": 1711958400000,
+      "fundingRatePercent": 0.01,
+      "markPrice": 70200
+    }
+  ]
 }
 ```
 
 Run:
 
 ```bash
-npm run backtest -- ./candles.json BTC-USDT-SWAP
+npm run backtest -- ./backtest-dataset.json BTC-USDT-SWAP
 ```
 
 Outputs under `artifacts/backtest` by default:
 
 - JSON report;
 - trades CSV;
-- equity CSV.
+- equity CSV;
+- content-addressed dataset coverage manifest.
 
 The engine includes:
 
-- fee/spread/slippage-aware candle backtests;
-- funding input;
+- decisions from a confirmed candle execute no earlier than the next confirmed
+  candle open;
+- gross PnL separated from fee, spread/slippage, and funding attribution;
+- explicit timestamped funding settlements;
+- SHA-256 input fingerprint and deterministic dataset metadata;
+- tick-size, lot-size, minimum-order, and leverage constraints;
+- explicit rejected-trade reasons when an order cannot satisfy constraints;
 - conservative stop-first OHLC ambiguity handling;
+- gap-aware stop/target fills and adverse tick quantization;
 - next-candle trailing-stop activation to avoid same-bar path lookahead;
-- equity curve and analytics;
+- equity curve, analytics, and extended statistics including Sortino and recovery
+  factor;
 - Buy & Hold benchmark;
 - bounded parameter candidate comparison (maximum 25 candidates per call);
-- bridge to the repository's episode-safe purged walk-forward planner;
+- bridge to the repository's episode-safe purged walk-forward planner, requiring
+  a positive predeclared label horizon;
 - bridge to the repository's execution-aware Monte Carlo stress engine.
 
 It intentionally does not implement unlimited grid search. Parameter work should remain bounded and hypothesis-counted.

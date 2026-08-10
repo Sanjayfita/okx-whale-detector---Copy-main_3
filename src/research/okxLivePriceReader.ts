@@ -133,9 +133,6 @@ export class OKXLivePriceReader {
       instrumentId: normalizedInstrumentId,
       observedAt: serverTimestamp,
       price,
-      maximumFavorableExcursionPercent: 0,
-      maximumAdverseExcursionPercent: 0,
-      excursionMeasurement: 'UNAVAILABLE',
     });
   };
 }

@@ -10,7 +10,10 @@ import { basename, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { createAlertOutcomeObservation } from '../src/research/alertOutcomeObservation';
+import {
+  ALERT_OUTCOME_HORIZONS_MINUTES,
+  createAlertOutcomeObservation,
+} from '../src/research/alertOutcomeObservation';
 import { captureAlphaFeatureValues } from '../src/research/alphaCapturedFeatures';
 import { createAlphaResearchConfig } from '../src/research/alphaResearchConfig';
 import { createAlphaResearchConfigurationFingerprint } from '../src/research/alphaResearchFingerprint';
@@ -96,26 +99,53 @@ const setupEvaluation = async (): Promise<{
         executionRatio: 0.5,
         whaleNotionalQuote: 1_000_000,
       }),
+      derivatives: Object.freeze({
+        availabilityTimestamp: alert.detectedAt,
+        fundingRate: null,
+        nextFundingTimestamp: null,
+        openInterest: null,
+        openInterestChange: null,
+        missing: true as const,
+      }),
+      integrity: Object.freeze({
+        eventTimestamp: alert.detectedAt,
+        featureTimestamp: alert.detectedAt,
+        maximumSourceAvailabilityTimestamp: alert.detectedAt,
+        featureRegistryVersion: 'alpha-feature-registry-v1' as const,
+        temporalIntegrityVerified: true as const,
+        dataQualityFlags: Object.freeze([
+          'DERIVATIVES_FUNDING_MISSING',
+          'DERIVATIVES_OPEN_INTEREST_MISSING',
+        ]),
+      }),
       synthetic: false,
       liveOrderExecutionAllowed: false,
     }),
     alphaConfig,
   );
-  const outcomes = ([1, 5, 15, 30, 60] as const).map((horizonMinutes) =>
+  const outcomes = ALERT_OUTCOME_HORIZONS_MINUTES.map((horizonMinutes) =>
     createAlertOutcomeObservation({
       evaluationId: EVALUATION_ID,
       alertId: alert.alertId,
       instrumentId: alert.instrumentId,
       detectedAt: alert.detectedAt,
       horizonMinutes,
-      observedAt: alert.detectedAt + horizonMinutes * 60_000,
+      observedAt: alert.detectedAt + Math.round(horizonMinutes * 60_000),
       referencePrice: 100,
       observedPrice: 100.5,
       rawReturnPercent: 0.5,
       directionAdjustedReturnPercent: 0.5,
-      maximumFavorableExcursionPercent: 0,
+      maximumFavorableExcursionPercent: 0.5,
       maximumAdverseExcursionPercent: 0,
-      excursionMeasurement: 'UNAVAILABLE',
+      maximumUpwardExcursionPercent: 0.5,
+      maximumDownwardExcursionPercent: 0,
+      timeToMaximumFavorableExcursionMs: Math.round(horizonMinutes * 60_000),
+      timeToMaximumAdverseExcursionMs: 0,
+      timeToMaximumUpwardExcursionMs: Math.round(horizonMinutes * 60_000),
+      timeToMaximumDownwardExcursionMs: 0,
+      pathSampleCount: 1,
+      pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
+      excursionMeasurement: 'OBSERVED_PATH',
     }),
   );
 
@@ -163,7 +193,7 @@ describe('createEvidenceDatasetRelease', () => {
     );
     expect(release.manifest.quality.readyForFinalEvaluation).toBe(true);
     expect(release.manifest.quality.health).toBe('HEALTHY');
-    expect(release.manifest.quality.pathExcursionAvailabilityRate).toBe(0);
+    expect(release.manifest.quality.pathExcursionAvailabilityRate).toBe(1);
     expect(release.dataset.rows).toHaveLength(1);
     expect(Object.keys(release.dataset.rows[0]?.features ?? {})).toHaveLength(
       ALPHA_FEATURE_NAMES.length,

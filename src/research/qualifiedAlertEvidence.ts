@@ -7,7 +7,11 @@ export interface QualifiedAlertEvidenceRecord {
   evaluationId: string;
   alertId: string;
   instrumentId: string;
+  instrumentType: 'SPOT' | 'FUTURES' | 'SWAP';
   detectedAt: number;
+  sourceSignalTimestamp: number;
+  sourceMarketTimestamp: number;
+  referenceTimestamp: number;
   recordedAt: number;
   direction: QualifiedAlertDirection;
   signalType: string;
@@ -51,13 +55,57 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export const createQualifiedAlertEvidenceRecord = (
   input: Omit<
     QualifiedAlertEvidenceRecord,
-    'schemaVersion' | 'qualified' | 'liveOrderExecutionAllowed'
-  >,
+    | 'schemaVersion'
+    | 'qualified'
+    | 'liveOrderExecutionAllowed'
+    | 'instrumentType'
+    | 'sourceSignalTimestamp'
+    | 'sourceMarketTimestamp'
+    | 'referenceTimestamp'
+  > &
+    Partial<
+      Pick<
+        QualifiedAlertEvidenceRecord,
+        | 'instrumentType'
+        | 'sourceSignalTimestamp'
+        | 'sourceMarketTimestamp'
+        | 'referenceTimestamp'
+      >
+    >,
 ): QualifiedAlertEvidenceRecord => {
   const detectedAt = requireTimestamp(input.detectedAt, 'detectedAt');
   const recordedAt = requireTimestamp(input.recordedAt, 'recordedAt');
+  const sourceSignalTimestamp = requireTimestamp(
+    input.sourceSignalTimestamp ?? detectedAt,
+    'sourceSignalTimestamp',
+  );
+  const sourceMarketTimestamp = requireTimestamp(
+    input.sourceMarketTimestamp ?? detectedAt,
+    'sourceMarketTimestamp',
+  );
+  const referenceTimestamp = requireTimestamp(
+    input.referenceTimestamp ?? detectedAt,
+    'referenceTimestamp',
+  );
   if (recordedAt < detectedAt) {
     throw new Error('recordedAt cannot be earlier than detectedAt');
+  }
+  if (
+    sourceSignalTimestamp > detectedAt ||
+    sourceMarketTimestamp > detectedAt ||
+    referenceTimestamp > detectedAt
+  ) {
+    throw new Error(
+      'Evidence source timestamps cannot be later than detectedAt',
+    );
+  }
+  const instrumentType = input.instrumentType ?? 'SWAP';
+  if (
+    instrumentType !== 'SPOT' &&
+    instrumentType !== 'FUTURES' &&
+    instrumentType !== 'SWAP'
+  ) {
+    throw new Error('instrumentType is invalid');
   }
   if (
     !Number.isFinite(input.confidence) ||
@@ -97,7 +145,11 @@ export const createQualifiedAlertEvidenceRecord = (
     evaluationId: requireNonEmpty(input.evaluationId, 'evaluationId'),
     alertId: requireNonEmpty(input.alertId, 'alertId'),
     instrumentId: requireNonEmpty(input.instrumentId, 'instrumentId'),
+    instrumentType,
     detectedAt,
+    sourceSignalTimestamp,
+    sourceMarketTimestamp,
+    referenceTimestamp,
     recordedAt,
     direction: input.direction,
     signalType: requireNonEmpty(input.signalType, 'signalType'),
@@ -147,7 +199,25 @@ export const parseQualifiedAlertEvidenceRecord = (
       evaluationId: value.evaluationId,
       alertId: value.alertId,
       instrumentId: value.instrumentId,
+      instrumentType:
+        value.instrumentType === 'SPOT' ||
+        value.instrumentType === 'FUTURES' ||
+        value.instrumentType === 'SWAP'
+          ? value.instrumentType
+          : undefined,
       detectedAt: value.detectedAt,
+      sourceSignalTimestamp:
+        typeof value.sourceSignalTimestamp === 'number'
+          ? value.sourceSignalTimestamp
+          : undefined,
+      sourceMarketTimestamp:
+        typeof value.sourceMarketTimestamp === 'number'
+          ? value.sourceMarketTimestamp
+          : undefined,
+      referenceTimestamp:
+        typeof value.referenceTimestamp === 'number'
+          ? value.referenceTimestamp
+          : undefined,
       recordedAt: value.recordedAt,
       direction: value.direction,
       signalType: value.signalType,

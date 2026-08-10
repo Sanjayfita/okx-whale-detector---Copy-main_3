@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ALERT_OUTCOME_HORIZONS_MINUTES,
   createAlertOutcomeObservation,
   parseAlertOutcomeObservation,
   type AlertOutcomeHorizonMinutes,
@@ -12,7 +13,7 @@ const input = (horizonMinutes: AlertOutcomeHorizonMinutes = 5) => ({
   instrumentId: 'BTC-USDT',
   detectedAt: 1_000_000,
   horizonMinutes,
-  observedAt: 1_000_000 + horizonMinutes * 60_000,
+  observedAt: 1_000_000 + Math.round(horizonMinutes * 60_000),
   referencePrice: 100,
   observedPrice: 102,
   rawReturnPercent: 2,
@@ -22,8 +23,8 @@ const input = (horizonMinutes: AlertOutcomeHorizonMinutes = 5) => ({
 });
 
 describe('createAlertOutcomeObservation', () => {
-  it.each([1, 5, 15, 30, 60] as const)(
-    'creates a complete observation for the %s-minute horizon',
+  it.each(ALERT_OUTCOME_HORIZONS_MINUTES)(
+    'creates a complete observation for the %s-minute horizon value',
     (horizonMinutes) => {
       const observation = createAlertOutcomeObservation(input(horizonMinutes));
 
@@ -33,6 +34,27 @@ describe('createAlertOutcomeObservation', () => {
       expect(Object.isFrozen(observation)).toBe(true);
     },
   );
+
+  it('persists raw sampled path extrema and their timing', () => {
+    const observation = createAlertOutcomeObservation({
+      ...input(0.25),
+      maximumUpwardExcursionPercent: 2,
+      maximumDownwardExcursionPercent: 1,
+      timeToMaximumFavorableExcursionMs: 5_000,
+      timeToMaximumAdverseExcursionMs: 15_000,
+      timeToMaximumUpwardExcursionMs: 5_000,
+      timeToMaximumDownwardExcursionMs: 15_000,
+      pathSampleCount: 2,
+      pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
+    });
+
+    expect(parseAlertOutcomeObservation(observation)).toMatchObject({
+      maximumUpwardExcursionPercent: 2,
+      maximumDownwardExcursionPercent: 1,
+      pathSampleCount: 2,
+      pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
+    });
+  });
 
   it('rejects observations recorded before their requested horizon', () => {
     expect(() =>

@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 import { verifyEvidenceDatasetRelease } from '../research/evidenceDatasetRelease';
+import { inspectEvidenceProgress } from '../research/evidenceProgressInspector';
 
 const safePathSegment = (value: string, name: string): string => {
   const normalized = value.trim();
@@ -18,8 +19,27 @@ const safePathSegment = (value: string, name: string): string => {
 
 const main = async (): Promise<void> => {
   const evaluationId = safePathSegment(process.argv[2] ?? '', 'evaluationId');
+  const releaseArgument = process.argv[3];
+  if (releaseArgument === undefined) {
+    const evaluationDirectory = resolve('data', 'evaluations', evaluationId);
+    const report = await inspectEvidenceProgress(evaluationDirectory);
+    console.log('ACTIVE EVIDENCE EVALUATION VERIFICATION');
+    console.log(`Evaluation ID: ${report.evaluationId}`);
+    console.log(`Integrity valid: ${report.integrityValid}`);
+    console.log(`Collection health: ${report.health}`);
+    console.log(`Readiness status: ${report.readinessStatus}`);
+    console.log(`Malformed records: ${report.malformedRecordCount}`);
+    console.log(`Missing snapshots: ${report.missingSnapshotCount}`);
+    console.log(`Missing outcomes: ${report.missingObservationCount}`);
+    console.log(`Overdue outcomes: ${report.overduePendingObservationCount}`);
+    console.log(`Evidence fingerprint: ${report.evidenceSource.fingerprint}`);
+    for (const reason of report.healthReasons) console.log(`Reason: ${reason}`);
+    console.log('Live order execution remains disabled.');
+    if (!report.integrityValid) process.exitCode = 1;
+    return;
+  }
   const releaseFingerprint = safePathSegment(
-    process.argv[3] ?? '',
+    releaseArgument,
     'releaseFingerprint',
   );
   const result = await verifyEvidenceDatasetRelease(

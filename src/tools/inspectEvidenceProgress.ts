@@ -2,7 +2,8 @@ import { resolve } from 'node:path';
 
 import { inspectEvidenceProgress } from '../research/evidenceProgressInspector';
 
-const evaluationId = process.argv[2]?.trim();
+const args = process.argv.slice(2);
+const evaluationId = args.find((value) => !value.startsWith('--'))?.trim();
 if (!evaluationId) {
   throw new Error('Usage: npm run evidence:progress -- <evaluation-id>');
 }
@@ -18,6 +19,10 @@ const evaluationDirectory = resolve('data', 'evaluations', evaluationId);
 
 void inspectEvidenceProgress(evaluationDirectory)
   .then((report) => {
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
     console.log('Evidence progress report');
     console.log(`Evaluation ID: ${report.evaluationId}`);
     console.log(`Collection days: ${report.collectionDays.toFixed(2)}`);
@@ -25,12 +30,10 @@ void inspectEvidenceProgress(evaluationDirectory)
       `Observed evidence span: ${report.evidenceSpanDays} UTC day(s)`,
     );
     console.log(`Qualified alerts: ${report.qualifiedAlertCount}`);
-    console.log(
-      `Independent alert episodes: ${report.independentAlertCount}`,
-    );
-    console.log(
-      `Overlapping dependent alerts: ${report.dependentAlertCount}`,
-    );
+    console.log(`Readiness status: ${report.readinessStatus}`);
+    console.log(`Evidence files: ${report.datasetSizeBytes} byte(s)`);
+    console.log(`Independent alert episodes: ${report.independentAlertCount}`);
+    console.log(`Overlapping dependent alerts: ${report.dependentAlertCount}`);
     console.log(
       `Independence window: ${report.maximumOutcomeHorizonMinutes} minute(s) per instrument`,
     );
@@ -39,11 +42,15 @@ void inspectEvidenceProgress(evaluationDirectory)
       `Snapshots with persisted features: ${report.capturedFeatureSnapshotCount}`,
     );
     console.log(`Missing snapshots: ${report.missingSnapshotCount}`);
+    console.log(
+      `Missing point-in-time metadata: ${report.missingSnapshotIntegrityCount}`,
+    );
     console.log(`Completed observations: ${report.completedObservationCount}`);
     console.log(`Expected observations: ${report.expectedObservationCount}`);
     console.log(`Missing observations: ${report.missingObservationCount}`);
     console.log(`Complete bundles: ${report.completeBundleCount}`);
     console.log(`Pending observations: ${report.pendingObservationCount}`);
+    console.log(`Missed observation windows: ${report.missedObservationCount}`);
     console.log(
       `Overdue observations: ${report.overduePendingObservationCount}`,
     );
@@ -63,6 +70,9 @@ void inspectEvidenceProgress(evaluationDirectory)
       `Path-excursion availability: ${report.pathExcursionAvailabilityRate === null ? 'N/A' : `${(report.pathExcursionAvailabilityRate * 100).toFixed(2)}%`}`,
     );
     console.log(`Malformed records: ${report.malformedRecordCount}`);
+    console.log(
+      `Side distribution: BULLISH=${report.sideDistribution.bullish}, BEARISH=${report.sideDistribution.bearish}`,
+    );
     console.log(`Collection health: ${report.health}`);
     for (const reason of report.healthReasons) {
       console.log(`Health reason: ${reason}`);

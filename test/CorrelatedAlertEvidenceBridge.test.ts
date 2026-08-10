@@ -67,6 +67,10 @@ describe('CorrelatedAlertEvidenceBridge', () => {
       evaluationId: 'eval-1',
       alertId: 'alert-1',
       instrumentId: 'BTC-USDT',
+      instrumentType: 'SPOT',
+      sourceSignalTimestamp: 900,
+      sourceMarketTimestamp: 950,
+      referenceTimestamp: 1_000,
       direction: 'BULLISH',
       signalType: 'AGREEMENT:AGREEMENT:STRONG',
       confidence: 84,
@@ -135,5 +139,16 @@ describe('CorrelatedAlertEvidenceBridge', () => {
         recordedAt: 1_010,
       }),
     ).toThrow('Alert symbol does not match its evaluation context');
+
+    expect(() =>
+      bridge.createEvidence({
+        alert,
+        evaluationContext: {
+          ...evaluationContext,
+          sourceMarketTimestamp: alert.createdAt + 1,
+        },
+        recordedAt: 1_010,
+      }),
+    ).toThrow('source timestamps cannot be later');
   });
 });

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { aggregateAlertOutcomeStatistics } from '../src/research/aggregateAlertOutcomeStatistics';
+import {
+  ALERT_OUTCOME_HORIZONS_MINUTES,
+  type AlertOutcomeHorizonMinutes,
+} from '../src/research/alertOutcomeObservation';
 import type { QualifiedAlertOutcomeBundle } from '../src/research/qualifiedAlertOutcomeBundle';
 
 const bundle = (
@@ -28,14 +32,14 @@ const bundle = (
     qualified: true,
     liveOrderExecutionAllowed: false,
   },
-  observations: [1, 5, 15, 30, 60].map((horizonMinutes, index) => ({
+  observations: ALERT_OUTCOME_HORIZONS_MINUTES.map((horizonMinutes, index) => ({
     schemaVersion: 1,
     evaluationId,
     alertId,
     instrumentId: 'BTC-USDT',
     detectedAt: 1_000,
-    horizonMinutes: horizonMinutes as 1 | 5 | 15 | 30 | 60,
-    observedAt: 1_000 + horizonMinutes * 60_000,
+    horizonMinutes: horizonMinutes as AlertOutcomeHorizonMinutes,
+    observedAt: 1_000 + Math.round(horizonMinutes * 60_000),
     referencePrice: 100,
     observedPrice: 100 + returns[index]!,
     rawReturnPercent: returns[index]!,
@@ -45,7 +49,7 @@ const bundle = (
     complete: true,
     liveOrderExecutionAllowed: false,
   })),
-  completeHorizons: [1, 5, 15, 30, 60],
+  completeHorizons: ALERT_OUTCOME_HORIZONS_MINUTES,
   complete: true,
   liveOrderExecutionAllowed: false,
 });
@@ -53,14 +57,16 @@ const bundle = (
 describe('aggregateAlertOutcomeStatistics', () => {
   it('calculates per-horizon sample counts, win rates, returns, and excursions', () => {
     const result = aggregateAlertOutcomeStatistics([
-      bundle('alert-1', [1, -1, 0, 2, -2]),
-      bundle('alert-2', [3, 1, 0, -2, 2]),
+      bundle('alert-1', [0, 0, 0, 1, 0, -1, 0, 2, -2]),
+      bundle('alert-2', [0, 0, 0, 3, 0, 1, 0, -2, 2]),
     ]);
 
     expect(result.evaluationId).toBe('evaluation-1');
     expect(result.bundleCount).toBe(2);
-    expect(result.horizonStatistics).toHaveLength(5);
-    expect(result.horizonStatistics[0]).toMatchObject({
+    expect(result.horizonStatistics).toHaveLength(9);
+    expect(
+      result.horizonStatistics.find((entry) => entry.horizonMinutes === 1),
+    ).toMatchObject({
       horizonMinutes: 1,
       sampleSize: 2,
       excursionSampleSize: 2,
@@ -72,7 +78,9 @@ describe('aggregateAlertOutcomeStatistics', () => {
       averageMaximumFavorableExcursionPercent: 3,
       averageMaximumAdverseExcursionPercent: 0.5,
     });
-    expect(result.horizonStatistics[2]).toMatchObject({
+    expect(
+      result.horizonStatistics.find((entry) => entry.horizonMinutes === 15),
+    ).toMatchObject({
       horizonMinutes: 15,
       wins: 0,
       losses: 0,
@@ -93,8 +101,8 @@ describe('aggregateAlertOutcomeStatistics', () => {
   it('rejects bundles from different evaluations', () => {
     expect(() =>
       aggregateAlertOutcomeStatistics([
-        bundle('alert-1', [1, 1, 1, 1, 1], 'evaluation-1'),
-        bundle('alert-2', [1, 1, 1, 1, 1], 'evaluation-2'),
+        bundle('alert-1', Array(9).fill(1), 'evaluation-1'),
+        bundle('alert-2', Array(9).fill(1), 'evaluation-2'),
       ]),
     ).toThrow('All bundles must belong to the same evaluation');
   });

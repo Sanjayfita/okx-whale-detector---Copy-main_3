@@ -25,14 +25,16 @@ const evidence = createQualifiedAlertEvidenceRecord({
   configurationFingerprint: 'config-1',
 });
 
-const observation = (horizonMinutes: 1 | 5 | 15 | 30 | 60) =>
+const observation = (
+  horizonMinutes: (typeof ALERT_OUTCOME_HORIZONS_MINUTES)[number],
+) =>
   createAlertOutcomeObservation({
     evaluationId: evidence.evaluationId,
     alertId: evidence.alertId,
     instrumentId: evidence.instrumentId,
     detectedAt: evidence.detectedAt,
     horizonMinutes,
-    observedAt: evidence.detectedAt + horizonMinutes * 60_000,
+    observedAt: evidence.detectedAt + Math.round(horizonMinutes * 60_000),
     referencePrice: evidence.referencePrice,
     observedPrice: 101,
     rawReturnPercent: 1,
@@ -52,23 +54,19 @@ describe('createQualifiedAlertOutcomeBundle', () => {
 
     expect(bundle.complete).toBe(true);
     expect(bundle.liveOrderExecutionAllowed).toBe(false);
-    expect(bundle.completeHorizons).toEqual([1, 5, 15, 30, 60]);
-    expect(bundle.observations.map((item) => item.horizonMinutes)).toEqual([
-      1, 5, 15, 30, 60,
-    ]);
+    expect(bundle.completeHorizons).toEqual(ALERT_OUTCOME_HORIZONS_MINUTES);
+    expect(bundle.observations.map((item) => item.horizonMinutes)).toEqual(
+      ALERT_OUTCOME_HORIZONS_MINUTES,
+    );
   });
 
   it('rejects duplicate and therefore incomplete horizon sets', () => {
     expect(() =>
       createQualifiedAlertOutcomeBundle({
         evidence,
-        observations: [
-          observation(1),
-          observation(5),
-          observation(15),
-          observation(30),
-          observation(30),
-        ],
+        observations: ALERT_OUTCOME_HORIZONS_MINUTES.map((horizon) =>
+          observation(horizon === 60 ? 30 : horizon),
+        ),
       }),
     ).toThrow('Duplicate alert outcome horizons are not allowed');
   });
@@ -83,10 +81,7 @@ describe('createQualifiedAlertOutcomeBundle', () => {
       createQualifiedAlertOutcomeBundle({
         evidence,
         observations: [
-          observation(1),
-          observation(5),
-          observation(15),
-          observation(30),
+          ...ALERT_OUTCOME_HORIZONS_MINUTES.slice(0, -1).map(observation),
           mismatched,
         ],
       }),
@@ -104,10 +99,7 @@ describe('createQualifiedAlertOutcomeBundle', () => {
       createQualifiedAlertOutcomeBundle({
         evidence,
         observations: [
-          observation(1),
-          observation(5),
-          observation(15),
-          observation(30),
+          ...ALERT_OUTCOME_HORIZONS_MINUTES.slice(0, -1).map(observation),
           inverted,
         ],
       }),
@@ -120,7 +112,7 @@ describe('createQualifiedAlertOutcomeBundle', () => {
     expect(() =>
       validateQualifiedAlertOutcomeBundle({
         ...complete,
-        completeHorizons: [1, 5, 15, 30, 30],
+        completeHorizons: [...ALERT_OUTCOME_HORIZONS_MINUTES.slice(0, -1), 30],
       }),
     ).toThrow('bundle horizons');
   });

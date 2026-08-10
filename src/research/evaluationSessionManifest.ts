@@ -6,7 +6,9 @@ import {
 } from './alertOutcomeObservation';
 
 export const EVALUATION_SESSION_MANIFEST_SCHEMA_VERSION = 1 as const;
-export const DEFAULT_EVALUATION_HORIZONS_MINUTES = [1, 5, 15, 30, 60] as const;
+export const DEFAULT_EVALUATION_HORIZONS_MINUTES = [
+  0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
+] as const;
 
 export interface EvaluationSessionManifest {
   readonly schemaVersion: typeof EVALUATION_SESSION_MANIFEST_SCHEMA_VERSION;

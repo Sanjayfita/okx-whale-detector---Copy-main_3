@@ -1,12 +1,35 @@
 export const ALERT_OUTCOME_OBSERVATION_SCHEMA_VERSION = 1 as const;
 
-export const ALERT_OUTCOME_HORIZONS_MINUTES = [1, 5, 15, 30, 60] as const;
+/**
+ * Frozen standardized observation horizons. Fractions are minutes so existing
+ * dataset consumers remain compatible while the collector can also represent
+ * the required 5s, 15s, and 30s observations exactly.
+ */
+export const ALERT_OUTCOME_HORIZONS_MINUTES = [
+  0.08333333333333333, 0.25, 0.5, 1, 3, 5, 15, 30, 60,
+] as const;
 
 export type AlertOutcomeHorizonMinutes =
   (typeof ALERT_OUTCOME_HORIZONS_MINUTES)[number];
 
 export type ExcursionMeasurement =
   'OBSERVED_PATH' | 'UNAVAILABLE' | 'LEGACY_UNSPECIFIED';
+
+export type OutcomePathSampling =
+  'STANDARDIZED_HORIZON_SAMPLES' | 'LEGACY_UNSPECIFIED';
+
+export const outcomeHorizonMilliseconds = (
+  horizonMinutes: AlertOutcomeHorizonMinutes,
+): number => Math.round(horizonMinutes * 60_000);
+
+export const formatOutcomeHorizon = (
+  horizonMinutes: AlertOutcomeHorizonMinutes,
+): string => {
+  const milliseconds = outcomeHorizonMilliseconds(horizonMinutes);
+  return milliseconds < 60_000
+    ? `${milliseconds / 1_000}s`
+    : `${milliseconds / 60_000}m`;
+};
 
 export const isAlertOutcomeHorizonMinutes = (
   value: unknown,
@@ -28,6 +51,15 @@ export interface AlertOutcomeObservation {
   directionAdjustedReturnPercent: number;
   maximumFavorableExcursionPercent: number;
   maximumAdverseExcursionPercent: number;
+  /** Raw, strategy-independent sampled path measurements. */
+  maximumUpwardExcursionPercent?: number;
+  maximumDownwardExcursionPercent?: number;
+  timeToMaximumFavorableExcursionMs?: number;
+  timeToMaximumAdverseExcursionMs?: number;
+  timeToMaximumUpwardExcursionMs?: number;
+  timeToMaximumDownwardExcursionMs?: number;
+  pathSampleCount?: number;
+  pathSampling?: OutcomePathSampling;
   /**
    * Missing on legacy serialized records. Parsers normalize those records to
    * either OBSERVED_PATH or LEGACY_UNSPECIFIED before analysis.
@@ -100,9 +132,10 @@ export const createAlertOutcomeObservation = (
   const observedAt = requireTimestamp(input.observedAt, 'observedAt');
 
   if (!ALERT_OUTCOME_HORIZONS_MINUTES.includes(input.horizonMinutes)) {
-    throw new Error('horizonMinutes must be one of 1, 5, 15, 30, or 60');
+    throw new Error('horizonMinutes must be a supported standardized horizon');
   }
-  const expectedObservedAt = detectedAt + input.horizonMinutes * 60_000;
+  const expectedObservedAt =
+    detectedAt + outcomeHorizonMilliseconds(input.horizonMinutes);
   if (!Number.isSafeInteger(expectedObservedAt)) {
     throw new Error('requested outcome horizon exceeds the timestamp range');
   }
@@ -149,6 +182,51 @@ export const createAlertOutcomeObservation = (
   ) {
     throw new Error('excursionMeasurement is invalid');
   }
+
+  const optionalNonNegative = (
+    value: number | undefined,
+    name: string,
+  ): number | undefined =>
+    value === undefined ? undefined : requireFiniteNonNegative(value, name);
+  const maximumUpwardExcursionPercent = optionalNonNegative(
+    input.maximumUpwardExcursionPercent,
+    'maximumUpwardExcursionPercent',
+  );
+  const maximumDownwardExcursionPercent = optionalNonNegative(
+    input.maximumDownwardExcursionPercent,
+    'maximumDownwardExcursionPercent',
+  );
+  const timeToMaximumFavorableExcursionMs = optionalNonNegative(
+    input.timeToMaximumFavorableExcursionMs,
+    'timeToMaximumFavorableExcursionMs',
+  );
+  const timeToMaximumAdverseExcursionMs = optionalNonNegative(
+    input.timeToMaximumAdverseExcursionMs,
+    'timeToMaximumAdverseExcursionMs',
+  );
+  const timeToMaximumUpwardExcursionMs = optionalNonNegative(
+    input.timeToMaximumUpwardExcursionMs,
+    'timeToMaximumUpwardExcursionMs',
+  );
+  const timeToMaximumDownwardExcursionMs = optionalNonNegative(
+    input.timeToMaximumDownwardExcursionMs,
+    'timeToMaximumDownwardExcursionMs',
+  );
+  const pathSampleCount = input.pathSampleCount;
+  if (
+    pathSampleCount !== undefined &&
+    (!Number.isSafeInteger(pathSampleCount) || pathSampleCount <= 0)
+  ) {
+    throw new Error('pathSampleCount must be a positive safe integer');
+  }
+  const pathSampling = input.pathSampling;
+  if (
+    pathSampling !== undefined &&
+    pathSampling !== 'STANDARDIZED_HORIZON_SAMPLES' &&
+    pathSampling !== 'LEGACY_UNSPECIFIED'
+  ) {
+    throw new Error('pathSampling is invalid');
+  }
   if (
     excursionMeasurement !== 'OBSERVED_PATH' &&
     (maximumFavorableExcursionPercent !== 0 ||
@@ -173,6 +251,26 @@ export const createAlertOutcomeObservation = (
     directionAdjustedReturnPercent,
     maximumFavorableExcursionPercent,
     maximumAdverseExcursionPercent,
+    ...(maximumUpwardExcursionPercent === undefined
+      ? {}
+      : { maximumUpwardExcursionPercent }),
+    ...(maximumDownwardExcursionPercent === undefined
+      ? {}
+      : { maximumDownwardExcursionPercent }),
+    ...(timeToMaximumFavorableExcursionMs === undefined
+      ? {}
+      : { timeToMaximumFavorableExcursionMs }),
+    ...(timeToMaximumAdverseExcursionMs === undefined
+      ? {}
+      : { timeToMaximumAdverseExcursionMs }),
+    ...(timeToMaximumUpwardExcursionMs === undefined
+      ? {}
+      : { timeToMaximumUpwardExcursionMs }),
+    ...(timeToMaximumDownwardExcursionMs === undefined
+      ? {}
+      : { timeToMaximumDownwardExcursionMs }),
+    ...(pathSampleCount === undefined ? {} : { pathSampleCount }),
+    ...(pathSampling === undefined ? {} : { pathSampling }),
     excursionMeasurement,
     complete: true,
     liveOrderExecutionAllowed: false,
@@ -199,6 +297,23 @@ export const parseAlertOutcomeObservation = (
     typeof value.directionAdjustedReturnPercent !== 'number' ||
     typeof value.maximumFavorableExcursionPercent !== 'number' ||
     typeof value.maximumAdverseExcursionPercent !== 'number' ||
+    (value.maximumUpwardExcursionPercent !== undefined &&
+      typeof value.maximumUpwardExcursionPercent !== 'number') ||
+    (value.maximumDownwardExcursionPercent !== undefined &&
+      typeof value.maximumDownwardExcursionPercent !== 'number') ||
+    (value.timeToMaximumFavorableExcursionMs !== undefined &&
+      typeof value.timeToMaximumFavorableExcursionMs !== 'number') ||
+    (value.timeToMaximumAdverseExcursionMs !== undefined &&
+      typeof value.timeToMaximumAdverseExcursionMs !== 'number') ||
+    (value.timeToMaximumUpwardExcursionMs !== undefined &&
+      typeof value.timeToMaximumUpwardExcursionMs !== 'number') ||
+    (value.timeToMaximumDownwardExcursionMs !== undefined &&
+      typeof value.timeToMaximumDownwardExcursionMs !== 'number') ||
+    (value.pathSampleCount !== undefined &&
+      typeof value.pathSampleCount !== 'number') ||
+    (value.pathSampling !== undefined &&
+      value.pathSampling !== 'STANDARDIZED_HORIZON_SAMPLES' &&
+      value.pathSampling !== 'LEGACY_UNSPECIFIED') ||
     (value.excursionMeasurement !== undefined &&
       value.excursionMeasurement !== 'OBSERVED_PATH' &&
       value.excursionMeasurement !== 'UNAVAILABLE' &&
@@ -228,6 +343,15 @@ export const parseAlertOutcomeObservation = (
       directionAdjustedReturnPercent: value.directionAdjustedReturnPercent,
       maximumFavorableExcursionPercent: value.maximumFavorableExcursionPercent,
       maximumAdverseExcursionPercent: value.maximumAdverseExcursionPercent,
+      maximumUpwardExcursionPercent: value.maximumUpwardExcursionPercent,
+      maximumDownwardExcursionPercent: value.maximumDownwardExcursionPercent,
+      timeToMaximumFavorableExcursionMs:
+        value.timeToMaximumFavorableExcursionMs,
+      timeToMaximumAdverseExcursionMs: value.timeToMaximumAdverseExcursionMs,
+      timeToMaximumUpwardExcursionMs: value.timeToMaximumUpwardExcursionMs,
+      timeToMaximumDownwardExcursionMs: value.timeToMaximumDownwardExcursionMs,
+      pathSampleCount: value.pathSampleCount,
+      pathSampling: value.pathSampling,
       excursionMeasurement,
     });
   } catch {

@@ -5,6 +5,7 @@ import { isErrorWithCode } from '../core/errorGuards';
 import {
   ALERT_OUTCOME_HORIZONS_MINUTES,
   isAlertOutcomeHorizonMinutes,
+  outcomeHorizonMilliseconds,
   parseAlertOutcomeObservation,
   type AlertOutcomeHorizonMinutes,
   type AlertOutcomeObservation,
@@ -28,6 +29,9 @@ export interface PendingOutcomeJob {
   referencePrice: number;
   horizonMinutes: AlertOutcomeHorizonMinutes;
   dueAt: number;
+  status: 'PENDING' | 'MISSED';
+  missedAt?: number;
+  failureReason?: string;
   liveOrderExecutionAllowed: false;
 }
 
@@ -66,6 +70,7 @@ export const parsePendingOutcomeJob = (
   const detectedAt = job.detectedAt;
   const referencePrice = job.referencePrice;
   const dueAt = job.dueAt;
+  const status = job.status ?? 'PENDING';
 
   if (
     job.schemaVersion !== PENDING_OUTCOME_JOB_SCHEMA_VERSION ||
@@ -89,7 +94,16 @@ export const parsePendingOutcomeJob = (
     !isAlertOutcomeHorizonMinutes(job.horizonMinutes) ||
     typeof dueAt !== 'number' ||
     !Number.isSafeInteger(dueAt) ||
-    dueAt !== detectedAt + job.horizonMinutes * 60_000
+    dueAt !== detectedAt + outcomeHorizonMilliseconds(job.horizonMinutes) ||
+    (status !== 'PENDING' && status !== 'MISSED') ||
+    (status === 'MISSED' &&
+      (typeof job.missedAt !== 'number' ||
+        !Number.isSafeInteger(job.missedAt) ||
+        job.missedAt < dueAt ||
+        typeof job.failureReason !== 'string' ||
+        job.failureReason.trim().length === 0)) ||
+    (status === 'PENDING' &&
+      (job.missedAt !== undefined || job.failureReason !== undefined))
   ) {
     return undefined;
   }
@@ -104,6 +118,13 @@ export const parsePendingOutcomeJob = (
     referencePrice,
     horizonMinutes: job.horizonMinutes,
     dueAt,
+    status,
+    ...(status === 'MISSED'
+      ? {
+          missedAt: job.missedAt as number,
+          failureReason: (job.failureReason as string).trim(),
+        }
+      : {}),
     liveOrderExecutionAllowed: false,
   });
 };
@@ -116,6 +137,10 @@ export class PersistentOutcomeScheduler {
     removedCompletedJobs: 0,
     unchangedJobs: 0,
   });
+  private readonly completedByAlertId = new Map<
+    string,
+    AlertOutcomeObservation[]
+  >();
 
   private readonly horizonsMinutes: readonly AlertOutcomeHorizonMinutes[];
 
@@ -200,7 +225,10 @@ export class PersistentOutcomeScheduler {
         direction: validatedEvidence.direction,
         referencePrice: validatedEvidence.referencePrice,
         horizonMinutes,
-        dueAt: validatedEvidence.detectedAt + horizonMinutes * 60_000,
+        dueAt:
+          validatedEvidence.detectedAt +
+          outcomeHorizonMilliseconds(horizonMinutes),
+        status: 'PENDING',
         liveOrderExecutionAllowed: false,
       });
 
@@ -237,7 +265,11 @@ export class PersistentOutcomeScheduler {
     if (!Number.isSafeInteger(now) || now < 0) {
       throw new Error('now must be a non-negative safe integer');
     }
-    return Object.freeze(this.state.pending.filter((job) => job.dueAt <= now));
+    return Object.freeze(
+      this.state.pending.filter(
+        (job) => job.status === 'PENDING' && job.dueAt <= now,
+      ),
+    );
   }
 
   public getPendingJobs(): readonly PendingOutcomeJob[] {
@@ -246,6 +278,48 @@ export class PersistentOutcomeScheduler {
 
   public getLastReconciliation(): OutcomeSchedulerReconciliation {
     return this.lastReconciliation;
+  }
+
+  public async markObservationMissed(
+    job: PendingOutcomeJob,
+    missedAt: number,
+    failureReason: string,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(missedAt) || missedAt < job.dueAt) {
+      throw new Error('missedAt must be at or after the observation due time');
+    }
+    const reason = failureReason.trim();
+    if (reason.length === 0) throw new Error('failureReason must not be empty');
+    await this.enqueue(async () => {
+      const key = jobKey(job);
+      const current = this.state.pending.find(
+        (candidate) => jobKey(candidate) === key,
+      );
+      if (current === undefined || current.status === 'MISSED') return;
+      const missed = this.validateJob({
+        ...current,
+        status: 'MISSED',
+        missedAt,
+        failureReason: reason,
+      });
+      await this.persist({
+        schemaVersion: 1,
+        pending: this.state.pending.map((candidate) =>
+          jobKey(candidate) === key ? missed : candidate,
+        ),
+        liveOrderExecutionAllowed: false,
+      });
+    });
+  }
+
+  /**
+   * Returns the already-persisted standardized path samples for one event.
+   * The map is rebuilt from outcomes.ndjson during restart reconciliation.
+   */
+  public getCompletedObservations(
+    alertId: string,
+  ): readonly AlertOutcomeObservation[] {
+    return Object.freeze([...(this.completedByAlertId.get(alertId) ?? [])]);
   }
 
   public async completeObservation(
@@ -296,6 +370,11 @@ export class PersistentOutcomeScheduler {
         `${JSON.stringify(validatedObservation)}\n`,
         { encoding: 'utf8', flush: true },
       );
+      const completed =
+        this.completedByAlertId.get(validatedObservation.alertId) ?? [];
+      completed.push(validatedObservation);
+      completed.sort((left, right) => left.observedAt - right.observedAt);
+      this.completedByAlertId.set(validatedObservation.alertId, completed);
       await this.persist({
         schemaVersion: 1,
         pending: this.state.pending.filter((job) => jobKey(job) !== key),
@@ -326,7 +405,9 @@ export class PersistentOutcomeScheduler {
           direction: evidence.direction,
           referencePrice: evidence.referencePrice,
           horizonMinutes,
-          dueAt: evidence.detectedAt + horizonMinutes * 60_000,
+          dueAt:
+            evidence.detectedAt + outcomeHorizonMilliseconds(horizonMinutes),
+          status: 'PENDING',
           liveOrderExecutionAllowed: false,
         });
         if (job === undefined) {
@@ -390,6 +471,16 @@ export class PersistentOutcomeScheduler {
       );
     }
 
+    this.completedByAlertId.clear();
+    for (const outcome of integrity.outcomes) {
+      const completed = this.completedByAlertId.get(outcome.alertId) ?? [];
+      completed.push(outcome);
+      this.completedByAlertId.set(outcome.alertId, completed);
+    }
+    for (const completed of this.completedByAlertId.values()) {
+      completed.sort((left, right) => left.observedAt - right.observedAt);
+    }
+
     const completedKeys = new Set(
       integrity.outcomes.map(
         (outcome) => `${outcome.alertId}:${outcome.horizonMinutes}`,
@@ -418,9 +509,20 @@ export class PersistentOutcomeScheduler {
         }
         throw new Error(`Pending outcome job has no qualified alert: ${key}`);
       }
-      if (JSON.stringify(stored) !== JSON.stringify(expected)) {
+      const expectedIdentity = this.validateJob({
+        ...expected,
+        status: stored.status,
+        ...(stored.status === 'MISSED'
+          ? {
+              missedAt: stored.missedAt,
+              failureReason: stored.failureReason,
+            }
+          : {}),
+      });
+      if (JSON.stringify(stored) !== JSON.stringify(expectedIdentity)) {
         throw new Error(`Pending outcome job conflicts with evidence: ${key}`);
       }
+      expectedByKey.set(key, stored);
       unchangedJobs += 1;
     }
 

@@ -23,7 +23,9 @@ export interface CorrelatedAlertEvidenceBridgeInput {
 export class CorrelatedAlertEvidenceBridge {
   private readonly alertAdmissionPolicy: EvidenceAlertAdmissionPolicy;
 
-  public constructor(private readonly identity: CorrelatedAlertEvidenceIdentity) {
+  public constructor(
+    private readonly identity: CorrelatedAlertEvidenceIdentity,
+  ) {
     if (
       identity.evaluationId.trim().length === 0 ||
       identity.sourceCommit.trim().length === 0 ||
@@ -43,7 +45,9 @@ export class CorrelatedAlertEvidenceBridge {
       throw new Error('Alert symbol does not match its evaluation context');
     }
     if (alert.bias !== 'BULLISH' && alert.bias !== 'BEARISH') {
-      throw new Error('Only directional correlated alerts qualify for evidence');
+      throw new Error(
+        'Only directional correlated alerts qualify for evidence',
+      );
     }
     if (
       this.alertAdmissionPolicy === 'OKX_ONLY' &&
@@ -60,7 +64,11 @@ export class CorrelatedAlertEvidenceBridge {
       evaluationId: this.identity.evaluationId,
       alertId: alert.id,
       instrumentId: alert.symbol,
+      instrumentType: evaluationContext.instType,
       detectedAt: alert.createdAt,
+      sourceSignalTimestamp: evaluationContext.sourceSignalTimestamp,
+      sourceMarketTimestamp: evaluationContext.sourceMarketTimestamp,
+      referenceTimestamp: evaluationContext.referenceTimestamp,
       recordedAt: input.recordedAt,
       direction: alert.bias,
       signalType: `${alert.eventType}:${alert.relationship}:${alert.severity}`,

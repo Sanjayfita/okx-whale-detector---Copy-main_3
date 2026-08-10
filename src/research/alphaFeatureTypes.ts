@@ -94,12 +94,36 @@ export interface AlphaResearchTrade {
 
 export interface AlphaWhaleFeatureContext {
   readonly availabilityTimestamp: number;
+  readonly wallId?: string;
+  readonly side?: 'BID' | 'ASK';
+  readonly price?: number;
+  readonly size?: number;
+  readonly distanceFromMidPercent?: number;
+  readonly updateCount?: number | null;
   readonly wallPersistenceMs: number | null;
   readonly refillCount: number | null;
   readonly spoofProbability: number | null;
   readonly absorptionScore: number | null;
   readonly executionRatio: number | null;
   readonly whaleNotionalQuote: number | null;
+}
+
+export interface AlphaDerivativeContext {
+  readonly availabilityTimestamp: number;
+  readonly fundingRate: number | null;
+  readonly nextFundingTimestamp: number | null;
+  readonly openInterest: number | null;
+  readonly openInterestChange: number | null;
+  readonly missing: true;
+}
+
+export interface AlphaSnapshotIntegrityMetadata {
+  readonly eventTimestamp: number;
+  readonly featureTimestamp: number;
+  readonly maximumSourceAvailabilityTimestamp: number;
+  readonly featureRegistryVersion: 'alpha-feature-registry-v1';
+  readonly temporalIntegrityVerified: true;
+  readonly dataQualityFlags: readonly string[];
 }
 
 export interface AlphaMarketContextSnapshot {
@@ -109,6 +133,9 @@ export interface AlphaMarketContextSnapshot {
   readonly orderBook: AlphaResearchOrderBookSnapshot;
   readonly trades: readonly AlphaResearchTrade[];
   readonly whale: AlphaWhaleFeatureContext;
+  /** Explicitly null/missing until a reliable non-blocking OKX feed is added. */
+  readonly derivatives?: AlphaDerivativeContext;
+  readonly integrity?: AlphaSnapshotIntegrityMetadata;
 }
 
 export const ALPHA_RESEARCH_EVENT_SNAPSHOT_SCHEMA_VERSION = 1 as const;
@@ -131,6 +158,9 @@ export interface AlphaResearchEventSnapshot {
   readonly orderBook: AlphaResearchOrderBookSnapshot | null;
   readonly trades: readonly AlphaResearchTrade[];
   readonly whale: AlphaWhaleFeatureContext;
+  /** Explicit missingness is persisted; collection never invents derivatives. */
+  readonly derivatives?: AlphaDerivativeContext;
+  readonly integrity?: AlphaSnapshotIntegrityMetadata;
   /** Present on newly persisted evidence; absent only on legacy snapshots. */
   readonly capturedFeatures?: AlphaCapturedFeatureValues;
   readonly synthetic: boolean;

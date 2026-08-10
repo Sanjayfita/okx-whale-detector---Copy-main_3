@@ -38,9 +38,6 @@ describe('OKXLivePriceReader', () => {
       instrumentId: 'BTC-USDT',
       observedAt: 2_000,
       price: 60_000,
-      maximumFavorableExcursionPercent: 0,
-      maximumAdverseExcursionPercent: 0,
-      excursionMeasurement: 'UNAVAILABLE',
     });
     expect(fetchFn).toHaveBeenCalledOnce();
   });
