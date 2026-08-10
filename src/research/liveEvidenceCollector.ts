@@ -32,6 +32,10 @@ export interface LiveEvidenceCollectorDependencies {
   maximumObservationDelayMs?: number;
   maximumFutureSkewMs?: number;
   onObservationError?: (error: unknown, job: PendingOutcomeJob) => void;
+  onObservationMissed?: (
+    job: PendingOutcomeJob,
+    missedAt: number,
+  ) => Promise<void> | void;
 }
 
 export class LiveEvidenceCollector {
@@ -114,6 +118,7 @@ export class LiveEvidenceCollector {
           now,
           'OBSERVATION_WINDOW_EXPIRED',
         );
+        await this.dependencies.onObservationMissed?.(job, now);
         this.reportObservationErrorOnce(
           new Error(
             'Outcome observation window expired; the job was durably marked MISSED',
@@ -133,6 +138,13 @@ export class LiveEvidenceCollector {
       ),
     );
     return completedByInstrument.reduce((sum, count) => sum + count, 0);
+  }
+
+  public getMissedObservationCount(): number {
+    this.requireInitialized();
+    return this.dependencies.scheduler
+      .getPendingJobs()
+      .filter((job) => job.status === 'MISSED').length;
   }
 
   private async processInstrumentJobs(

@@ -59,6 +59,9 @@ Graceful shutdown first stops market/event ingestion, continues due-observation
 polling for one 10-second tolerance window, and only then clears the scheduler
 timer and releases the evaluation lease. This leaves a verification/restart
 window without converting near-due jobs into avoidable overdue observations.
+Collection and canary npm commands start through `tsx` and do not run a blocking
+build before acquiring the evaluation lease; build/typecheck are preflight gates,
+not part of a time-sensitive scheduler restart.
 
 Progress reports show invalid JSON and schema defects separately, explicit
 missing optional derivative values separately from feature calculation failures,

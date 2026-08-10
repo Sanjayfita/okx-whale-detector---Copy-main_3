@@ -57,22 +57,33 @@ export const createEvidenceCollectRuntimeBundle = (
     bootstrap.evaluationDirectory,
     bootstrap.manifest.horizonsMinutes,
   );
+  const healthStore = new EvidenceCollectionHealthStore(
+    bootstrap.evaluationDirectory,
+    bootstrap.manifest.evaluationId,
+  );
   const collector = new LiveEvidenceCollector({
     recorder,
     scheduler,
     readPrice: options.readPrice,
     clock,
     onObservationError: (error) => options.onError?.(error),
+    onObservationMissed: async (job, missedAt) => {
+      const error = new Error(
+        `Observation window irrecoverably missed: ${job.alertId}/${job.horizonMinutes}m at ${missedAt}`,
+      );
+      await runtime.failCollectionIntegrity(
+        error,
+        'OBSERVATION_WINDOW_MISSED',
+        job.alertId,
+        job.instrumentId,
+      );
+    },
   });
   const alphaSnapshotRecorder = new AlphaResearchSnapshotRecorder({
     evaluationDirectory: bootstrap.evaluationDirectory,
   });
   const eventInitializationStore = new EvidenceEventInitializationStore(
     bootstrap.evaluationDirectory,
-  );
-  const healthStore = new EvidenceCollectionHealthStore(
-    bootstrap.evaluationDirectory,
-    bootstrap.manifest.evaluationId,
   );
   const bridge = new CorrelatedAlertEvidenceBridge({
     evaluationId: bootstrap.manifest.evaluationId,

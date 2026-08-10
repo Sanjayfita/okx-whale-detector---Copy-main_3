@@ -120,6 +120,16 @@ export class EvidenceCollectionRuntime {
     }
     try {
       await this.options.collector.initialize();
+      const missedObservationCount =
+        'getMissedObservationCount' in this.options.collector &&
+        typeof this.options.collector.getMissedObservationCount === 'function'
+          ? this.options.collector.getMissedObservationCount()
+          : 0;
+      if (missedObservationCount > 0) {
+        throw new Error(
+          `Cannot resume evaluation with ${missedObservationCount} irrecoverably missed observation(s)`,
+        );
+      }
       await this.options.alphaSnapshotRecorder?.initialize();
       await this.options.eventInitializationStore?.initialize();
       for (const pending of this.options.eventInitializationStore?.getPending() ??
@@ -410,6 +420,15 @@ export class EvidenceCollectionRuntime {
 
   public isFailedClosed(): boolean {
     return this.failedClosed;
+  }
+
+  public failCollectionIntegrity(
+    error: Error,
+    category: string,
+    alertId?: string,
+    instrumentId?: string,
+  ): Promise<void> {
+    return this.failClosed(error, category, alertId, instrumentId);
   }
 
   private async failClosed(
