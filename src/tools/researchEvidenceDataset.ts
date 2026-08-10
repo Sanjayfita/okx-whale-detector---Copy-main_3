@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { verifyEvidenceDatasetRelease } from '../research/evidenceDatasetRelease';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 const safeSegment = (value: string, name: string): string => {
   const normalized = value.trim();
@@ -23,9 +24,8 @@ export const resolveEvidenceDatasetIdentity = (
   const first = args[0]?.trim() ?? '';
   const second = args[1]?.trim();
   const separator = first.indexOf(':');
-  const evaluationId = safeSegment(
+  const evaluationId = requireSafeEvidenceEvaluationId(
     second === undefined && separator > 0 ? first.slice(0, separator) : first,
-    'evaluationId',
   );
   const releaseFingerprint = safeSegment(
     second === undefined && separator > 0

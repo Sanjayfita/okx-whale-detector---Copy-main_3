@@ -6,6 +6,7 @@ import { parseAlertOutcomeObservation } from '../research/alertOutcomeObservatio
 import { parseEvidenceNdjson } from '../research/evidenceNdjson';
 import { EVIDENCE_PRIMARY_HORIZON_MINUTES } from '../research/evidenceEvaluationDefinition';
 import type { ProfitabilityPolicy } from '../research/evidenceProfitability';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 import { parseQualifiedAlertEvidenceRecord } from '../research/qualifiedAlertEvidence';
 import {
   createStatisticalValidationReport,
@@ -48,9 +49,9 @@ export const generateStatisticalValidationReport = async (input: {
   readonly bootstrapIterations?: number;
   readonly purgeMs?: number;
 }): Promise<StatisticalValidationReport> => {
+  const evaluationId = requireSafeEvidenceEvaluationId(input.evaluationId);
   const evaluationDirectory =
-    input.evaluationDirectory ??
-    resolve('data', 'evaluations', input.evaluationId);
+    input.evaluationDirectory ?? resolve('data', 'evaluations', evaluationId);
   const [alertsText, outcomesText] = await Promise.all([
     readOptional(resolve(evaluationDirectory, 'qualified-alerts.ndjson')),
     readOptional(resolve(evaluationDirectory, 'outcomes.ndjson')),
@@ -73,7 +74,7 @@ export const generateStatisticalValidationReport = async (input: {
 
   return createStatisticalValidationReport({
     generatedAt: input.generatedAt ?? Date.now(),
-    evaluationId: input.evaluationId,
+    evaluationId,
     alerts: alerts.records,
     outcomes: outcomes.records,
     malformedRecords: alerts.malformed + outcomes.malformed,
@@ -88,8 +89,9 @@ export const generateStatisticalValidationReport = async (input: {
 
 const main = async (): Promise<void> => {
   const args = process.argv.slice(2);
-  const evaluationId =
-    args.find((value) => !value.startsWith('--')) ?? 'eval-2026-08-02-v1';
+  const evaluationId = requireSafeEvidenceEvaluationId(
+    args.find((value) => !value.startsWith('--')) ?? 'eval-2026-08-02-v1',
+  );
   const evaluationDirectory = resolve('data', 'evaluations', evaluationId);
   const report = await generateStatisticalValidationReport({
     evaluationId,
@@ -114,9 +116,7 @@ const main = async (): Promise<void> => {
   console.log('STATISTICAL VALIDATION REPORT');
   console.log(`Evaluation ID: ${report.evaluationId}`);
   console.log(`Matched observations: ${report.matchedObservations}`);
-  console.log(
-    `Primary horizon: ${report.primaryHorizonMinutes} minute(s)`,
-  );
+  console.log(`Primary horizon: ${report.primaryHorizonMinutes} minute(s)`);
   console.log(`Independent alerts: ${report.independentAlerts}`);
   console.log(
     `95% block-bootstrap interval: ${report.overallConfidenceInterval.lower}% to ${report.overallConfidenceInterval.upper}%`,

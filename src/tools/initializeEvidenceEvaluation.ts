@@ -7,6 +7,7 @@ import {
   createEvaluationSessionManifest,
   type EvaluationSessionManifest,
 } from '../research/evaluationSessionManifest';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 export interface InitializeEvidenceEvaluationOptions {
   readonly evaluationId: string;
@@ -22,25 +23,11 @@ export interface InitializedEvidenceEvaluation {
   readonly liveOrderExecutionAllowed: false;
 }
 
-const requireSafeEvaluationId = (evaluationId: string): string => {
-  const normalized = evaluationId.trim();
-  if (
-    normalized.length === 0 ||
-    normalized === '.' ||
-    normalized === '..' ||
-    normalized.includes('/') ||
-    normalized.includes('\\')
-  ) {
-    throw new Error('evaluationId must be a safe non-empty directory name');
-  }
-  return normalized;
-};
-
 export const initializeEvidenceEvaluation = (
   options: InitializeEvidenceEvaluationOptions,
 ): InitializedEvidenceEvaluation => {
   const projectDirectory = options.projectDirectory ?? process.cwd();
-  const evaluationId = requireSafeEvaluationId(options.evaluationId);
+  const evaluationId = requireSafeEvidenceEvaluationId(options.evaluationId);
   const gitStatus =
     options.gitStatus ??
     execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], {
@@ -79,6 +66,40 @@ export const initializeEvidenceEvaluation = (
     `${JSON.stringify(manifest, null, 2)}\n`,
     { flag: 'wx', flush: true },
   );
+  writeFileSync(
+    resolve(evaluationDirectory, 'event-initializations.json'),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        pending: [],
+        committedAlertIds: [],
+        liveOrderExecutionAllowed: false,
+      },
+      null,
+      2,
+    )}\n`,
+    { flag: 'wx', flush: true },
+  );
+  writeFileSync(
+    resolve(evaluationDirectory, 'collection-health.json'),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        evaluationId,
+        status: 'HEALTHY',
+        updatedAt: options.createdAt ?? Date.now(),
+        lastFailure: null,
+        liveOrderExecutionAllowed: false,
+      },
+      null,
+      2,
+    )}\n`,
+    { flag: 'wx', flush: true },
+  );
+  writeFileSync(resolve(evaluationDirectory, 'evidence-failures.ndjson'), '', {
+    flag: 'wx',
+    flush: true,
+  });
   writeFileSync(resolve(evaluationDirectory, 'qualified-alerts.ndjson'), '', {
     flag: 'wx',
     flush: true,

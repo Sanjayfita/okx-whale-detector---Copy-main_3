@@ -3,7 +3,7 @@ import { appConfig } from '../config/appConfig';
 import { ExternalSignalCorrelationService } from '../external/core/ExternalSignalCorrelationService';
 import { PolymarketLiveSignalRuntime } from '../external/providers/polymarket/PolymarketLiveSignalRuntime';
 import type { AlphaMarketContextObserver } from '../market/MarketEngine';
-import { EvidenceAwareCorrelatedAlertRecorder } from '../research/evidenceAwareCorrelatedAlertRecorder';
+import { CorrelatedAlertRecorder } from '../recording/CorrelatedAlertRecorder';
 import {
   loadEvidenceCollectBootstrap,
   type EvidenceCollectBootstrap,
@@ -24,11 +24,12 @@ interface AppRuntimeLike {
 
 export interface EvidenceCollectCommandDependencies {
   createAppRuntime: (dependencies: {
-    correlatedAlertRecorder: EvidenceAwareCorrelatedAlertRecorder;
+    correlatedAlertRecorder: CorrelatedAlertRecorder;
     alphaMarketContextObserver: AlphaMarketContextObserver;
     externalSignalCorrelationService: ExternalSignalCorrelationService;
     correlatedAlertEngine: CorrelatedAlertEngine;
     polymarketRuntime: PolymarketLiveSignalRuntime;
+    allowedInstrumentIds: readonly string[];
   }) => Promise<AppRuntimeLike>;
   loadBootstrap?: typeof loadEvidenceCollectBootstrap;
   createPriceReader?: () => OKXLivePriceReader;
@@ -63,10 +64,11 @@ const createOkxOnlyAlertDependencies = (): Readonly<{
   correlatedAlertEngine: CorrelatedAlertEngine;
   polymarketRuntime: PolymarketLiveSignalRuntime;
 }> => {
-  const externalSignalCorrelationService =
-    new ExternalSignalCorrelationService({
+  const externalSignalCorrelationService = new ExternalSignalCorrelationService(
+    {
       correlation: appConfig.correlation,
-    });
+    },
+  );
   const correlatedAlertEngine = new CorrelatedAlertEngine({
     sourceSessionId: createRuntimeSessionId(),
     enabled: true,
@@ -135,8 +137,9 @@ export const runEvidenceCollectCommand = async (
   await evaluationLease.acquire();
 
   let bundle: ReturnType<typeof createEvidenceCollectRuntimeBundle> | undefined;
-  let correlatedAlertRecorder: EvidenceAwareCorrelatedAlertRecorder | undefined;
+  let correlatedAlertRecorder: CorrelatedAlertRecorder | undefined;
   let appRuntime: AppRuntimeLike | undefined;
+  let criticalFailure: Error | undefined;
   try {
     const priceReader = createPriceReader();
     bundle = createRuntimeBundle({
@@ -145,20 +148,23 @@ export const runEvidenceCollectCommand = async (
       onError: (runtimeError) => {
         error('Evidence collection runtime error:', runtimeError);
       },
+      onCriticalFailure: (runtimeError) => {
+        criticalFailure = runtimeError;
+      },
     });
     await bundle.runtime.start();
 
-    correlatedAlertRecorder = new EvidenceAwareCorrelatedAlertRecorder({
+    correlatedAlertRecorder = new CorrelatedAlertRecorder({
       enabled: appConfig.correlatedAlertRecording.enabled,
       outputPath: appConfig.correlatedAlertRecording.outputPath,
       flushAfterEachAlert:
         appConfig.correlatedAlertRecording.flushAfterEachAlert,
-      onPersistedLiveAlert: bundle.runtime.onPersistedLiveAlert,
     });
     const okxOnlyDependencies = createOkxOnlyAlertDependencies();
     appRuntime = await dependencies.createAppRuntime({
       correlatedAlertRecorder,
-      alphaMarketContextObserver: bundle.runtime.onPersistedAlphaMarketContext,
+      alphaMarketContextObserver: bundle.runtime.onQualifiedMarketContext,
+      allowedInstrumentIds: bootstrap.manifest.instruments,
       externalSignalCorrelationService:
         okxOnlyDependencies.externalSignalCorrelationService,
       correlatedAlertEngine: okxOnlyDependencies.correlatedAlertEngine,
@@ -202,7 +208,10 @@ export const runEvidenceCollectCommand = async (
 
   void Promise.resolve(activeAppRuntime.polymarketRuntime.start()).catch(
     (polymarketError: unknown) => {
-      error('Disabled external-signal runtime failed unexpectedly:', polymarketError);
+      error(
+        'Disabled external-signal runtime failed unexpectedly:',
+        polymarketError,
+      );
     },
   );
 
@@ -210,6 +219,7 @@ export const runEvidenceCollectCommand = async (
   const stop = async (signal: AppShutdownReason = 'SIGINT'): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    if (criticalMonitor !== undefined) clearInterval(criticalMonitor);
     const shutdownErrors: unknown[] = [];
     try {
       await activeAppRuntime.shutdown(signal);
@@ -240,6 +250,19 @@ export const runEvidenceCollectCommand = async (
       );
     }
   };
+
+  const criticalMonitor = setInterval(() => {
+    if (criticalFailure === undefined) return;
+    clearInterval(criticalMonitor);
+    error(
+      'CRITICAL EVIDENCE INTEGRITY FAILURE — COLLECTION IS STOPPING:',
+      criticalFailure,
+    );
+    void stop('APPLICATION_CLOSE').catch((shutdownError: unknown) => {
+      error('Fail-closed evidence shutdown failed:', shutdownError);
+      process.exitCode = 1;
+    });
+  }, 100);
 
   registerSignal('SIGINT', () => {
     void stop('SIGINT').catch((shutdownError: unknown) => {

@@ -45,6 +45,10 @@ export interface AlertOutcomeObservation {
   detectedAt: number;
   horizonMinutes: AlertOutcomeHorizonMinutes;
   observedAt: number;
+  /** Explicit scheduler timing telemetry on newly collected observations. */
+  observationDueAt?: number;
+  observationLatencyMs?: number;
+  allowedObservationDelayMs?: number;
   referencePrice: number;
   observedPrice: number;
   rawReturnPercent: number;
@@ -141,6 +145,28 @@ export const createAlertOutcomeObservation = (
   }
   if (observedAt < expectedObservedAt) {
     throw new Error('observedAt cannot be earlier than the requested horizon');
+  }
+  const timingFields = [
+    input.observationDueAt,
+    input.observationLatencyMs,
+    input.allowedObservationDelayMs,
+  ];
+  const timingProvided = timingFields.some((value) => value !== undefined);
+  if (
+    timingProvided &&
+    (input.observationDueAt === undefined ||
+      input.observationLatencyMs === undefined ||
+      input.allowedObservationDelayMs === undefined ||
+      requireTimestamp(input.observationDueAt, 'observationDueAt') !==
+        expectedObservedAt ||
+      requireTimestamp(input.observationLatencyMs, 'observationLatencyMs') !==
+        observedAt - expectedObservedAt ||
+      requireTimestamp(
+        input.allowedObservationDelayMs,
+        'allowedObservationDelayMs',
+      ) < input.observationLatencyMs)
+  ) {
+    throw new Error('Observation scheduler timing telemetry is inconsistent');
   }
 
   const referencePrice = requireFinitePositive(
@@ -245,6 +271,13 @@ export const createAlertOutcomeObservation = (
     detectedAt,
     horizonMinutes: input.horizonMinutes,
     observedAt,
+    ...(timingProvided
+      ? {
+          observationDueAt: input.observationDueAt,
+          observationLatencyMs: input.observationLatencyMs,
+          allowedObservationDelayMs: input.allowedObservationDelayMs,
+        }
+      : {}),
     referencePrice,
     observedPrice,
     rawReturnPercent,
@@ -291,6 +324,12 @@ export const parseAlertOutcomeObservation = (
     typeof value.detectedAt !== 'number' ||
     !isAlertOutcomeHorizonMinutes(value.horizonMinutes) ||
     typeof value.observedAt !== 'number' ||
+    (value.observationDueAt !== undefined &&
+      typeof value.observationDueAt !== 'number') ||
+    (value.observationLatencyMs !== undefined &&
+      typeof value.observationLatencyMs !== 'number') ||
+    (value.allowedObservationDelayMs !== undefined &&
+      typeof value.allowedObservationDelayMs !== 'number') ||
     typeof value.referencePrice !== 'number' ||
     typeof value.observedPrice !== 'number' ||
     typeof value.rawReturnPercent !== 'number' ||
@@ -337,6 +376,9 @@ export const parseAlertOutcomeObservation = (
       detectedAt: value.detectedAt,
       horizonMinutes: value.horizonMinutes,
       observedAt: value.observedAt,
+      observationDueAt: value.observationDueAt,
+      observationLatencyMs: value.observationLatencyMs,
+      allowedObservationDelayMs: value.allowedObservationDelayMs,
       referencePrice: value.referencePrice,
       observedPrice: value.observedPrice,
       rawReturnPercent: value.rawReturnPercent,

@@ -85,6 +85,19 @@ export class LiveEvidenceCollector {
     await this.dependencies.scheduler.scheduleAlert(evidence);
   }
 
+  public async recordQualifiedAlertIdempotent(
+    evidence: QualifiedAlertEvidenceRecord,
+  ): Promise<void> {
+    this.requireInitialized();
+    await this.dependencies.recorder.recordIdempotent(evidence);
+    await this.dependencies.scheduler.scheduleAlert(evidence);
+  }
+
+  public assertCompleteOutcomeBundle(alertId: string): void {
+    this.requireInitialized();
+    this.dependencies.scheduler.assertCompleteOutcomeBundle(alertId);
+  }
+
   public async processDueObservations(now: number): Promise<number> {
     this.requireInitialized();
     if (!Number.isSafeInteger(now) || now < 0) {
@@ -256,6 +269,9 @@ export class LiveEvidenceCollector {
       detectedAt: job.detectedAt,
       horizonMinutes: job.horizonMinutes,
       observedAt: snapshot.observedAt,
+      observationDueAt: job.dueAt,
+      observationLatencyMs: snapshot.observedAt - job.dueAt,
+      allowedObservationDelayMs: this.maximumObservationDelayMs,
       referencePrice: job.referencePrice,
       observedPrice: snapshot.price,
       rawReturnPercent,

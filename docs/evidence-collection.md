@@ -24,8 +24,13 @@ configuration.
 cd "C:\path\to\okx-whale-detector---Copy-main_3"
 $EvaluationId = "eval-YYYY-MM-DD-v1"
 npm.cmd run evidence:init -- $EvaluationId
-npm.cmd run evidence:collect -- $EvaluationId
+npm.cmd run evidence:canary -- $EvaluationId --duration-seconds 600
 ```
+
+Run the canary a second time with the same ID after its graceful stop. Begin a
+long collection with `evidence:collect` only after the canary reports multiple
+real events, completed short horizons, clean exact job accounting, and a clean
+restart. See [evidence-pipeline-integrity.md](evidence-pipeline-integrity.md).
 
 Inspect health from another terminal:
 
@@ -105,8 +110,14 @@ evaluation version.
 - Historical evidence is append-only. Every append requests an OS flush before it
   is acknowledged.
 - `pending-observations.json` is operational derived state, written to a temporary
-  file and atomically renamed. It is always checked against authoritative alerts and
-  outcomes after restart.
+  file with a unique name, flushed, and atomically renamed with bounded Windows
+  lock retries. It is always checked against authoritative alerts and outcomes
+  after restart.
+- `event-initializations.json` journals the complete pre-commit event bundle.
+  An event becomes valid only after its alert, one snapshot, and all nine jobs
+  exist. Restart replay is payload-idempotent.
+- An invalid trailing partial NDJSON line is archived byte-for-byte before it is
+  truncated; pending scheduler or event-journal state then replays the write.
 - Alert IDs and alert/horizon pairs are unique. Mixed evaluations, mismatched
   instruments, timestamps, prices, direction signs, source commits, or configuration
   fingerprints fail closed.

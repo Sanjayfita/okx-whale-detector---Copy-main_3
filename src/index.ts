@@ -66,6 +66,8 @@ export interface AppRuntimeDependencies {
   correlatedAlertReporter?: CorrelatedAlertReporter;
   correlatedAlertRecorder?: CorrelatedAlertRecorder;
   alphaMarketContextObserver?: AlphaMarketContextObserver;
+  /** Restricts live market processing to an already-frozen evaluation universe. */
+  allowedInstrumentIds?: readonly string[];
   tradingPlatformObserver?: TradingPlatformObserver;
   polymarketRuntime?: PolymarketLiveSignalRuntime;
   marketDataRecorderFactory?: (
@@ -127,15 +129,41 @@ export const createAppRuntime = async (
   console.log('Discovering eligible OKX markets...');
 
   const discoveryClient = new OKXMarketDiscoveryClient();
-  const activeProfiles = await discoveryClient.discoverProfiles(
+  const discoveredProfiles = await discoveryClient.discoverProfiles(
     SYMBOL_PROFILES,
     marketDiscoveryConfig,
   );
+  const allowedInstrumentIds = dependencies.allowedInstrumentIds;
+  const allowedInstrumentIdSet =
+    allowedInstrumentIds === undefined
+      ? undefined
+      : new Set(allowedInstrumentIds);
+  const activeProfiles =
+    allowedInstrumentIdSet === undefined
+      ? discoveredProfiles
+      : discoveredProfiles.filter((profile) =>
+          allowedInstrumentIdSet.has(profile.symbol),
+        );
+  if (allowedInstrumentIds !== undefined) {
+    const activeIds = new Set(activeProfiles.map((profile) => profile.symbol));
+    const missingAllowed = allowedInstrumentIds.filter(
+      (instrumentId) => !activeIds.has(instrumentId),
+    );
+    if (
+      allowedInstrumentIds.length === 0 ||
+      allowedInstrumentIdSet?.size !== allowedInstrumentIds.length ||
+      missingAllowed.length > 0
+    ) {
+      throw new Error(
+        `Frozen evidence instrument universe is unavailable: ${missingAllowed.join(', ')}`,
+      );
+    }
+  }
 
   console.log(
     `Selected ${activeProfiles.length} markets ` +
-      `(${SYMBOL_PROFILES.length} required, ` +
-      `${activeProfiles.length - SYMBOL_PROFILES.length} discovered).`,
+      `(${SYMBOL_PROFILES.length} configured, ` +
+      `${Math.max(0, discoveredProfiles.length - activeProfiles.length)} excluded by runtime scope).`,
   );
   console.log('Loading OKX instrument metadata...');
 

@@ -34,7 +34,8 @@ export interface MarketEngineFreshnessOptions {
 export interface AlphaMarketContextObserverInput {
   readonly alert: VersionedCorrelatedAlert;
   readonly evaluationContext: CorrelatedAlertEvaluationContext;
-  readonly marketContext: AlphaMarketContextSnapshot;
+  readonly marketContext: AlphaMarketContextSnapshot | null;
+  readonly failureReason?: 'POINT_IN_TIME_CONTEXT_UNAVAILABLE';
 }
 
 export type AlphaMarketContextObserver = (
@@ -398,13 +399,14 @@ export class MarketEngine {
                     orderBook,
                     alert,
                   );
-                  if (marketContext) {
-                    this.alphaMarketContextObserver({
-                      alert,
-                      evaluationContext,
-                      marketContext,
-                    });
-                  }
+                  this.alphaMarketContextObserver({
+                    alert,
+                    evaluationContext,
+                    marketContext: marketContext ?? null,
+                    ...(marketContext === undefined
+                      ? { failureReason: 'POINT_IN_TIME_CONTEXT_UNAVAILABLE' }
+                      : {}),
+                  });
                 }
               } catch (error: unknown) {
                 console.error(

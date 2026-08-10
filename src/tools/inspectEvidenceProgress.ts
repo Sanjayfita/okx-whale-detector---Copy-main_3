@@ -1,20 +1,14 @@
 import { resolve } from 'node:path';
 
 import { inspectEvidenceProgress } from '../research/evidenceProgressInspector';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 const args = process.argv.slice(2);
-const evaluationId = args.find((value) => !value.startsWith('--'))?.trim();
-if (!evaluationId) {
+const evaluationIdArgument = args.find((value) => !value.startsWith('--'));
+if (!evaluationIdArgument) {
   throw new Error('Usage: npm run evidence:progress -- <evaluation-id>');
 }
-if (
-  evaluationId === '.' ||
-  evaluationId === '..' ||
-  evaluationId.includes('/') ||
-  evaluationId.includes('\\')
-) {
-  throw new Error('evaluationId must be a safe directory name');
-}
+const evaluationId = requireSafeEvidenceEvaluationId(evaluationIdArgument);
 const evaluationDirectory = resolve('data', 'evaluations', evaluationId);
 
 void inspectEvidenceProgress(evaluationDirectory)
@@ -67,9 +61,35 @@ void inspectEvidenceProgress(evaluationDirectory)
       `Feature availability: ${report.featureValueAvailabilityRate === null ? 'N/A' : `${(report.featureValueAvailabilityRate * 100).toFixed(2)}%`}`,
     );
     console.log(
+      `Explicitly missing optional derivative values: ${report.explicitlyMissingDerivativeValueCount}`,
+    );
+    console.log(
+      `Required feature calculation failures: ${report.requiredFeatureCalculationFailureCount}`,
+    );
+    console.log(
+      `Feature availability meaning: ${report.featureAvailabilityInterpretation}`,
+    );
+    console.log(
       `Path-excursion availability: ${report.pathExcursionAvailabilityRate === null ? 'N/A' : `${(report.pathExcursionAvailabilityRate * 100).toFixed(2)}%`}`,
     );
     console.log(`Malformed records: ${report.malformedRecordCount}`);
+    console.log(`Invalid JSON records: ${report.invalidJsonRecordCount}`);
+    console.log(`Schema-invalid records: ${report.schemaInvalidRecordCount}`);
+    console.log(`Unexpected instruments: ${report.unexpectedInstrumentCount}`);
+    console.log(`Duplicate events: ${report.duplicateEventCount}`);
+    console.log(`Duplicate snapshots: ${report.duplicateSnapshotCount}`);
+    console.log(`Duplicate observations: ${report.duplicateObservationCount}`);
+    console.log(`Orphan observations: ${report.orphanObservationCount}`);
+    console.log(
+      `Temporal inconsistencies: ${report.temporalInconsistencyCount}`,
+    );
+    console.log(
+      `Pending event initializations: ${report.pendingEventInitializationCount}`,
+    );
+    console.log(`Critical failures: ${report.criticalFailureCount}`);
+    console.log(
+      `Observation latency ms: count=${report.observationLatencyMs.count}, p50=${report.observationLatencyMs.p50 ?? 'N/A'}, p95=${report.observationLatencyMs.p95 ?? 'N/A'}, max=${report.observationLatencyMs.maximum ?? 'N/A'}`,
+    );
     console.log(
       `Side distribution: BULLISH=${report.sideDistribution.bullish}, BEARISH=${report.sideDistribution.bearish}`,
     );

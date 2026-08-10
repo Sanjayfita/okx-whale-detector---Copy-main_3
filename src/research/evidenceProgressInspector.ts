@@ -58,6 +58,8 @@ interface OptionalNdjsonRead<T> {
   readonly records: readonly T[];
   readonly malformed: number;
   readonly missing: boolean;
+  readonly invalidJson: number;
+  readonly invalidRecord: number;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -73,6 +75,8 @@ const readOptionalNdjson = async <T>(
       records: result.records,
       malformed: result.malformed,
       missing: false,
+      invalidJson: result.invalidJson,
+      invalidRecord: result.invalidRecord,
     });
   } catch (error: unknown) {
     if (!isErrorWithCode(error, 'ENOENT')) throw error;
@@ -80,8 +84,109 @@ const readOptionalNdjson = async <T>(
       records: Object.freeze([]),
       malformed: 0,
       missing: true,
+      invalidJson: 0,
+      invalidRecord: 0,
     });
   }
+};
+
+interface OperationalIntegrityState {
+  readonly pendingEventInitializations: number;
+  readonly criticalFailures: number;
+  readonly unhealthy: boolean;
+  readonly malformed: number;
+  readonly invalidJson: number;
+  readonly schemaInvalid: number;
+}
+
+const readOperationalIntegrityState = async (
+  evaluationDirectory: string,
+): Promise<OperationalIntegrityState> => {
+  let pendingEventInitializations = 0;
+  let criticalFailures = 0;
+  let unhealthy = false;
+  let malformed = 0;
+  let invalidJson = 0;
+  let schemaInvalid = 0;
+  try {
+    const value = JSON.parse(
+      await readFile(
+        join(evaluationDirectory, 'event-initializations.json'),
+        'utf8',
+      ),
+    ) as unknown;
+    if (
+      !isRecord(value) ||
+      value.schemaVersion !== 1 ||
+      value.liveOrderExecutionAllowed !== false ||
+      !Array.isArray(value.pending)
+    ) {
+      malformed += 1;
+      schemaInvalid += 1;
+    } else {
+      pendingEventInitializations = value.pending.length;
+    }
+  } catch (error: unknown) {
+    if (error instanceof SyntaxError) {
+      malformed += 1;
+      invalidJson += 1;
+    } else if (isErrorWithCode(error, 'ENOENT')) {
+      // Legacy evaluations predate the transaction journal.
+    } else {
+      throw error;
+    }
+  }
+  try {
+    const value = JSON.parse(
+      await readFile(
+        join(evaluationDirectory, 'collection-health.json'),
+        'utf8',
+      ),
+    ) as unknown;
+    if (
+      !isRecord(value) ||
+      value.schemaVersion !== 1 ||
+      value.liveOrderExecutionAllowed !== false ||
+      (value.status !== 'HEALTHY' && value.status !== 'UNHEALTHY')
+    ) {
+      malformed += 1;
+      schemaInvalid += 1;
+    } else {
+      unhealthy = value.status === 'UNHEALTHY';
+    }
+  } catch (error: unknown) {
+    if (error instanceof SyntaxError) {
+      malformed += 1;
+      invalidJson += 1;
+    } else if (isErrorWithCode(error, 'ENOENT')) {
+      // Legacy evaluations predate the durable health marker.
+    } else {
+      throw error;
+    }
+  }
+  const failures = await readOptionalNdjson(
+    join(evaluationDirectory, 'evidence-failures.ndjson'),
+    (value): Readonly<Record<string, unknown>> | undefined =>
+      isRecord(value) &&
+      value.schemaVersion === 1 &&
+      value.liveOrderExecutionAllowed === false &&
+      typeof value.category === 'string' &&
+      typeof value.message === 'string'
+        ? Object.freeze(value)
+        : undefined,
+  );
+  criticalFailures = failures.records.length;
+  malformed += failures.malformed;
+  invalidJson += failures.invalidJson;
+  schemaInvalid += failures.invalidRecord;
+  return Object.freeze({
+    pendingEventInitializations,
+    criticalFailures,
+    unhealthy,
+    malformed,
+    invalidJson,
+    schemaInvalid,
+  });
 };
 
 const readManifest = async (
@@ -225,6 +330,7 @@ export const inspectEvidenceProgress = async (
     evaluationLeaseActive,
     finalizedReleaseExists,
     sourceFileSizes,
+    operationalIntegrity,
   ] = await Promise.all([
     readOptionalNdjson(
       join(evaluationDirectory, 'qualified-alerts.ndjson'),
@@ -248,7 +354,11 @@ export const inspectEvidenceProgress = async (
       fileSize(join(evaluationDirectory, 'alpha-snapshots.ndjson')),
       fileSize(join(evaluationDirectory, 'outcomes.ndjson')),
       fileSize(join(evaluationDirectory, 'pending-observations.json')),
+      fileSize(join(evaluationDirectory, 'event-initializations.json')),
+      fileSize(join(evaluationDirectory, 'collection-health.json')),
+      fileSize(join(evaluationDirectory, 'evidence-failures.ndjson')),
     ]),
+    readOperationalIntegrityState(evaluationDirectory),
   ]);
 
   const configuredAlphaFingerprint =
@@ -275,7 +385,22 @@ export const inspectEvidenceProgress = async (
       outcomes.malformed +
       missingSourceCount +
       (alphaFingerprintMismatch ? 1 : 0),
-    pendingMalformedRecords: pending.malformed,
+    pendingMalformedRecords: pending.malformed + operationalIntegrity.malformed,
+    invalidJsonRecords:
+      alerts.invalidJson +
+      snapshots.invalidJson +
+      outcomes.invalidJson +
+      operationalIntegrity.invalidJson,
+    schemaInvalidRecords:
+      alerts.invalidRecord +
+      snapshots.invalidRecord +
+      outcomes.invalidRecord +
+      pending.malformed +
+      operationalIntegrity.schemaInvalid,
+    pendingEventInitializationCount:
+      operationalIntegrity.pendingEventInitializations,
+    criticalFailureCount: operationalIntegrity.criticalFailures,
+    collectionUnhealthy: operationalIntegrity.unhealthy,
     now,
     maximumObservationDelayMs,
     alphaConfig,

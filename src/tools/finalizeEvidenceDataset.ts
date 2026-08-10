@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 import { createEvidenceDatasetRelease } from '../research/evidenceDatasetRelease';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 export const finalizeEvidenceDataset = async (input: {
   readonly evaluationId: string;
@@ -8,16 +9,17 @@ export const finalizeEvidenceDataset = async (input: {
   readonly createdAt?: number;
 }) =>
   createEvidenceDatasetRelease({
-    evaluationId: input.evaluationId,
+    evaluationId: requireSafeEvidenceEvaluationId(input.evaluationId),
     evaluationDirectory: input.evaluationDirectory,
     createdAt: input.createdAt,
   });
 
 const main = async (): Promise<void> => {
-  const evaluationId = process.argv[2]?.trim();
-  if (!evaluationId) {
+  const evaluationIdArgument = process.argv[2];
+  if (!evaluationIdArgument) {
     throw new Error('Usage: npm run evidence:finalize -- <evaluation-id>');
   }
+  const evaluationId = requireSafeEvidenceEvaluationId(evaluationIdArgument);
   const result = await finalizeEvidenceDataset({
     evaluationId,
     evaluationDirectory: resolve('data', 'evaluations', evaluationId),

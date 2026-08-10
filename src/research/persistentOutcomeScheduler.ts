@@ -1,4 +1,4 @@
-import { appendFile, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { isErrorWithCode } from '../core/errorGuards';
@@ -15,7 +15,11 @@ import {
   type QualifiedAlertEvidenceRecord,
 } from './qualifiedAlertEvidence';
 import { prepareEvidenceRecords } from './evidenceIntegrity';
-import { readEvidenceNdjsonFile } from './evidenceNdjson';
+import {
+  readEvidenceNdjsonFile,
+  recoverTrailingPartialEvidenceLine,
+} from './evidenceNdjson';
+import { writeEvidenceJsonAtomically } from './evidenceAtomicFile';
 
 export const PENDING_OUTCOME_JOB_SCHEMA_VERSION = 1 as const;
 
@@ -169,6 +173,10 @@ export class PersistentOutcomeScheduler {
   }
 
   public async initialize(): Promise<void> {
+    await recoverTrailingPartialEvidenceLine(
+      this.outcomesPath,
+      parseAlertOutcomeObservation,
+    );
     try {
       const parsed = JSON.parse(
         await readFile(this.pendingPath, 'utf8'),
@@ -274,6 +282,26 @@ export class PersistentOutcomeScheduler {
 
   public getPendingJobs(): readonly PendingOutcomeJob[] {
     return Object.freeze([...this.state.pending]);
+  }
+
+  /** Proves that one admitted event owns exactly one job per frozen horizon. */
+  public assertCompleteOutcomeBundle(alertId: string): void {
+    const pendingHorizons = this.state.pending
+      .filter((job) => job.alertId === alertId)
+      .map((job) => job.horizonMinutes);
+    const completedHorizons = (this.completedByAlertId.get(alertId) ?? []).map(
+      (observation) => observation.horizonMinutes,
+    );
+    const observed = [...pendingHorizons, ...completedHorizons];
+    if (
+      observed.length !== this.horizonsMinutes.length ||
+      new Set(observed).size !== observed.length ||
+      this.horizonsMinutes.some((horizon) => !observed.includes(horizon))
+    ) {
+      throw new Error(
+        `Incomplete outcome bundle: alertId=${alertId}, expected=${this.horizonsMinutes.length}, actual=${observed.length}`,
+      );
+    }
   }
 
   public getLastReconciliation(): OutcomeSchedulerReconciliation {
@@ -576,12 +604,7 @@ export class PersistentOutcomeScheduler {
       pending: Object.freeze([...state.pending]),
       liveOrderExecutionAllowed: false,
     };
-    const temporaryPath = `${this.pendingPath}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(normalized, null, 2)}\n`, {
-      encoding: 'utf8',
-      flush: true,
-    });
-    await rename(temporaryPath, this.pendingPath);
+    await writeEvidenceJsonAtomically(this.pendingPath, normalized);
     this.state = normalized;
   }
 

@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 
 import { verifyEvidenceDatasetRelease } from '../research/evidenceDatasetRelease';
 import { inspectEvidenceProgress } from '../research/evidenceProgressInspector';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 const safePathSegment = (value: string, name: string): string => {
   const normalized = value.trim();
@@ -18,7 +19,7 @@ const safePathSegment = (value: string, name: string): string => {
 };
 
 const main = async (): Promise<void> => {
-  const evaluationId = safePathSegment(process.argv[2] ?? '', 'evaluationId');
+  const evaluationId = requireSafeEvidenceEvaluationId(process.argv[2] ?? '');
   const releaseArgument = process.argv[3];
   if (releaseArgument === undefined) {
     const evaluationDirectory = resolve('data', 'evaluations', evaluationId);

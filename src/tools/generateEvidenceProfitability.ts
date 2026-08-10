@@ -9,6 +9,7 @@ import {
   type EvidenceProfitabilityReport,
 } from '../research/evidenceProfitability';
 import { parseQualifiedAlertEvidenceRecord } from '../research/qualifiedAlertEvidence';
+import { requireSafeEvidenceEvaluationId } from '../research/evidenceEvaluationId';
 
 const readOptional = async (path: string): Promise<string> => {
   try {
@@ -27,9 +28,9 @@ export const generateEvidenceProfitabilityReport = async (input: {
   positionNotional?: number;
   roundTripCostPercent?: number;
 }): Promise<EvidenceProfitabilityReport> => {
+  const evaluationId = requireSafeEvidenceEvaluationId(input.evaluationId);
   const evaluationDirectory =
-    input.evaluationDirectory ??
-    resolve('data', 'evaluations', input.evaluationId);
+    input.evaluationDirectory ?? resolve('data', 'evaluations', evaluationId);
   const [alertsText, outcomesText] = await Promise.all([
     readOptional(resolve(evaluationDirectory, 'qualified-alerts.ndjson')),
     readOptional(resolve(evaluationDirectory, 'outcomes.ndjson')),
@@ -45,7 +46,7 @@ export const generateEvidenceProfitabilityReport = async (input: {
 
   return createEvidenceProfitabilityReport({
     generatedAt: input.generatedAt ?? Date.now(),
-    evaluationId: input.evaluationId,
+    evaluationId,
     alerts: alerts.records,
     outcomes: outcomes.records,
     malformedRecords: alerts.malformed + outcomes.malformed,
@@ -70,8 +71,9 @@ const readNumberArgument = (
 
 const main = async (): Promise<void> => {
   const args = process.argv.slice(2);
-  const evaluationId =
-    args.find((value) => !value.startsWith('--')) ?? 'eval-2026-08-02-v1';
+  const evaluationId = requireSafeEvidenceEvaluationId(
+    args.find((value) => !value.startsWith('--')) ?? 'eval-2026-08-02-v1',
+  );
   const evaluationDirectory = resolve('data', 'evaluations', evaluationId);
   const report = await generateEvidenceProfitabilityReport({
     evaluationId,

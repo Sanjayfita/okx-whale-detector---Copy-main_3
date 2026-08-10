@@ -8,6 +8,8 @@ import {
 import { PersistentOutcomeScheduler } from './persistentOutcomeScheduler';
 import { QualifiedAlertRecorder } from './qualifiedAlertRecorder';
 import { AlphaResearchSnapshotRecorder } from './alphaResearchSnapshotRecorder';
+import { EvidenceEventInitializationStore } from './evidenceEventInitializationStore';
+import { EvidenceCollectionHealthStore } from './evidenceCollectionHealthStore';
 
 export interface EvidenceCollectRuntimeFactoryOptions {
   bootstrap: EvidenceCollectBootstrap;
@@ -18,6 +20,7 @@ export interface EvidenceCollectRuntimeFactoryOptions {
   intervalMs?: number;
   clock?: () => number;
   onError?: (error: unknown) => void;
+  onCriticalFailure?: (error: Error) => void;
 }
 
 export interface EvidenceCollectRuntimeBundle {
@@ -64,6 +67,13 @@ export const createEvidenceCollectRuntimeBundle = (
   const alphaSnapshotRecorder = new AlphaResearchSnapshotRecorder({
     evaluationDirectory: bootstrap.evaluationDirectory,
   });
+  const eventInitializationStore = new EvidenceEventInitializationStore(
+    bootstrap.evaluationDirectory,
+  );
+  const healthStore = new EvidenceCollectionHealthStore(
+    bootstrap.evaluationDirectory,
+    bootstrap.manifest.evaluationId,
+  );
   const bridge = new CorrelatedAlertEvidenceBridge({
     evaluationId: bootstrap.manifest.evaluationId,
     sourceCommit: bootstrap.manifest.sourceCommit,
@@ -74,9 +84,13 @@ export const createEvidenceCollectRuntimeBundle = (
     bridge,
     collector,
     alphaSnapshotRecorder,
-    intervalMs: options.intervalMs,
+    intervalMs: options.intervalMs ?? 1_000,
     clock,
     onError: options.onError,
+    onCriticalFailure: options.onCriticalFailure,
+    allowedInstrumentIds: bootstrap.manifest.instruments,
+    eventInitializationStore,
+    healthStore,
   });
 
   return Object.freeze({

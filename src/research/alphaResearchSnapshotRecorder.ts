@@ -9,7 +9,10 @@ import {
   resolveAlphaFeatureVector,
 } from './alphaCapturedFeatures';
 import { parseAlphaResearchEventSnapshot } from './alphaSnapshotParser';
-import { readEvidenceNdjsonFile } from './evidenceNdjson';
+import {
+  readEvidenceNdjsonFile,
+  recoverTrailingPartialEvidenceLine,
+} from './evidenceNdjson';
 
 interface AlphaSnapshotManifestIdentity {
   readonly evaluationId: string;
@@ -29,6 +32,10 @@ export class AlphaResearchSnapshotRecorder {
   private manifest?: AlphaSnapshotManifestIdentity;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly recordedAlertIds = new Set<string>();
+  private readonly recordedByAlertId = new Map<
+    string,
+    AlphaResearchEventSnapshot
+  >();
 
   public constructor(options: { readonly evaluationDirectory: string }) {
     this.manifestPath = path.join(options.evaluationDirectory, 'manifest.json');
@@ -69,6 +76,10 @@ export class AlphaResearchSnapshotRecorder {
       ReturnType<typeof readEvidenceNdjsonFile<AlphaResearchEventSnapshot>>
     >;
     try {
+      await recoverTrailingPartialEvidenceLine(
+        this.outputPath,
+        parseAlphaResearchEventSnapshot,
+      );
       existing = await readEvidenceNdjsonFile(
         this.outputPath,
         parseAlphaResearchEventSnapshot,
@@ -80,6 +91,8 @@ export class AlphaResearchSnapshotRecorder {
         malformed: 0,
         nonEmptyLines: 0,
         issues: Object.freeze([]),
+        invalidJson: 0,
+        invalidRecord: 0,
       });
     }
     if (existing.malformed > 0) {
@@ -101,11 +114,28 @@ export class AlphaResearchSnapshotRecorder {
       alertIds.add(evidence.alertId);
     }
     this.recordedAlertIds.clear();
+    this.recordedByAlertId.clear();
     for (const alertId of alertIds) this.recordedAlertIds.add(alertId);
+    for (const snapshot of existing.records) {
+      this.recordedByAlertId.set(snapshot.evidence.alertId, snapshot);
+    }
     this.manifest = manifest;
   }
 
   public async record(snapshot: AlphaResearchEventSnapshot): Promise<void> {
+    await this.writeSnapshot(snapshot, false);
+  }
+
+  public async recordIdempotent(
+    snapshot: AlphaResearchEventSnapshot,
+  ): Promise<void> {
+    await this.writeSnapshot(snapshot, true);
+  }
+
+  private async writeSnapshot(
+    snapshot: AlphaResearchEventSnapshot,
+    idempotent: boolean,
+  ): Promise<void> {
     const manifest = this.manifest;
     if (manifest === undefined) {
       throw new Error(
@@ -128,6 +158,14 @@ export class AlphaResearchSnapshotRecorder {
     const line = `${JSON.stringify(persisted)}\n`;
     const write = this.writeChain.then(async () => {
       if (this.recordedAlertIds.has(validated.evidence.alertId)) {
+        if (
+          idempotent &&
+          JSON.stringify(
+            this.recordedByAlertId.get(validated.evidence.alertId),
+          ) === JSON.stringify(persisted)
+        ) {
+          return;
+        }
         throw new Error(
           `Duplicate alpha snapshot ID: ${validated.evidence.alertId}`,
         );
@@ -137,6 +175,7 @@ export class AlphaResearchSnapshotRecorder {
         flush: true,
       });
       this.recordedAlertIds.add(validated.evidence.alertId);
+      this.recordedByAlertId.set(validated.evidence.alertId, persisted);
     });
     this.writeChain = write.catch(() => undefined);
     await write;

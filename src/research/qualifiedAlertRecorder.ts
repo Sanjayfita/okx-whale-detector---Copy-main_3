@@ -2,7 +2,10 @@ import { appendFile, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isErrorWithCode } from '../core/errorGuards';
-import { readEvidenceNdjsonFile } from './evidenceNdjson';
+import {
+  readEvidenceNdjsonFile,
+  recoverTrailingPartialEvidenceLine,
+} from './evidenceNdjson';
 import {
   parseQualifiedAlertEvidenceRecord,
   type QualifiedAlertEvidenceRecord,
@@ -28,6 +31,10 @@ export class QualifiedAlertRecorder {
   private manifest?: EvaluationManifestIdentity;
   private writeChain: Promise<void> = Promise.resolve();
   private readonly recordedAlertIds = new Set<string>();
+  private readonly recordedByAlertId = new Map<
+    string,
+    QualifiedAlertEvidenceRecord
+  >();
 
   constructor(options: QualifiedAlertRecorderOptions) {
     this.manifestPath = path.join(options.evaluationDirectory, 'manifest.json');
@@ -71,6 +78,10 @@ export class QualifiedAlertRecorder {
       ReturnType<typeof readEvidenceNdjsonFile<QualifiedAlertEvidenceRecord>>
     >;
     try {
+      await recoverTrailingPartialEvidenceLine(
+        this.outputPath,
+        parseQualifiedAlertEvidenceRecord,
+      );
       existing = await readEvidenceNdjsonFile(
         this.outputPath,
         parseQualifiedAlertEvidenceRecord,
@@ -84,6 +95,8 @@ export class QualifiedAlertRecorder {
         malformed: 0,
         nonEmptyLines: 0,
         issues: Object.freeze([]),
+        invalidJson: 0,
+        invalidRecord: 0,
       });
     }
     if (existing.malformed > 0) {
@@ -106,13 +119,30 @@ export class QualifiedAlertRecorder {
     }
 
     this.recordedAlertIds.clear();
+    this.recordedByAlertId.clear();
     for (const alertId of recordedAlertIds) {
       this.recordedAlertIds.add(alertId);
+    }
+    for (const record of existing.records) {
+      this.recordedByAlertId.set(record.alertId, record);
     }
     this.manifest = manifest;
   }
 
   async record(record: QualifiedAlertEvidenceRecord): Promise<void> {
+    await this.writeRecord(record, false);
+  }
+
+  public async recordIdempotent(
+    record: QualifiedAlertEvidenceRecord,
+  ): Promise<void> {
+    await this.writeRecord(record, true);
+  }
+
+  private async writeRecord(
+    record: QualifiedAlertEvidenceRecord,
+    idempotent: boolean,
+  ): Promise<void> {
     const manifest = this.manifest;
     if (manifest === undefined) {
       throw new Error('QualifiedAlertRecorder must be initialized first');
@@ -133,6 +163,14 @@ export class QualifiedAlertRecorder {
     const line = `${JSON.stringify(validatedRecord)}\n`;
     const write = this.writeChain.then(async () => {
       if (this.recordedAlertIds.has(validatedRecord.alertId)) {
+        if (
+          idempotent &&
+          JSON.stringify(
+            this.recordedByAlertId.get(validatedRecord.alertId),
+          ) === JSON.stringify(validatedRecord)
+        ) {
+          return;
+        }
         throw new Error(
           `Duplicate qualified alert ID: ${validatedRecord.alertId}`,
         );
@@ -143,6 +181,7 @@ export class QualifiedAlertRecorder {
         flush: true,
       });
       this.recordedAlertIds.add(validatedRecord.alertId);
+      this.recordedByAlertId.set(validatedRecord.alertId, validatedRecord);
     });
     this.writeChain = write.catch(() => undefined);
     await write;

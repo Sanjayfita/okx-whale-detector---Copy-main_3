@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import {
@@ -8,6 +8,7 @@ import {
   type EvaluationSessionManifest,
 } from './evaluationSessionManifest';
 import { createCurrentEvidenceEvaluationDefinition } from './evidenceEvaluationDefinition';
+import { requireSafeEvidenceEvaluationId } from './evidenceEvaluationId';
 
 export interface EvidenceCollectBootstrap {
   evaluationDirectory: string;
@@ -25,18 +26,7 @@ export const loadEvidenceCollectBootstrap = async (
   projectDirectory: string = process.cwd(),
   options: EvidenceCollectBootstrapOptions = {},
 ): Promise<EvidenceCollectBootstrap> => {
-  const normalizedEvaluationId = evaluationId.trim();
-  if (normalizedEvaluationId.length === 0) {
-    throw new Error('evaluationId must not be empty');
-  }
-  if (
-    normalizedEvaluationId.includes('/') ||
-    normalizedEvaluationId.includes('\\') ||
-    normalizedEvaluationId === '.' ||
-    normalizedEvaluationId === '..'
-  ) {
-    throw new Error('evaluationId must be a safe directory name');
-  }
+  const normalizedEvaluationId = requireSafeEvidenceEvaluationId(evaluationId);
 
   const evaluationDirectory = resolve(
     projectDirectory,
@@ -56,6 +46,26 @@ export const loadEvidenceCollectBootstrap = async (
     throw new Error(
       'Evaluation manifest is invalid or execution safety is not locked',
     );
+  }
+  try {
+    const releases = await readdir(resolve(evaluationDirectory, 'datasets'), {
+      withFileTypes: true,
+    });
+    if (
+      releases.some(
+        (entry) => entry.isDirectory() && /^[a-f0-9]{64}$/u.test(entry.name),
+      )
+    ) {
+      throw new Error('Finalized evidence evaluations are immutable');
+    }
+  } catch (error: unknown) {
+    if (!(
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    )) {
+      throw error;
+    }
   }
   const currentDefinition = createCurrentEvidenceEvaluationDefinition();
   const currentConfigurationFingerprint = createConfigurationFingerprint(

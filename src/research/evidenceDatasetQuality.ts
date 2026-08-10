@@ -5,6 +5,7 @@ import type {
 } from './alphaFeatureTypes';
 import {
   hasObservedExcursionPath,
+  outcomeHorizonMilliseconds,
   type AlertOutcomeObservation,
 } from './alertOutcomeObservation';
 import type { EvaluationSessionManifest } from './evaluationSessionManifest';
@@ -27,6 +28,17 @@ export interface EvidenceInstrumentQuality {
 }
 
 export interface EvidenceDatasetQualityMetrics {
+  readonly invalidJsonRecordCount: number;
+  readonly schemaInvalidRecordCount: number;
+  readonly unexpectedInstrumentCount: number;
+  readonly duplicateEventCount: number;
+  readonly duplicateSnapshotCount: number;
+  readonly duplicateObservationCount: number;
+  readonly orphanObservationCount: number;
+  readonly temporalInconsistencyCount: number;
+  readonly pendingEventInitializationCount: number;
+  readonly criticalFailureCount: number;
+  readonly observationLatencyMs: EvidenceLatencySummary;
   readonly rawEventCount: number;
   readonly qualifiedAlertCount: number;
   readonly snapshotCount: number;
@@ -34,6 +46,9 @@ export interface EvidenceDatasetQualityMetrics {
   readonly missingCapturedFeatureSnapshotCount: number;
   readonly missingSnapshotIntegrityCount: number;
   readonly missingDerivativeMetadataCount: number;
+  readonly explicitlyMissingDerivativeValueCount: number;
+  readonly requiredFeatureCalculationFailureCount: number;
+  readonly featureAvailabilityInterpretation: string;
   readonly missingSnapshotCount: number;
   readonly unmatchedSnapshotCount: number;
   readonly completedObservationCount: number;
@@ -72,6 +87,15 @@ export interface EvidenceDatasetQualityMetrics {
   readonly healthReasons: readonly string[];
 }
 
+export interface EvidenceLatencySummary {
+  readonly count: number;
+  readonly minimum: number | null;
+  readonly maximum: number | null;
+  readonly mean: number | null;
+  readonly p50: number | null;
+  readonly p95: number | null;
+}
+
 const jobKey = (
   value: Pick<PendingOutcomeJob, 'alertId' | 'horizonMinutes'>,
 ): string => `${value.alertId}:${value.horizonMinutes}`;
@@ -89,6 +113,11 @@ export const evaluateEvidenceDatasetQuality = (input: {
   readonly pendingJobs: readonly PendingOutcomeJob[];
   readonly parserMalformedRecords: number;
   readonly pendingMalformedRecords: number;
+  readonly invalidJsonRecords?: number;
+  readonly schemaInvalidRecords?: number;
+  readonly pendingEventInitializationCount?: number;
+  readonly criticalFailureCount?: number;
+  readonly collectionUnhealthy?: boolean;
   readonly now: number;
   readonly maximumObservationDelayMs: number;
   readonly alphaConfig: AlphaResearchConfig;
@@ -112,8 +141,29 @@ export const evaluateEvidenceDatasetQuality = (input: {
     malformedRecords:
       input.parserMalformedRecords + input.pendingMalformedRecords,
   });
+  const duplicateEventCount =
+    input.alerts.length -
+    new Set(input.alerts.map((alert) => alert.alertId)).size;
+  const duplicateSnapshotCount =
+    input.snapshots.length -
+    new Set(input.snapshots.map((snapshot) => snapshot.evidence.alertId)).size;
+  const duplicateObservationCount =
+    input.outcomes.length -
+    new Set(
+      input.outcomes.map(
+        (outcome) => `${outcome.alertId}:${outcome.horizonMinutes}`,
+      ),
+    ).size;
+  const invalidJsonRecordCount = input.invalidJsonRecords ?? 0;
+  const schemaInvalidRecordCount = input.schemaInvalidRecords ?? 0;
+  const pendingEventInitializationCount =
+    input.pendingEventInitializationCount ?? 0;
+  const criticalFailureCount = input.criticalFailureCount ?? 0;
   let malformedRecordCount = integrity.malformedRecords;
   const configuredInstruments = new Set(input.manifest.instruments);
+  const unexpectedInstrumentCount = input.alerts.filter(
+    (alert) => !configuredInstruments.has(alert.instrumentId),
+  ).length;
   const alertById = new Map(
     integrity.alerts.map((alert) => [alert.alertId, alert]),
   );
@@ -134,6 +184,8 @@ export const evaluateEvidenceDatasetQuality = (input: {
   let capturedFeatureSnapshotCount = 0;
   let missingSnapshotIntegrityCount = 0;
   let missingDerivativeMetadataCount = 0;
+  let explicitlyMissingDerivativeValueCount = 0;
+  let requiredFeatureCalculationFailureCount = 0;
   for (const snapshot of input.snapshots) {
     const alert = alertById.get(snapshot.evidence.alertId);
     if (
@@ -165,10 +217,17 @@ export const evaluateEvidenceDatasetQuality = (input: {
       }
       if (snapshot.derivatives === undefined) {
         missingDerivativeMetadataCount += 1;
+      } else {
+        explicitlyMissingDerivativeValueCount += [
+          snapshot.derivatives.fundingRate,
+          snapshot.derivatives.openInterest,
+          snapshot.derivatives.openInterestChange,
+        ].filter((value) => value === null).length;
       }
       snapshotByAlertId.set(snapshot.evidence.alertId, snapshot);
     } catch {
       malformedRecordCount += 1;
+      requiredFeatureCalculationFailureCount += 1;
     }
   }
 
@@ -303,13 +362,37 @@ export const evaluateEvidenceDatasetQuality = (input: {
     integrity.unmatchedObservations === 0 &&
     unmatchedSnapshotCount === 0 &&
     overduePendingObservationCount === 0 &&
-    schedulerCoverageGapCount === 0;
+    schedulerCoverageGapCount === 0 &&
+    unexpectedInstrumentCount === 0 &&
+    pendingEventInitializationCount === 0 &&
+    criticalFailureCount === 0 &&
+    input.collectionUnhealthy !== true;
 
   const healthReasons: string[] = [];
   if (malformedRecordCount > 0)
     healthReasons.push(
       `${malformedRecordCount} malformed or inconsistent record(s)`,
     );
+  if (invalidJsonRecordCount > 0)
+    healthReasons.push(`${invalidJsonRecordCount} invalid JSON record(s)`);
+  if (schemaInvalidRecordCount > 0)
+    healthReasons.push(`${schemaInvalidRecordCount} schema-invalid record(s)`);
+  if (unexpectedInstrumentCount > 0)
+    healthReasons.push(
+      `${unexpectedInstrumentCount} unexpected instrument record(s)`,
+    );
+  if (duplicateEventCount > 0)
+    healthReasons.push(`${duplicateEventCount} duplicate event(s)`);
+  if (duplicateSnapshotCount > 0)
+    healthReasons.push(`${duplicateSnapshotCount} duplicate snapshot(s)`);
+  if (duplicateObservationCount > 0)
+    healthReasons.push(`${duplicateObservationCount} duplicate observation(s)`);
+  if (pendingEventInitializationCount > 0)
+    healthReasons.push(
+      `${pendingEventInitializationCount} event initialization(s) pending recovery`,
+    );
+  if (criticalFailureCount > 0 || input.collectionUnhealthy === true)
+    healthReasons.push(`${criticalFailureCount} durable critical failure(s)`);
   if (integrity.unmatchedObservations > 0)
     healthReasons.push(
       `${integrity.unmatchedObservations} unmatched outcome(s)`,
@@ -363,8 +446,48 @@ export const evaluateEvidenceDatasetQuality = (input: {
   const bullish = integrity.alerts.filter(
     (alert) => alert.direction === 'BULLISH',
   ).length;
+  const latencyValues = integrity.outcomes
+    .map(
+      (outcome) =>
+        outcome.observedAt -
+        (outcome.detectedAt +
+          outcomeHorizonMilliseconds(outcome.horizonMinutes)),
+    )
+    .sort((left, right) => left - right);
+  const percentile = (fraction: number): number | null =>
+    latencyValues.length === 0
+      ? null
+      : (latencyValues[
+          Math.min(
+            latencyValues.length - 1,
+            Math.ceil(latencyValues.length * fraction) - 1,
+          )
+        ] ?? null);
+  const observationLatencyMs: EvidenceLatencySummary = Object.freeze({
+    count: latencyValues.length,
+    minimum: latencyValues[0] ?? null,
+    maximum: latencyValues.at(-1) ?? null,
+    mean:
+      latencyValues.length === 0
+        ? null
+        : latencyValues.reduce((sum, value) => sum + value, 0) /
+          latencyValues.length,
+    p50: percentile(0.5),
+    p95: percentile(0.95),
+  });
 
   return Object.freeze({
+    invalidJsonRecordCount,
+    schemaInvalidRecordCount,
+    unexpectedInstrumentCount,
+    duplicateEventCount,
+    duplicateSnapshotCount,
+    duplicateObservationCount,
+    orphanObservationCount: integrity.unmatchedObservations,
+    temporalInconsistencyCount: missingSnapshotIntegrityCount,
+    pendingEventInitializationCount,
+    criticalFailureCount,
+    observationLatencyMs,
     rawEventCount: integrity.alerts.length,
     qualifiedAlertCount: integrity.alerts.length,
     snapshotCount: snapshotByAlertId.size,
@@ -372,6 +495,10 @@ export const evaluateEvidenceDatasetQuality = (input: {
     missingCapturedFeatureSnapshotCount,
     missingSnapshotIntegrityCount,
     missingDerivativeMetadataCount,
+    explicitlyMissingDerivativeValueCount,
+    requiredFeatureCalculationFailureCount,
+    featureAvailabilityInterpretation:
+      'Persisted model-input values; explicit schema-supported missing derivatives are reported separately and are not corruption',
     missingSnapshotCount,
     unmatchedSnapshotCount,
     completedObservationCount: integrity.joined.length,
