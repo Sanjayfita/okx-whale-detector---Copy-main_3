@@ -49,6 +49,8 @@ export interface AlertOutcomeObservation {
   observationDueAt?: number;
   observationLatencyMs?: number;
   allowedObservationDelayMs?: number;
+  sourceMarketTimestamp?: number;
+  sourceMarketAgeMs?: number;
   referencePrice: number;
   observedPrice: number;
   rawReturnPercent: number;
@@ -168,6 +170,22 @@ export const createAlertOutcomeObservation = (
   ) {
     throw new Error('Observation scheduler timing telemetry is inconsistent');
   }
+  const sourceTimingProvided =
+    input.sourceMarketTimestamp !== undefined ||
+    input.sourceMarketAgeMs !== undefined;
+  if (
+    sourceTimingProvided &&
+    (input.sourceMarketTimestamp === undefined ||
+      input.sourceMarketAgeMs === undefined ||
+      requireTimestamp(input.sourceMarketTimestamp, 'sourceMarketTimestamp') >
+        observedAt ||
+      requireTimestamp(input.sourceMarketAgeMs, 'sourceMarketAgeMs') !==
+        observedAt - input.sourceMarketTimestamp)
+  ) {
+    throw new Error(
+      'Observation source-market timing telemetry is inconsistent',
+    );
+  }
 
   const referencePrice = requireFinitePositive(
     input.referencePrice,
@@ -278,6 +296,12 @@ export const createAlertOutcomeObservation = (
           allowedObservationDelayMs: input.allowedObservationDelayMs,
         }
       : {}),
+    ...(sourceTimingProvided
+      ? {
+          sourceMarketTimestamp: input.sourceMarketTimestamp,
+          sourceMarketAgeMs: input.sourceMarketAgeMs,
+        }
+      : {}),
     referencePrice,
     observedPrice,
     rawReturnPercent,
@@ -330,6 +354,10 @@ export const parseAlertOutcomeObservation = (
       typeof value.observationLatencyMs !== 'number') ||
     (value.allowedObservationDelayMs !== undefined &&
       typeof value.allowedObservationDelayMs !== 'number') ||
+    (value.sourceMarketTimestamp !== undefined &&
+      typeof value.sourceMarketTimestamp !== 'number') ||
+    (value.sourceMarketAgeMs !== undefined &&
+      typeof value.sourceMarketAgeMs !== 'number') ||
     typeof value.referencePrice !== 'number' ||
     typeof value.observedPrice !== 'number' ||
     typeof value.rawReturnPercent !== 'number' ||
@@ -379,6 +407,8 @@ export const parseAlertOutcomeObservation = (
       observationDueAt: value.observationDueAt,
       observationLatencyMs: value.observationLatencyMs,
       allowedObservationDelayMs: value.allowedObservationDelayMs,
+      sourceMarketTimestamp: value.sourceMarketTimestamp,
+      sourceMarketAgeMs: value.sourceMarketAgeMs,
       referencePrice: value.referencePrice,
       observedPrice: value.observedPrice,
       rawReturnPercent: value.rawReturnPercent,

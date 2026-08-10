@@ -123,15 +123,17 @@ export class OKXLivePriceReader {
     if (serverTimestamp - now > this.maximumFutureSkewMs) {
       throw new Error('OKX ticker timestamp is implausibly far in the future');
     }
-    if (serverTimestamp < dueAt) {
+    if (now < dueAt) {
       throw new Error(
-        'OKX ticker snapshot was captured before the requested due time',
+        'OKX ticker request completed before the requested due time',
       );
     }
 
     return Object.freeze({
       instrumentId: normalizedInstrumentId,
-      observedAt: serverTimestamp,
+      observedAt: now,
+      sourceMarketTimestamp: serverTimestamp,
+      sourceMarketAgeMs: now - serverTimestamp,
       price,
     });
   };

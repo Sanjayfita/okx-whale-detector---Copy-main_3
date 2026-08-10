@@ -301,7 +301,7 @@ const readPendingJobs = async (
   }
 };
 
-export const inspectEvidenceProgress = async (
+const inspectEvidenceProgressOnce = async (
   evaluationDirectory: string,
   now: number = Date.now(),
   options: EvidenceProgressInspectorOptions = {},
@@ -479,4 +479,25 @@ export const inspectEvidenceProgress = async (
     evidenceSource,
     liveOrderExecutionAllowed: false,
   });
+};
+
+/** Reads a stable point-in-time view while an active collector is appending. */
+export const inspectEvidenceProgress = async (
+  evaluationDirectory: string,
+  now: number = Date.now(),
+  options: EvidenceProgressInspectorOptions = {},
+): Promise<EvidenceProgressReport> => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const report = await inspectEvidenceProgressOnce(
+      evaluationDirectory,
+      now,
+      options,
+    );
+    const after = await createEvidenceSourceFingerprint(evaluationDirectory);
+    if (after.fingerprint === report.evidenceSource.fingerprint) return report;
+    await new Promise((resolveRetry) => setTimeout(resolveRetry, 25));
+  }
+  throw new Error(
+    'Evidence sources changed repeatedly during inspection; retry the read',
+  );
 };

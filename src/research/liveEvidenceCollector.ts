@@ -13,6 +13,8 @@ export interface LivePriceSnapshot {
   instrumentId: string;
   observedAt: number;
   price: number;
+  sourceMarketTimestamp?: number;
+  sourceMarketAgeMs?: number;
   /** Optional only for injected/replay readers. Live OKX paths are derived. */
   maximumFavorableExcursionPercent?: number;
   maximumAdverseExcursionPercent?: number;
@@ -192,6 +194,23 @@ export class LiveEvidenceCollector {
         'Price snapshot was captured too late for the pending job',
       );
     }
+    const sourceTimingProvided =
+      snapshot.sourceMarketTimestamp !== undefined ||
+      snapshot.sourceMarketAgeMs !== undefined;
+    if (
+      sourceTimingProvided &&
+      (snapshot.sourceMarketTimestamp === undefined ||
+        snapshot.sourceMarketAgeMs === undefined ||
+        !Number.isSafeInteger(snapshot.sourceMarketTimestamp) ||
+        snapshot.sourceMarketTimestamp < 0 ||
+        !Number.isSafeInteger(snapshot.sourceMarketAgeMs) ||
+        snapshot.sourceMarketAgeMs < 0 ||
+        snapshot.sourceMarketTimestamp > snapshot.observedAt ||
+        snapshot.sourceMarketAgeMs !==
+          snapshot.observedAt - snapshot.sourceMarketTimestamp)
+    ) {
+      throw new Error('Price snapshot source timing is inconsistent');
+    }
 
     const validationNow = this.clock();
     if (!Number.isSafeInteger(validationNow) || validationNow < 0) {
@@ -272,6 +291,8 @@ export class LiveEvidenceCollector {
       observationDueAt: job.dueAt,
       observationLatencyMs: snapshot.observedAt - job.dueAt,
       allowedObservationDelayMs: this.maximumObservationDelayMs,
+      sourceMarketTimestamp: snapshot.sourceMarketTimestamp,
+      sourceMarketAgeMs: snapshot.sourceMarketAgeMs,
       referencePrice: job.referencePrice,
       observedPrice: snapshot.price,
       rawReturnPercent,

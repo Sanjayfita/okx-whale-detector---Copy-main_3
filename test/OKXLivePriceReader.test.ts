@@ -36,7 +36,9 @@ describe('OKXLivePriceReader', () => {
 
     await expect(reader.readPrice('BTC-USDT', 2_000)).resolves.toEqual({
       instrumentId: 'BTC-USDT',
-      observedAt: 2_000,
+      observedAt: 2_001,
+      sourceMarketTimestamp: 2_000,
+      sourceMarketAgeMs: 1,
       price: 60_000,
     });
     expect(fetchFn).toHaveBeenCalledOnce();
