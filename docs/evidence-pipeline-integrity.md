@@ -55,6 +55,11 @@ records, unexpected instruments, duplicates, orphans, scheduler gaps, missed or
 overdue windows, and critical failures. It never finalizes a research dataset or
 starts the 30-day collection.
 
+Graceful shutdown first stops market/event ingestion, continues due-observation
+polling for one 10-second tolerance window, and only then clears the scheduler
+timer and releases the evaluation lease. This leaves a verification/restart
+window without converting near-due jobs into avoidable overdue observations.
+
 Progress reports show invalid JSON and schema defects separately, explicit
 missing optional derivative values separately from feature calculation failures,
 and observation latency (minimum, mean, p50, p95, and maximum). Missing funding

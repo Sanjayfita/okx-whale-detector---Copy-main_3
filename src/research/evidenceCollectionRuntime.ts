@@ -384,6 +384,30 @@ export class EvidenceCollectionRuntime {
     this.initialized = false;
   }
 
+  /**
+   * Stops new events at the application boundary while giving near-due jobs one
+   * full observation window to complete before the scheduler timer is cleared.
+   */
+  public async drainObservationGracePeriod(
+    durationMs: number = 10_000,
+  ): Promise<void> {
+    this.requireStarted();
+    if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
+      throw new Error('durationMs must be a positive safe integer');
+    }
+    const deadline = Date.now() + durationMs;
+    while (Date.now() < deadline) {
+      await this.processNow();
+      const remaining = deadline - Date.now();
+      if (remaining > 0) {
+        await new Promise((resolveDrain) =>
+          setTimeout(resolveDrain, Math.min(250, remaining)),
+        );
+      }
+    }
+    await this.processNow();
+  }
+
   public isFailedClosed(): boolean {
     return this.failedClosed;
   }

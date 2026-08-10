@@ -228,6 +228,17 @@ export const runEvidenceCollectCommand = async (
     }
     let evidenceRuntimeStopped = false;
     try {
+      const failedClosed =
+        'isFailedClosed' in activeBundle.runtime &&
+        typeof activeBundle.runtime.isFailedClosed === 'function' &&
+        activeBundle.runtime.isFailedClosed();
+      if (
+        !failedClosed &&
+        'drainObservationGracePeriod' in activeBundle.runtime &&
+        typeof activeBundle.runtime.drainObservationGracePeriod === 'function'
+      ) {
+        await activeBundle.runtime.drainObservationGracePeriod();
+      }
       await activeBundle.runtime.stop();
       evidenceRuntimeStopped = true;
     } catch (evidenceShutdownError: unknown) {
