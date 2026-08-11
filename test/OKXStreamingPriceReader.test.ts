@@ -4,7 +4,7 @@ import { OKXStreamingPriceReader } from '../src/research/okxStreamingPriceReader
 
 describe('OKXStreamingPriceReader', () => {
   it('returns the latest post-due order-book midpoint without an HTTP request', async () => {
-    let now = 10_000;
+    const now = 10_000;
     const reader = new OKXStreamingPriceReader({ clock: () => now });
 
     reader.observe({
