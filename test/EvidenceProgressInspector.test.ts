@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ALERT_OUTCOME_HORIZONS_MINUTES,
   createAlertOutcomeObservation,
+  outcomeHorizonMilliseconds,
 } from '../src/research/alertOutcomeObservation';
 import { captureAlphaFeatureValues } from '../src/research/alphaCapturedFeatures';
 import { createAlphaResearchConfig } from '../src/research/alphaResearchConfig';
@@ -250,6 +251,55 @@ describe('inspectEvidenceProgress', () => {
     expect(report.missingCapturedFeatureSnapshotCount).toBe(1);
     expect(report.health).toBe('DEGRADED');
     expect(report.readyForFinalEvaluation).toBe(false);
+  });
+
+  it('treats completed-plus-pending scheduler overlap as transient only while collection owns the lease', async () => {
+    const { directory, manifest } = await createEvaluation();
+    const alert = createAlert(manifest);
+    await writeCompleteEvidence(directory, alert);
+    await writeFile(join(directory, 'evaluation.lock'), '{}\n', 'utf8');
+    await writeFile(
+      join(directory, 'pending-observations.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        pending: ALERT_OUTCOME_HORIZONS_MINUTES.map((horizonMinutes) => ({
+          schemaVersion: 1,
+          evaluationId: alert.evaluationId,
+          alertId: alert.alertId,
+          instrumentId: alert.instrumentId,
+          detectedAt: alert.detectedAt,
+          direction: alert.direction,
+          referencePrice: alert.referencePrice,
+          horizonMinutes,
+          dueAt:
+            alert.detectedAt + outcomeHorizonMilliseconds(horizonMinutes),
+          status: 'PENDING',
+          liveOrderExecutionAllowed: false,
+        })),
+        liveOrderExecutionAllowed: false,
+      }),
+      'utf8',
+    );
+
+    const active = await inspectEvidenceProgress(
+      directory,
+      START + 86_400_000,
+    );
+    expect(active.evaluationLeaseActive).toBe(true);
+    expect(active.transientCompletedPendingOverlapCount).toBe(9);
+    expect(active.pendingObservationCount).toBe(0);
+    expect(active.malformedRecordCount).toBe(0);
+    expect(active.health).toBe('HEALTHY');
+
+    await unlink(join(directory, 'evaluation.lock'));
+    const inactive = await inspectEvidenceProgress(
+      directory,
+      START + 86_400_000,
+    );
+    expect(inactive.evaluationLeaseActive).toBe(false);
+    expect(inactive.transientCompletedPendingOverlapCount).toBe(0);
+    expect(inactive.malformedRecordCount).toBe(9);
+    expect(inactive.health).toBe('UNHEALTHY');
   });
 
   it('counts malformed pending jobs and excludes them from progress', async () => {

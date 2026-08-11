@@ -201,6 +201,7 @@ describe('evidence pipeline integrity repair', () => {
       overduePendingObservationCount: 0,
       schedulerCoverageGapCount: 0,
       pendingEventInitializationCount: 0,
+      transientCompletedPendingOverlapCount: 0,
       missingSnapshotCount: 0,
       qualifiedAlertCount: 2,
       expectedObservationCount: 18,
@@ -223,6 +224,16 @@ describe('evidence pipeline integrity repair', () => {
     expect(inFlightGate.status).toBe('WAIT');
     expect(inFlightGate.reasons).toContain(
       'An event initialization is being recovered',
+    );
+
+    const completingOutcome = {
+      ...base,
+      transientCompletedPendingOverlapCount: 1,
+    };
+    const completingGate = evaluateEvidenceCanary(completingOutcome);
+    expect(completingGate.status).toBe('WAIT');
+    expect(completingGate.reasons).toContain(
+      'An outcome completion is being durably finalized',
     );
   });
 

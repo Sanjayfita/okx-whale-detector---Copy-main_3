@@ -47,6 +47,8 @@ export interface EvidenceProgressReport extends EvidenceDatasetQualityMetrics {
   readonly evaluationLeaseActive: boolean;
   readonly readyForFinalEvaluation: boolean;
   readonly evidenceSource: EvidenceSourceFingerprint;
+  /** Active-only overlap while an outcome append is durably committed before its pending job is pruned. */
+  readonly transientCompletedPendingOverlapCount: number;
   readonly liveOrderExecutionAllowed: false;
 }
 
@@ -360,6 +362,24 @@ const inspectEvidenceProgressOnce = async (
     readOperationalIntegrityState(evaluationDirectory),
   ]);
 
+  const completedOutcomeKeys = new Set(
+    outcomes.records.map(
+      (outcome) => `${outcome.alertId}:${outcome.horizonMinutes}`,
+    ),
+  );
+  const transientCompletedPendingOverlapCount = evaluationLeaseActive
+    ? pending.jobs.filter((job) =>
+        completedOutcomeKeys.has(`${job.alertId}:${job.horizonMinutes}`),
+      ).length
+    : 0;
+  const qualityPendingJobs =
+    transientCompletedPendingOverlapCount === 0
+      ? pending.jobs
+      : pending.jobs.filter(
+          (job) =>
+            !completedOutcomeKeys.has(`${job.alertId}:${job.horizonMinutes}`),
+        );
+
   const configuredAlphaFingerprint =
     manifest.configuration.alphaResearchConfigurationFingerprint;
   const alphaFingerprintMismatch =
@@ -377,7 +397,7 @@ const inspectEvidenceProgressOnce = async (
     alerts: alerts.records,
     outcomes: outcomes.records,
     snapshots: snapshots.records,
-    pendingJobs: pending.jobs,
+    pendingJobs: qualityPendingJobs,
     parserMalformedRecords:
       alerts.malformed +
       snapshots.malformed +
@@ -476,6 +496,7 @@ const inspectEvidenceProgressOnce = async (
     evaluationLeaseActive,
     readyForFinalEvaluation,
     evidenceSource,
+    transientCompletedPendingOverlapCount,
     liveOrderExecutionAllowed: false,
   });
 };

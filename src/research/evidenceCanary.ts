@@ -58,14 +58,17 @@ export const evaluateEvidenceCanary = (
   if (
     report.qualifiedAlertCount < 2 ||
     report.completedObservationCount < 2 ||
-    report.pendingEventInitializationCount > 0
+    report.pendingEventInitializationCount > 0 ||
+    report.transientCompletedPendingOverlapCount > 0
   ) {
     return Object.freeze({
       status: 'WAIT',
       reasons: Object.freeze([
         report.pendingEventInitializationCount > 0
           ? 'An event initialization is being recovered'
-          : report.qualifiedAlertCount < 2
+          : report.transientCompletedPendingOverlapCount > 0
+            ? 'An outcome completion is being durably finalized'
+            : report.qualifiedAlertCount < 2
             ? 'Fewer than two real qualified alerts have been admitted'
             : 'Fewer than two short-horizon observations have completed',
       ]),
