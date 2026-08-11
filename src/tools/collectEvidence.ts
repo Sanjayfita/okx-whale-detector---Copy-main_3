@@ -2,7 +2,10 @@ import { CorrelatedAlertEngine } from '../alerts/CorrelatedAlertEngine';
 import { appConfig } from '../config/appConfig';
 import { ExternalSignalCorrelationService } from '../external/core/ExternalSignalCorrelationService';
 import { PolymarketLiveSignalRuntime } from '../external/providers/polymarket/PolymarketLiveSignalRuntime';
-import type { AlphaMarketContextObserver } from '../market/MarketEngine';
+import type {
+  AlphaMarketContextObserver,
+  LiveMarketPriceObserver,
+} from '../market/MarketEngine';
 import { CorrelatedAlertRecorder } from '../recording/CorrelatedAlertRecorder';
 import {
   loadEvidenceCollectBootstrap,
@@ -13,7 +16,8 @@ import {
   EvidenceEvaluationLease,
   type EvidenceEvaluationLeaseLike,
 } from '../research/evidenceEvaluationLease';
-import { OKXLivePriceReader } from '../research/okxLivePriceReader';
+import type { LivePriceSnapshot } from '../research/liveEvidenceCollector';
+import { OKXStreamingPriceReader } from '../research/okxStreamingPriceReader';
 import type { AppShutdownReason } from '../runtime/AppShutdownCoordinator';
 import { createRuntimeSessionId } from '../runtime/runtimeSession';
 
@@ -26,13 +30,20 @@ export interface EvidenceCollectCommandDependencies {
   createAppRuntime: (dependencies: {
     correlatedAlertRecorder: CorrelatedAlertRecorder;
     alphaMarketContextObserver: AlphaMarketContextObserver;
+    liveMarketPriceObserver?: LiveMarketPriceObserver;
     externalSignalCorrelationService: ExternalSignalCorrelationService;
     correlatedAlertEngine: CorrelatedAlertEngine;
     polymarketRuntime: PolymarketLiveSignalRuntime;
     allowedInstrumentIds: readonly string[];
   }) => Promise<AppRuntimeLike>;
   loadBootstrap?: typeof loadEvidenceCollectBootstrap;
-  createPriceReader?: () => OKXLivePriceReader;
+  createPriceReader?: () => Readonly<{
+    readPrice: (
+      instrumentId: string,
+      dueAt: number,
+    ) => Promise<LivePriceSnapshot>;
+    observe?: LiveMarketPriceObserver;
+  }>;
   createRuntimeBundle?: typeof createEvidenceCollectRuntimeBundle;
   createEvaluationLease?: (
     bootstrap: EvidenceCollectBootstrap,
@@ -111,7 +122,7 @@ export const runEvidenceCollectCommand = async (
   const loadBootstrap =
     dependencies.loadBootstrap ?? loadEvidenceCollectBootstrap;
   const createPriceReader =
-    dependencies.createPriceReader ?? (() => new OKXLivePriceReader());
+    dependencies.createPriceReader ?? (() => new OKXStreamingPriceReader());
   const createRuntimeBundle =
     dependencies.createRuntimeBundle ?? createEvidenceCollectRuntimeBundle;
   const createEvaluationLease =
@@ -164,6 +175,9 @@ export const runEvidenceCollectCommand = async (
     appRuntime = await dependencies.createAppRuntime({
       correlatedAlertRecorder,
       alphaMarketContextObserver: bundle.runtime.onQualifiedMarketContext,
+      ...(priceReader.observe === undefined
+        ? {}
+        : { liveMarketPriceObserver: priceReader.observe }),
       allowedInstrumentIds: bootstrap.manifest.instruments,
       externalSignalCorrelationService:
         okxOnlyDependencies.externalSignalCorrelationService,

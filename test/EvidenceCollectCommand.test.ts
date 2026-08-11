@@ -229,4 +229,103 @@ describe('runEvidenceCollectCommand', () => {
     expect(runtimeStop).toHaveBeenCalledOnce();
     expect(lease.release).toHaveBeenCalledOnce();
   });
+
+  it('uses the in-memory OKX order-book stream as the default outcome price source', async () => {
+    const lease = createLeaseHarness();
+    let readPrice:
+      | ((instrumentId: string, dueAt: number) => Promise<unknown>)
+      | undefined;
+    let livePriceObserver:
+      | ((input: {
+          instrumentId: string;
+          observedAt: number;
+          sourceMarketTimestamp: number;
+          price: number;
+        }) => void)
+      | undefined;
+    const createRuntimeBundle = vi.fn((options) => {
+      readPrice = options.readPrice;
+      return {
+        runtime: {
+          start: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+          onQualifiedMarketContext: vi.fn(),
+        },
+        liveOrderExecutionAllowed: false as const,
+      };
+    }) as unknown as typeof createEvidenceCollectRuntimeBundle;
+
+    const handle = await runEvidenceCollectCommand('eval-test', {
+      loadBootstrap: vi.fn(async () => bootstrap),
+      createRuntimeBundle,
+      createEvaluationLease: lease.createEvaluationLease,
+      createAppRuntime: vi.fn(async (dependencies) => {
+        livePriceObserver = dependencies.liveMarketPriceObserver;
+        return {
+          polymarketRuntime: { start: vi.fn() },
+          shutdown: vi.fn(async () => undefined),
+        };
+      }),
+      registerSignal: vi.fn(),
+      log: vi.fn(),
+      error: vi.fn(),
+    });
+
+    const observedAt = Date.now();
+    if (livePriceObserver === undefined || readPrice === undefined) {
+      throw new Error('Streaming price reader was not wired into the runtime');
+    }
+    livePriceObserver({
+      instrumentId: 'BTC-USDT',
+      observedAt,
+      sourceMarketTimestamp: observedAt,
+      price: 100.5,
+    });
+    await expect(readPrice('BTC-USDT', observedAt)).resolves.toMatchObject({
+      instrumentId: 'BTC-USDT',
+      observedAt,
+      price: 100.5,
+    });
+
+    await handle.stop();
+  });
+
+  it('forwards the streaming market-price observer into the application runtime', async () => {
+    const lease = createLeaseHarness();
+    const observe = vi.fn();
+    const readPrice = vi.fn(async () => ({
+      instrumentId: 'BTC-USDT',
+      observedAt: 1_000,
+      price: 100,
+    }));
+    let forwardedObserver: unknown;
+    const createRuntimeBundle = vi.fn(() => ({
+      runtime: {
+        start: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+        onQualifiedMarketContext: vi.fn(),
+      },
+      liveOrderExecutionAllowed: false,
+    })) as unknown as typeof createEvidenceCollectRuntimeBundle;
+
+    const handle = await runEvidenceCollectCommand('eval-test', {
+      loadBootstrap: vi.fn(async () => bootstrap),
+      createPriceReader: () => ({ readPrice, observe }),
+      createRuntimeBundle,
+      createEvaluationLease: lease.createEvaluationLease,
+      createAppRuntime: vi.fn(async (dependencies) => {
+        forwardedObserver = dependencies.liveMarketPriceObserver;
+        return {
+          polymarketRuntime: { start: vi.fn() },
+          shutdown: vi.fn(async () => undefined),
+        };
+      }),
+      registerSignal: vi.fn(),
+      log: vi.fn(),
+      error: vi.fn(),
+    });
+
+    expect(forwardedObserver).toBe(observe);
+    await handle.stop();
+  });
 });

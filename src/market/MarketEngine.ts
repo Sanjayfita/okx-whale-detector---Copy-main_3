@@ -42,6 +42,17 @@ export type AlphaMarketContextObserver = (
   input: AlphaMarketContextObserverInput,
 ) => void;
 
+export interface LiveMarketPriceObservation {
+  readonly instrumentId: string;
+  readonly observedAt: number;
+  readonly sourceMarketTimestamp: number;
+  readonly price: number;
+}
+
+export type LiveMarketPriceObserver = (
+  observation: LiveMarketPriceObservation,
+) => void;
+
 export const prepareMarketSummaryAggregates = (
   whaleScan: Pick<
     WhaleScanResult,
@@ -128,6 +139,7 @@ export class MarketEngine {
     private readonly onSequenceGap?: (symbol: string) => void,
     freshness: MarketEngineFreshnessOptions = {},
     private readonly alphaMarketContextObserver?: AlphaMarketContextObserver,
+    private readonly liveMarketPriceObserver?: LiveMarketPriceObserver,
   ) {
     this.maximumOrderBookAgeMs =
       freshness.maximumOrderBookAgeMs ?? Number.POSITIVE_INFINITY;
@@ -240,6 +252,22 @@ export class MarketEngine {
 
       if (currentPrice === undefined) {
         return;
+      }
+
+      try {
+        this.liveMarketPriceObserver?.(
+          Object.freeze({
+            instrumentId: update.instId,
+            observedAt: now,
+            sourceMarketTimestamp: update.timestamp,
+            price: currentPrice,
+          }),
+        );
+      } catch (error: unknown) {
+        console.error(
+          `Failed to publish live market price for ${update.instId}:`,
+          error,
+        );
       }
 
       const scoredWhales = trace.measure('whaleScore.scoreAndPrune', () => {

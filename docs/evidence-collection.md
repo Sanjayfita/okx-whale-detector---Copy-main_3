@@ -206,7 +206,7 @@ The immutable release is the authoritative artifact for final empirical review.
 
 ## Remaining limitations
 
-- Public ticker polling supplies sampled midpoint labels, not executable fills.
+- The authoritative live collector now samples midpoint labels from the already-validated public OKX order-book WebSocket state rather than issuing a new REST ticker request at every horizon. This removes a deadline-critical network round trip while retaining local receipt time and OKX source-market timestamp provenance. These midpoint labels are still not executable fills.
   The 0.20% round-trip cost remains a fixed research assumption and does not model
   observation-specific spread, depth slippage, latency, partial fills, funding,
   minimum size, leverage, or liquidation.

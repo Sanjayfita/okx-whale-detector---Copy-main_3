@@ -280,6 +280,44 @@ describe('MarketEngine', () => {
     vi.restoreAllMocks();
   });
 
+
+  it('publishes every usable order-book midpoint to the live price observer', () => {
+    const livePriceObserver = vi.fn();
+    const observedAt = 2_000;
+    const observerEngine = new MarketEngine(
+      marketStates,
+      new SummaryThrottle(5_000),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => observedAt,
+      'LIVE',
+      undefined,
+      {
+        maximumOrderBookAgeMs: 10_000,
+        maximumFutureSkewMs: 5_000,
+      },
+      undefined,
+      livePriceObserver,
+    );
+
+    observerEngine.processOrderBookUpdate(
+      createSnapshot({ timestamp: 1_900 }),
+    );
+
+    expect(livePriceObserver).toHaveBeenCalledOnce();
+    expect(livePriceObserver).toHaveBeenCalledWith({
+      instrumentId: 'BTC-USDT',
+      observedAt,
+      sourceMarketTimestamp: 1_900,
+      price: 100.5,
+    });
+  });
+
   it('logs PERSISTENT only once across repeated updates', () => {
     const whale = {
       side: 'ASK' as const,

@@ -36,6 +36,7 @@ import { ProcessingMonitor } from './core/ProcessingMonitor';
 import {
   MarketEngine,
   type AlphaMarketContextObserver,
+  type LiveMarketPriceObserver,
 } from './market/MarketEngine';
 import { ExternalSignalCorrelationService } from './external/core/ExternalSignalCorrelationService';
 import { PolymarketLiveSignalRuntime } from './external/providers/polymarket/PolymarketLiveSignalRuntime';
@@ -66,6 +67,7 @@ export interface AppRuntimeDependencies {
   correlatedAlertReporter?: CorrelatedAlertReporter;
   correlatedAlertRecorder?: CorrelatedAlertRecorder;
   alphaMarketContextObserver?: AlphaMarketContextObserver;
+  liveMarketPriceObserver?: LiveMarketPriceObserver;
   /** Restricts live market processing to an already-frozen evaluation universe. */
   allowedInstrumentIds?: readonly string[];
   tradingPlatformObserver?: TradingPlatformObserver;
@@ -302,6 +304,7 @@ export const createAppRuntime = async (
       maximumFutureSkewMs: 5_000,
     },
     dependencies.alphaMarketContextObserver,
+    dependencies.liveMarketPriceObserver,
   );
   const polymarketRuntime =
     dependencies.polymarketRuntime ??
