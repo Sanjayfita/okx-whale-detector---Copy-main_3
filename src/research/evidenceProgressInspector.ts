@@ -303,6 +303,7 @@ const readPendingJobs = async (
 
 const inspectEvidenceProgressOnce = async (
   evaluationDirectory: string,
+  evidenceSource: EvidenceSourceFingerprint,
   now: number = Date.now(),
   options: EvidenceProgressInspectorOptions = {},
 ): Promise<EvidenceProgressReport> => {
@@ -326,7 +327,6 @@ const inspectEvidenceProgressOnce = async (
     snapshots,
     outcomes,
     pending,
-    evidenceSource,
     evaluationLeaseActive,
     finalizedReleaseExists,
     sourceFileSizes,
@@ -345,7 +345,6 @@ const inspectEvidenceProgressOnce = async (
       parseAlertOutcomeObservation,
     ),
     readPendingJobs(evaluationDirectory),
-    createEvidenceSourceFingerprint(evaluationDirectory),
     pathExists(join(evaluationDirectory, 'evaluation.lock')),
     hasFinalizedRelease(evaluationDirectory),
     Promise.all([
@@ -488,13 +487,19 @@ export const inspectEvidenceProgress = async (
   options: EvidenceProgressInspectorOptions = {},
 ): Promise<EvidenceProgressReport> => {
   for (let attempt = 0; attempt < 5; attempt += 1) {
+    // Fingerprint before and after the full read. Computing the first
+    // fingerprint concurrently with the reads can accept a torn NDJSON view:
+    // a writer may finish an append before hashing reaches that file even
+    // though the parser already observed its partial trailing line.
+    const before = await createEvidenceSourceFingerprint(evaluationDirectory);
     const report = await inspectEvidenceProgressOnce(
       evaluationDirectory,
+      before,
       now,
       options,
     );
     const after = await createEvidenceSourceFingerprint(evaluationDirectory);
-    if (after.fingerprint === report.evidenceSource.fingerprint) return report;
+    if (after.fingerprint === before.fingerprint) return report;
     await new Promise((resolveRetry) => setTimeout(resolveRetry, 25));
   }
   throw new Error(
