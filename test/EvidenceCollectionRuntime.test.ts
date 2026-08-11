@@ -108,6 +108,98 @@ describe('EvidenceCollectionRuntime', () => {
     expect(clearIntervalFn).toHaveBeenCalledOnce();
   });
 
+  it('does not let slow alert persistence starve deadline-sensitive outcome polling', async () => {
+    let intervalCallback: (() => void) | undefined;
+    let releaseAlertWrite!: () => void;
+    const alertWriteGate = new Promise<void>((resolve) => {
+      releaseAlertWrite = resolve;
+    });
+    const collector = {
+      initialize: vi.fn(async () => undefined),
+      recordQualifiedAlert: vi.fn(async () => alertWriteGate),
+      processDueObservations: vi.fn(async () => 0),
+    };
+    const runtime = new EvidenceCollectionRuntime({
+      bridge: { createEvidence: vi.fn(() => ({ alertId: alert.id })) } as never,
+      collector: collector as never,
+      clock: () => 6_000,
+      setIntervalFn: (callback) => {
+        intervalCallback = callback;
+        return 123 as unknown as NodeJS.Timeout;
+      },
+      clearIntervalFn: vi.fn(),
+    });
+
+    await runtime.start();
+    expect(collector.processDueObservations).toHaveBeenCalledTimes(1);
+
+    runtime.onPersistedLiveAlert(alert, context);
+    await vi.waitFor(() => {
+      expect(collector.recordQualifiedAlert).toHaveBeenCalledOnce();
+    });
+
+    intervalCallback?.();
+    await vi.waitFor(() => {
+      expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
+    });
+
+    releaseAlertWrite();
+    await runtime.stop();
+  });
+
+  it('samples the clock when queued outcome work actually begins', async () => {
+    let now = 1_000;
+    let intervalCallback: (() => void) | undefined;
+    let releaseSecondPoll!: () => void;
+    const secondPollGate = new Promise<void>((resolve) => {
+      releaseSecondPoll = resolve;
+    });
+    let invocation = 0;
+    const processedAt: number[] = [];
+    const collector = {
+      initialize: vi.fn(async () => undefined),
+      processDueObservations: vi.fn(async (observedNow: number) => {
+        invocation += 1;
+        processedAt.push(observedNow);
+        if (invocation === 2) {
+          await secondPollGate;
+        }
+        return 0;
+      }),
+    };
+    const runtime = new EvidenceCollectionRuntime({
+      bridge: {} as never,
+      collector: collector as never,
+      clock: () => now,
+      setIntervalFn: (callback) => {
+        intervalCallback = callback;
+        return 123 as unknown as NodeJS.Timeout;
+      },
+      clearIntervalFn: vi.fn(),
+    });
+
+    await runtime.start();
+    expect(processedAt).toEqual([1_000]);
+
+    now = 2_000;
+    intervalCallback?.();
+    await vi.waitFor(() => {
+      expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
+    });
+
+    now = 7_000;
+    intervalCallback?.();
+    now = 9_000;
+    releaseSecondPoll();
+
+    await vi.waitFor(() => {
+      expect(collector.processDueObservations).toHaveBeenCalledTimes(3);
+    });
+    expect(processedAt).toEqual([1_000, 2_000, 9_000]);
+
+    await runtime.stop();
+  });
+
   it('reports alerts received before startup without recording them', () => {
     const onError = vi.fn();
     const collector = {

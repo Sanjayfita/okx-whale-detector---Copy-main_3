@@ -57,6 +57,7 @@ export class EvidenceCollectionRuntime {
   private failedClosed = false;
   private timer?: NodeJS.Timeout;
   private workChain: Promise<void> = Promise.resolve();
+  private outcomeWorkChain: Promise<void> = Promise.resolve();
   private readonly pendingAlphaEvidence = new Map<
     string,
     PendingAlphaEvidence
@@ -155,8 +156,8 @@ export class EvidenceCollectionRuntime {
     // are evaluated promptly after restart instead of waiting for the first
     // timer tick which can push short-horizon jobs past their allowed window.
     try {
-      const now = this.clock();
-      const initialResult = await this.enqueue(async () => {
+      const initialResult = await this.enqueueOutcome(async () => {
+        const now = this.clock();
         await this.options.collector.processDueObservations(now);
       });
       if (!initialResult.succeeded) {
@@ -169,9 +170,9 @@ export class EvidenceCollectionRuntime {
     }
 
     this.timer = this.setIntervalFn(() => {
-      const now = this.clock();
-      this.prunePendingAlphaEvidence(now);
-      const result = this.enqueue(async () => {
+      this.prunePendingAlphaEvidence(this.clock());
+      const result = this.enqueueOutcome(async () => {
+        const now = this.clock();
         await this.options.collector.processDueObservations(now);
       });
       void result.then((workResult) => {
@@ -382,10 +383,10 @@ export class EvidenceCollectionRuntime {
 
   public async processNow(): Promise<number> {
     this.requireStarted();
-    const now = this.clock();
-    this.prunePendingAlphaEvidence(now);
+    this.prunePendingAlphaEvidence(this.clock());
     let completed = 0;
-    const result = await this.enqueue(async () => {
+    const result = await this.enqueueOutcome(async () => {
+      const now = this.clock();
       completed = await this.options.collector.processDueObservations(now);
     });
     if (!result.succeeded) {
@@ -400,7 +401,7 @@ export class EvidenceCollectionRuntime {
       this.timer = undefined;
     }
 
-    await this.workChain;
+    await Promise.all([this.workChain, this.outcomeWorkChain]);
     if (this.pendingAlphaEvidence.size > 0) {
       this.onError(
         new Error(
@@ -482,6 +483,27 @@ export class EvidenceCollectionRuntime {
       },
     );
     this.workChain = result.then(() => undefined);
+    return result;
+  }
+
+  /**
+   * Serializes deadline-sensitive outcome work independently from alert and
+   * alpha-snapshot persistence. This prevents ordinary evidence writes from
+   * starving horizon observations while still preventing overlapping outcome
+   * polls from racing and producing duplicate observations.
+   */
+  private enqueueOutcome(
+    work: () => Promise<void>,
+  ): Promise<QueuedWorkResult> {
+    const next = this.outcomeWorkChain.then(work);
+    const result: Promise<QueuedWorkResult> = next.then(
+      () => SUCCEEDED_WORK,
+      (error: unknown) => {
+        this.onError(error);
+        return Object.freeze({ succeeded: false as const, error });
+      },
+    );
+    this.outcomeWorkChain = result.then(() => undefined);
     return result;
   }
 
