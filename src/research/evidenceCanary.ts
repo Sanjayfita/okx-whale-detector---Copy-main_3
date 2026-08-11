@@ -32,7 +32,6 @@ export const evaluateEvidenceCanary = (
     [report.criticalFailureCount, 'durable critical failure'],
     [report.missedObservationCount, 'missed observation window'],
     [report.overduePendingObservationCount, 'overdue observation'],
-    [report.schedulerCoverageGapCount, 'scheduler coverage gap'],
   ];
   for (const [count, label] of checks) {
     if (count > 0) failures.push(`${count} ${label}(s)`);
@@ -40,6 +39,11 @@ export const evaluateEvidenceCanary = (
   if (report.pendingEventInitializationCount === 0) {
     if (report.missingSnapshotCount > 0) {
       failures.push(`${report.missingSnapshotCount} missing snapshot(s)`);
+    }
+    if (report.schedulerCoverageGapCount > 0) {
+      failures.push(
+        `${report.schedulerCoverageGapCount} scheduler coverage gap(s)`,
+      );
     }
     if (
       report.expectedObservationCount !==

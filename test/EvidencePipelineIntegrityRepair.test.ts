@@ -186,7 +186,7 @@ describe('evidence pipeline integrity repair', () => {
     expect(eventState.committedAlertIds).toEqual([alert.id]);
   });
 
-  it('fails the canary on scheduler gaps and passes exact admitted accounting', () => {
+  it('waits for journaled in-flight admission but fails committed scheduler gaps', () => {
     const base = {
       invalidJsonRecordCount: 0,
       schemaInvalidRecordCount: 0,
@@ -211,6 +211,19 @@ describe('evidence pipeline integrity repair', () => {
     expect(
       evaluateEvidenceCanary({ ...base, schedulerCoverageGapCount: 1 }).status,
     ).toBe('FAIL');
+
+    const inFlightAdmission = {
+      ...base,
+      pendingEventInitializationCount: 1,
+      missingSnapshotCount: 1,
+      schedulerCoverageGapCount: 9,
+      pendingObservationCount: 7,
+    };
+    const inFlightGate = evaluateEvidenceCanary(inFlightAdmission);
+    expect(inFlightGate.status).toBe('WAIT');
+    expect(inFlightGate.reasons).toContain(
+      'An event initialization is being recovered',
+    );
   });
 
   it('durably fails closed before persisting an unexpected instrument', async () => {

@@ -34,7 +34,7 @@ const main = async (): Promise<void> => {
       const gate = evaluateEvidenceCanary(report);
       finalStatus = gate.status;
       console.log(
-        `CANARY ${gate.status} health=${report.health} alerts=${report.qualifiedAlertCount} snapshots=${report.snapshotCount} expectedJobs=${report.expectedObservationCount} completed=${report.completedObservationCount} pending=${report.pendingObservationCount} malformed=${report.malformedRecordCount} unexpected=${report.unexpectedInstrumentCount} missingSnapshots=${report.missingSnapshotCount} missed=${report.missedObservationCount} overdue=${report.overduePendingObservationCount} gaps=${report.schedulerCoverageGapCount} latencyP95Ms=${report.observationLatencyMs.p95 ?? 'N/A'}`,
+        `CANARY ${gate.status} health=${report.health} alerts=${report.qualifiedAlertCount} snapshots=${report.snapshotCount} expectedJobs=${report.expectedObservationCount} completed=${report.completedObservationCount} pending=${report.pendingObservationCount} initializing=${report.pendingEventInitializationCount} malformed=${report.malformedRecordCount} unexpected=${report.unexpectedInstrumentCount} missingSnapshots=${report.missingSnapshotCount} missed=${report.missedObservationCount} overdue=${report.overduePendingObservationCount} gaps=${report.schedulerCoverageGapCount} latencyP95Ms=${report.observationLatencyMs.p95 ?? 'N/A'}`,
       );
       if (gate.status === 'FAIL') {
         throw new Error(gate.reasons.join('; '));
