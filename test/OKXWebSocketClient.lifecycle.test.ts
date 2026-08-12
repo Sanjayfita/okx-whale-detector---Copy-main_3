@@ -275,6 +275,83 @@ describe('OKXWebSocketClient lifecycle', () => {
     client.close();
   });
 
+  it('configures a bounded WebSocket handshake timeout', () => {
+    const client = new OKXWebSocketClient();
+    const socket = requireSocket(0);
+
+    expect(socket.options).toMatchObject({ handshakeTimeout: 5_000 });
+
+    client.close();
+  });
+
+  it(
+    'reconnects when an active subscription receives no WebSocket messages for 5 seconds',
+    () => {
+      const client = new OKXWebSocketClient();
+      const socket = requireSocket(0);
+
+      client.subscribeToOrderBook('BTC-USDT', 'SPOT');
+      socket.triggerOpen();
+
+      vi.advanceTimersByTime(4_999);
+      expect(socket.terminateCallCount).toBe(0);
+
+      vi.advanceTimersByTime(1);
+      expect(socket.terminateCallCount).toBe(1);
+      expect(console.warn).toHaveBeenCalledWith(
+        'OKX WebSocket message stream stalled for 5000ms; reconnecting',
+      );
+
+      vi.advanceTimersByTime(1_000);
+      expect(mockState.sockets).toHaveLength(2);
+
+      client.close();
+    },
+  );
+
+  it('refreshes the stream watchdog on incoming messages', () => {
+    const client = new OKXWebSocketClient();
+    const socket = requireSocket(0);
+
+    client.subscribeToOrderBook('BTC-USDT', 'SPOT');
+    socket.triggerOpen();
+
+    vi.advanceTimersByTime(4_000);
+    socket.triggerMessage('pong');
+    vi.advanceTimersByTime(4_999);
+
+    expect(socket.terminateCallCount).toBe(0);
+
+    vi.advanceTimersByTime(1);
+    expect(socket.terminateCallCount).toBe(1);
+
+    client.close();
+  });
+
+  it('reconnects proactively on OKX service-upgrade notice 64008', () => {
+    const client = new OKXWebSocketClient();
+    const socket = requireSocket(0);
+
+    socket.triggerOpen();
+    socket.triggerMessage(
+      JSON.stringify({
+        event: 'notice',
+        code: '64008',
+        msg: 'The connection will soon be closed for a service upgrade.',
+      }),
+    );
+
+    expect(socket.terminateCallCount).toBe(1);
+    expect(console.warn).toHaveBeenCalledWith(
+      'OKX WebSocket service-upgrade notice received; reconnecting proactively',
+    );
+
+    vi.advanceTimersByTime(1_000);
+    expect(mockState.sockets).toHaveLength(2);
+
+    client.close();
+  });
+
   it('sends heartbeat ping while the socket is open', () => {
     const client = new OKXWebSocketClient();
 

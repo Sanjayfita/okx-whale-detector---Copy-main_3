@@ -45,7 +45,9 @@ export class OKXWebSocketClient {
   private ws: WebSocket | null = null;
   private reconnectTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private watchdogTimer?: NodeJS.Timeout;
   private awaitingHeartbeatResponse = false;
+  private lastMessageReceivedAtMs?: number;
   private reconnectAttempt = 0;
   private intentionallyClosed = false;
   private hasConnectedOnce = false;
@@ -85,6 +87,7 @@ export class OKXWebSocketClient {
     const ws = new WebSocket(this.url, {
       maxPayload: 2 * 1024 * 1024,
       perMessageDeflate: false,
+      handshakeTimeout: 5_000,
     });
 
     this.ws = ws;
@@ -95,6 +98,7 @@ export class OKXWebSocketClient {
       this.hasConnectedOnce = true;
       this.reconnectAttempt = 0;
       this.awaitingHeartbeatResponse = false;
+      this.lastMessageReceivedAtMs = performance.now();
 
       console.log(
         isReconnect
@@ -107,12 +111,16 @@ export class OKXWebSocketClient {
       }
 
       this.startHeartbeat();
+      this.startMessageWatchdog();
       this.resubscribeAll();
     });
 
     ws.on('message', (data) => {
+      const receivedAt = performance.now();
+
       this.awaitingHeartbeatResponse = false;
-      this.handleMessage(data, performance.now());
+      this.lastMessageReceivedAtMs = receivedAt;
+      this.handleMessage(data, receivedAt);
     });
 
     ws.on('error', (error) => {
@@ -122,6 +130,7 @@ export class OKXWebSocketClient {
     ws.on('close', () => {
       console.log('❌ Disconnected from OKX WebSocket');
       this.stopHeartbeat();
+      this.stopMessageWatchdog();
 
       if (!this.intentionallyClosed) {
         this.scheduleReconnect();
@@ -160,6 +169,17 @@ export class OKXWebSocketClient {
     }
 
     if (typeof message.event === 'string') {
+      if (
+        message.event === 'notice' &&
+        String(message.code ?? '') === '64008'
+      ) {
+        console.warn(
+          'OKX WebSocket service-upgrade notice received; reconnecting proactively',
+        );
+        this.ws?.terminate();
+        return;
+      }
+
       console.log('OKX event:', message);
       return;
     }
@@ -501,6 +521,50 @@ export class OKXWebSocketClient {
     }
   }
 
+  private startMessageWatchdog(): void {
+    this.stopMessageWatchdog();
+
+    this.watchdogTimer = setInterval(() => {
+      const ws = this.ws;
+
+      if (ws?.readyState !== WebSocket.OPEN || !this.hasActiveSubscriptions()) {
+        return;
+      }
+
+      const lastMessageReceivedAtMs = this.lastMessageReceivedAtMs;
+
+      if (lastMessageReceivedAtMs === undefined) {
+        return;
+      }
+
+      const silenceMs = performance.now() - lastMessageReceivedAtMs;
+
+      if (silenceMs < 5_000) {
+        return;
+      }
+
+      console.warn(
+        `OKX WebSocket message stream stalled for ${Math.round(silenceMs)}ms; reconnecting`,
+      );
+      ws.terminate();
+    }, 1_000);
+  }
+
+  private stopMessageWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
+    }
+  }
+
+  private hasActiveSubscriptions(): boolean {
+    return (
+      this.orderBookSubscriptions.size > 0 ||
+      this.candleSubscriptions.size > 0 ||
+      this.tradeSubscriptions.size > 0
+    );
+  }
+
   private resubscribeAll(): void {
     for (const [instId, instType] of this.orderBookSubscriptions) {
       this.sendOrderBookSubscription(instId, instType);
@@ -665,6 +729,7 @@ export class OKXWebSocketClient {
     }
 
     this.stopHeartbeat();
+    this.stopMessageWatchdog();
 
     console.log('Closing OKX WebSocket intentionally...');
 
