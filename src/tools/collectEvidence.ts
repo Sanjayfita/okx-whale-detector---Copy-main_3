@@ -235,24 +235,47 @@ export const runEvidenceCollectCommand = async (
     stopped = true;
     if (criticalMonitor !== undefined) clearInterval(criticalMonitor);
     const shutdownErrors: unknown[] = [];
+    const failedClosed =
+      'isFailedClosed' in activeBundle.runtime &&
+      typeof activeBundle.runtime.isFailedClosed === 'function' &&
+      activeBundle.runtime.isFailedClosed();
+
+    // Keep the OKX WebSocket source alive while the evidence runtime stops new
+    // admissions and reaches a restart-safe deadline gap. Closing the app first
+    // would remove the only scientifically valid live price source.
+    if (
+      !failedClosed &&
+      'quiesceForRestart' in activeBundle.runtime &&
+      typeof activeBundle.runtime.quiesceForRestart === 'function'
+    ) {
+      try {
+        const result = await activeBundle.runtime.quiesceForRestart();
+        log(
+          `Evidence restart quiesce complete: waited=${result.waitedMs}ms nextDueAt=${result.nextPendingDueAt ?? 'NONE'}`,
+        );
+      } catch (quiesceError: unknown) {
+        shutdownErrors.push(quiesceError);
+      }
+    } else if (
+      !failedClosed &&
+      'drainObservationGracePeriod' in activeBundle.runtime &&
+      typeof activeBundle.runtime.drainObservationGracePeriod === 'function'
+    ) {
+      try {
+        await activeBundle.runtime.drainObservationGracePeriod();
+      } catch (drainError: unknown) {
+        shutdownErrors.push(drainError);
+      }
+    }
+
     try {
       await activeAppRuntime.shutdown(signal);
     } catch (shutdownError: unknown) {
       shutdownErrors.push(shutdownError);
     }
+
     let evidenceRuntimeStopped = false;
     try {
-      const failedClosed =
-        'isFailedClosed' in activeBundle.runtime &&
-        typeof activeBundle.runtime.isFailedClosed === 'function' &&
-        activeBundle.runtime.isFailedClosed();
-      if (
-        !failedClosed &&
-        'drainObservationGracePeriod' in activeBundle.runtime &&
-        typeof activeBundle.runtime.drainObservationGracePeriod === 'function'
-      ) {
-        await activeBundle.runtime.drainObservationGracePeriod();
-      }
       await activeBundle.runtime.stop();
       evidenceRuntimeStopped = true;
     } catch (evidenceShutdownError: unknown) {

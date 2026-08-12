@@ -55,6 +55,7 @@ export class EvidenceCollectionRuntime {
 
   private initialized = false;
   private failedClosed = false;
+  private acceptingAdmissions = false;
   private timer?: NodeJS.Timeout;
   private workChain: Promise<void> = Promise.resolve();
   private outcomeWorkChain: Promise<void> = Promise.resolve();
@@ -151,6 +152,7 @@ export class EvidenceCollectionRuntime {
       throw normalizedError;
     }
     this.initialized = true;
+    this.acceptingAdmissions = true;
     // Immediately process any due observations recovered from persistent state
     // before starting the recurring polling timer. This ensures near-due jobs
     // are evaluated promptly after restart instead of waiting for the first
@@ -200,6 +202,7 @@ export class EvidenceCollectionRuntime {
       );
       return;
     }
+    if (!this.acceptingAdmissions) return;
 
     let evidence: QualifiedAlertEvidenceRecord;
     const recordedAt = this.clock();
@@ -257,6 +260,7 @@ export class EvidenceCollectionRuntime {
       }
       return;
     }
+    if (!this.acceptingAdmissions) return;
     if (!this.allowedInstrumentIds?.has(input.alert.symbol)) {
       void this.failClosed(
         new Error(`Unexpected manifest instrument: ${input.alert.symbol}`),
@@ -396,6 +400,7 @@ export class EvidenceCollectionRuntime {
   }
 
   public async stop(): Promise<void> {
+    this.acceptingAdmissions = false;
     if (this.timer !== undefined) {
       this.clearIntervalFn(this.timer);
       this.timer = undefined;
@@ -414,9 +419,66 @@ export class EvidenceCollectionRuntime {
   }
 
   /**
-   * Stops new events at the application boundary while giving near-due jobs one
-   * full observation window to complete before the scheduler timer is cleared.
+   * Stops admitting new evidence while live market data remains connected, then
+   * waits for a deadline gap large enough for a cold process restart. This does
+   * not widen the scientific observation window: near-due jobs are completed by
+   * the old process before the WebSocket source is closed.
    */
+  public async quiesceForRestart(options: {
+    safeLeadMs?: number;
+    maximumWaitMs?: number;
+    pollIntervalMs?: number;
+  } = {}): Promise<Readonly<{ waitedMs: number; nextPendingDueAt?: number }>> {
+    this.requireStarted();
+    if (this.failedClosed) {
+      throw new Error('Cannot quiesce an evidence runtime that has failed closed');
+    }
+
+    const safeLeadMs = options.safeLeadMs ?? 30_000;
+    const maximumWaitMs = options.maximumWaitMs ?? 360_000;
+    const pollIntervalMs = options.pollIntervalMs ?? 250;
+    for (const [name, value] of [
+      ['safeLeadMs', safeLeadMs],
+      ['maximumWaitMs', maximumWaitMs],
+      ['pollIntervalMs', pollIntervalMs],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive safe integer`);
+      }
+    }
+
+    this.acceptingAdmissions = false;
+    await this.workChain;
+
+    const startedAt = this.clock();
+    const waitDeadline = startedAt + maximumWaitMs;
+    while (true) {
+      await this.processNow();
+      const now = this.clock();
+      const nextPendingDueAt =
+        this.options.collector.getNextPendingObservationDueAt();
+      if (
+        nextPendingDueAt === undefined ||
+        nextPendingDueAt - now >= safeLeadMs
+      ) {
+        return Object.freeze({
+          waitedMs: Math.max(0, now - startedAt),
+          ...(nextPendingDueAt === undefined ? {} : { nextPendingDueAt }),
+        });
+      }
+      if (now >= waitDeadline) {
+        throw new Error(
+          `Unable to reach a restart-safe observation gap within ${maximumWaitMs}ms`,
+        );
+      }
+      const remaining = waitDeadline - now;
+      await new Promise((resolveWait) =>
+        setTimeout(resolveWait, Math.min(pollIntervalMs, remaining)),
+      );
+    }
+  }
+
+  /** Backward-compatible bounded drain for callers that do not require restart. */
   public async drainObservationGracePeriod(
     durationMs: number = 10_000,
   ): Promise<void> {
@@ -424,10 +486,10 @@ export class EvidenceCollectionRuntime {
     if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
       throw new Error('durationMs must be a positive safe integer');
     }
-    const deadline = Date.now() + durationMs;
-    while (Date.now() < deadline) {
+    const deadline = this.clock() + durationMs;
+    while (this.clock() < deadline) {
       await this.processNow();
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.clock();
       if (remaining > 0) {
         await new Promise((resolveDrain) =>
           setTimeout(resolveDrain, Math.min(250, remaining)),

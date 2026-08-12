@@ -97,6 +97,55 @@ describe('runEvidenceCollectCommand', () => {
     );
   });
 
+  it('quiesces evidence before closing the live market-data application', async () => {
+    const runtimeQuiesce = vi.fn(async () => ({
+      waitedMs: 750,
+      nextPendingDueAt: 50_000,
+    }));
+    const runtimeStop = vi.fn(async () => undefined);
+    const appShutdown = vi.fn(async () => undefined);
+    const lease = createLeaseHarness();
+    const createRuntimeBundle = vi.fn(() => ({
+      runtime: {
+        start: vi.fn(async () => undefined),
+        quiesceForRestart: runtimeQuiesce,
+        stop: runtimeStop,
+        onPersistedLiveAlert: vi.fn(),
+      },
+      liveOrderExecutionAllowed: false,
+    })) as unknown as typeof createEvidenceCollectRuntimeBundle;
+
+    const handle = await runEvidenceCollectCommand('eval-test', {
+      loadBootstrap: vi.fn(async () => bootstrap),
+      createPriceReader: () =>
+        ({ readPrice: vi.fn() }) as unknown as OKXLivePriceReader,
+      createRuntimeBundle,
+      createEvaluationLease: lease.createEvaluationLease,
+      createAppRuntime: vi.fn(async () => ({
+        polymarketRuntime: { start: vi.fn() },
+        shutdown: appShutdown,
+      })),
+      registerSignal: vi.fn(),
+      log: vi.fn(),
+      error: vi.fn(),
+    });
+
+    await handle.stop('APPLICATION_CLOSE');
+
+    expect(runtimeQuiesce).toHaveBeenCalledOnce();
+    expect(
+      runtimeQuiesce.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThan(
+      appShutdown.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(
+      appShutdown.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThan(
+      runtimeStop.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(lease.release).toHaveBeenCalledOnce();
+  });
+
   it('still drains evidence when application shutdown fails', async () => {
     const runtimeStop = vi.fn(async () => undefined);
     const appShutdown = vi.fn(async () => {

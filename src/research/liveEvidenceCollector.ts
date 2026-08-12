@@ -147,6 +147,19 @@ export class LiveEvidenceCollector {
       .filter((job) => job.status === 'MISSED').length;
   }
 
+  /** Earliest still-pending horizon, used to choose a restart-safe handoff. */
+  public getNextPendingObservationDueAt(): number | undefined {
+    this.requireInitialized();
+    let nextDueAt: number | undefined;
+    for (const job of this.dependencies.scheduler.getPendingJobs()) {
+      if (job.status !== 'PENDING') continue;
+      if (nextDueAt === undefined || job.dueAt < nextDueAt) {
+        nextDueAt = job.dueAt;
+      }
+    }
+    return nextDueAt;
+  }
+
   private async processInstrumentJobs(
     instrumentId: string,
     jobs: readonly PendingOutcomeJob[],

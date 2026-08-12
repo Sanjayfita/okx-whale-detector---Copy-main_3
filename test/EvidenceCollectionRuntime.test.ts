@@ -200,6 +200,56 @@ describe('EvidenceCollectionRuntime', () => {
     await runtime.stop();
   });
 
+  it('quiesces admissions only after reaching a restart-safe deadline gap', async () => {
+    let invocation = 0;
+    let nextDueAt = 1_100;
+    const collector = {
+      initialize: vi.fn(async () => undefined),
+      recordQualifiedAlert: vi.fn(async () => undefined),
+      processDueObservations: vi.fn(async () => {
+        invocation += 1;
+        if (invocation >= 2) nextDueAt = 2_000;
+        return 0;
+      }),
+      getNextPendingObservationDueAt: vi.fn(() => nextDueAt),
+    };
+    const runtime = new EvidenceCollectionRuntime({
+      bridge: { createEvidence: vi.fn(() => ({ alertId: alert.id })) } as never,
+      collector: collector as never,
+      clock: () => 1_000,
+      setIntervalFn: () => 123 as unknown as NodeJS.Timeout,
+      clearIntervalFn: vi.fn(),
+    });
+
+    await runtime.start();
+    const result = await runtime.quiesceForRestart({ safeLeadMs: 500 });
+    runtime.onPersistedLiveAlert(alert, context);
+    await runtime.stop();
+
+    expect(result).toEqual({ waitedMs: 0, nextPendingDueAt: 2_000 });
+    expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
+    expect(collector.recordQualifiedAlert).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid restart-quiesce timing parameters', async () => {
+    const runtime = new EvidenceCollectionRuntime({
+      bridge: {} as never,
+      collector: {
+        initialize: vi.fn(async () => undefined),
+        processDueObservations: vi.fn(async () => 0),
+        getNextPendingObservationDueAt: vi.fn(() => undefined),
+      } as never,
+      setIntervalFn: () => 123 as unknown as NodeJS.Timeout,
+      clearIntervalFn: vi.fn(),
+    });
+    await runtime.start();
+
+    await expect(
+      runtime.quiesceForRestart({ safeLeadMs: 0 }),
+    ).rejects.toThrow('safeLeadMs');
+    await runtime.stop();
+  });
+
   it('reports alerts received before startup without recording them', () => {
     const onError = vi.fn();
     const collector = {
