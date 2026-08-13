@@ -166,6 +166,8 @@ const setupEvaluation = async (): Promise<{
       join(directory, 'outcomes.ndjson'),
       `${outcomes.map((outcome) => JSON.stringify(outcome)).join('\n')}\n`,
     ),
+    writeFile(join(directory, 'quarantined-episodes.ndjson'), ''),
+    writeFile(join(directory, 'coverage-gaps.ndjson'), ''),
     writeFile(
       join(directory, 'pending-observations.json'),
       `${JSON.stringify({ schemaVersion: 1, pending: [], liveOrderExecutionAllowed: false })}\n`,

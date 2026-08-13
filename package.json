@@ -100,7 +100,9 @@
     "polymarket:scan": "tsx src/tools/scanPolymarketWhales.ts",
     "polymarket:live": "tsx src/tools/watchPolymarketWhales.ts",
     "check": "npm run typecheck && npm run lint && npm test",
-    "evidence:smoke": "npm run build --silent && node dist/tools/smokeTestEvidencePipeline.js"
+    "evidence:smoke": "npm run build --silent && node dist/tools/smokeTestEvidencePipeline.js",
+    "historical:l2:replay": "npm run build:backend --silent && node dist/tools/runHistoricalL2Replay.js",
+    "evidence:30d": "npm run build:backend --silent && node dist/tools/runThirtyDayEvidenceCollector.js"
   },
   "keywords": [],
   "author": "",

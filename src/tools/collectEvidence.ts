@@ -18,6 +18,7 @@ import {
 } from '../research/evidenceEvaluationLease';
 import type { LivePriceSnapshot } from '../research/liveEvidenceCollector';
 import { OKXResilientPriceReader } from '../research/okxResilientPriceReader';
+import { createEvidenceAlertSessionId, loadEvidenceInitialAlertSequence } from '../research/evidenceAlertIdentity';
 import type { AppShutdownReason } from '../runtime/AppShutdownCoordinator';
 import { createRuntimeSessionId } from '../runtime/runtimeSession';
 
@@ -56,6 +57,7 @@ export interface EvidenceCollectCommandDependencies {
 export interface EvidenceCollectCommandHandle {
   evaluationId: string;
   stop: (signal?: AppShutdownReason) => Promise<void>;
+  finishPeriod: () => Promise<void>;
   liveOrderExecutionAllowed: false;
 }
 
@@ -70,7 +72,10 @@ const rethrowWithCleanupErrors = (
   throw primaryError;
 };
 
-const createOkxOnlyAlertDependencies = (): Readonly<{
+const createOkxOnlyAlertDependencies = (input?: Readonly<{
+  sourceSessionId?: string;
+  initialAlertSequence?: number;
+}>): Readonly<{
   externalSignalCorrelationService: ExternalSignalCorrelationService;
   correlatedAlertEngine: CorrelatedAlertEngine;
   polymarketRuntime: PolymarketLiveSignalRuntime;
@@ -81,7 +86,8 @@ const createOkxOnlyAlertDependencies = (): Readonly<{
     },
   );
   const correlatedAlertEngine = new CorrelatedAlertEngine({
-    sourceSessionId: createRuntimeSessionId(),
+    sourceSessionId: input?.sourceSessionId ?? createRuntimeSessionId(),
+    initialAlertSequence: input?.initialAlertSequence,
     enabled: true,
     minimumAgreementAlertImportance:
       appConfig.correlatedAlerts.minimumAgreementAlertImportance,
@@ -165,19 +171,55 @@ export const runEvidenceCollectCommand = async (
     });
     await bundle.runtime.start();
 
+    const lastLivePriceAt = new Map<string, number>();
+    const livePriceObserver: LiveMarketPriceObserver | undefined =
+      priceReader.observe === undefined
+        ? undefined
+        : (observation) => {
+            const previous = lastLivePriceAt.get(observation.instrumentId);
+            lastLivePriceAt.set(observation.instrumentId, observation.observedAt);
+            priceReader.observe?.(observation);
+            if (previous !== undefined && observation.observedAt - previous > 10_000) {
+              void bundle?.coverageGapStore.record({
+                gapId: `market-data:${observation.instrumentId}:${previous}:${observation.observedAt}`,
+                evaluationId: bootstrap.manifest.evaluationId,
+                kind: 'MARKET_DATA_GAP',
+                startedAt: previous,
+                endedAt: observation.observedAt,
+                instrumentIds: [observation.instrumentId],
+                alertIds: [],
+                reason: 'NO_VALIDATED_ORDER_BOOK_MIDPOINT_FOR_MORE_THAN_10_SECONDS',
+                source: 'LIVE',
+                recordedAt: observation.observedAt,
+              }).catch((gapError: unknown) => {
+                error('Coverage-gap persistence failed:', gapError);
+              });
+            }
+          };
+
     correlatedAlertRecorder = new CorrelatedAlertRecorder({
       enabled: appConfig.correlatedAlertRecording.enabled,
       outputPath: appConfig.correlatedAlertRecording.outputPath,
       flushAfterEachAlert:
         appConfig.correlatedAlertRecording.flushAfterEachAlert,
     });
-    const okxOnlyDependencies = createOkxOnlyAlertDependencies();
+    const sourceSessionId = createEvidenceAlertSessionId(
+      bootstrap.manifest.evaluationId,
+    );
+    const initialAlertSequence = await loadEvidenceInitialAlertSequence(
+      bootstrap.evaluationDirectory,
+      sourceSessionId,
+    );
+    const okxOnlyDependencies = createOkxOnlyAlertDependencies({
+      sourceSessionId,
+      initialAlertSequence,
+    });
     appRuntime = await dependencies.createAppRuntime({
       correlatedAlertRecorder,
       alphaMarketContextObserver: bundle.runtime.onQualifiedMarketContext,
-      ...(priceReader.observe === undefined
+      ...(livePriceObserver === undefined
         ? {}
-        : { liveMarketPriceObserver: priceReader.observe }),
+        : { liveMarketPriceObserver: livePriceObserver }),
       allowedInstrumentIds: bootstrap.manifest.instruments,
       externalSignalCorrelationService:
         okxOnlyDependencies.externalSignalCorrelationService,
@@ -325,6 +367,18 @@ export const runEvidenceCollectCommand = async (
     });
   });
 
+  const finishPeriod = async (): Promise<void> => {
+    if (stopped) return;
+    await activeBundle.runtime.stopAdmissions();
+    await activeBundle.runtime.processNow();
+    const quarantined = await activeBundle.collector.quarantineRemainingPending(
+      Date.now(),
+      'COLLECTION_PERIOD_ENDED',
+    );
+    log(`Forward-validation period ended; quarantined ${quarantined} incomplete end-of-period episode(s).`);
+    await stop('APPLICATION_CLOSE');
+  };
+
   log('LIVE EVIDENCE COLLECTION COORDINATOR STARTED');
   log(`Evaluation ID: ${bootstrap.manifest.evaluationId}`);
   log(`Directory: ${bootstrap.evaluationDirectory}`);
@@ -335,6 +389,7 @@ export const runEvidenceCollectCommand = async (
   return Object.freeze({
     evaluationId: bootstrap.manifest.evaluationId,
     stop,
+    finishPeriod,
     liveOrderExecutionAllowed: false,
   });
 };

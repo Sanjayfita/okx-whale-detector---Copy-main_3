@@ -11,6 +11,8 @@ export const EVIDENCE_SOURCE_FILE_NAMES = Object.freeze([
   'qualified-alerts.ndjson',
   'alpha-snapshots.ndjson',
   'outcomes.ndjson',
+  'quarantined-episodes.ndjson',
+  'coverage-gaps.ndjson',
   'pending-observations.json',
 ] as const);
 

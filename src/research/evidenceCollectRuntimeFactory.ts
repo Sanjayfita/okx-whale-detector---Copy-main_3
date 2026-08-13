@@ -10,6 +10,8 @@ import { QualifiedAlertRecorder } from './qualifiedAlertRecorder';
 import { AlphaResearchSnapshotRecorder } from './alphaResearchSnapshotRecorder';
 import { EvidenceEventInitializationStore } from './evidenceEventInitializationStore';
 import { EvidenceCollectionHealthStore } from './evidenceCollectionHealthStore';
+import { EvidenceQuarantineStore } from './evidenceQuarantine';
+import { EvidenceCoverageGapStore } from './evidenceCoverageGap';
 
 export interface EvidenceCollectRuntimeFactoryOptions {
   bootstrap: EvidenceCollectBootstrap;
@@ -21,6 +23,8 @@ export interface EvidenceCollectRuntimeFactoryOptions {
   clock?: () => number;
   onError?: (error: unknown) => void;
   onCriticalFailure?: (error: Error) => void;
+  pollingEnabled?: boolean;
+  evidenceSource?: 'LIVE' | 'HISTORICAL_REPLAY';
 }
 
 export interface EvidenceCollectRuntimeBundle {
@@ -30,6 +34,8 @@ export interface EvidenceCollectRuntimeBundle {
   collector: LiveEvidenceCollector;
   alphaSnapshotRecorder: AlphaResearchSnapshotRecorder;
   bridge: CorrelatedAlertEvidenceBridge;
+  quarantineStore: EvidenceQuarantineStore;
+  coverageGapStore: EvidenceCoverageGapStore;
   liveOrderExecutionAllowed: false;
 }
 
@@ -61,12 +67,17 @@ export const createEvidenceCollectRuntimeBundle = (
     bootstrap.evaluationDirectory,
     bootstrap.manifest.evaluationId,
   );
+  const quarantineStore = new EvidenceQuarantineStore(bootstrap.evaluationDirectory);
+  const coverageGapStore = new EvidenceCoverageGapStore(bootstrap.evaluationDirectory);
   const collector = new LiveEvidenceCollector({
     recorder,
     scheduler,
     readPrice: options.readPrice,
     clock,
     onObservationError: (error) => options.onError?.(error),
+    quarantineStore,
+    coverageGapStore,
+    evidenceSource: options.evidenceSource ?? 'LIVE',
     onObservationMissed: async (job, missedAt) => {
       const error = new Error(
         `Observation window irrecoverably missed: ${job.alertId}/${job.horizonMinutes}m at ${missedAt}`,
@@ -102,6 +113,7 @@ export const createEvidenceCollectRuntimeBundle = (
     allowedInstrumentIds: bootstrap.manifest.instruments,
     eventInitializationStore,
     healthStore,
+    pollingEnabled: options.pollingEnabled,
   });
 
   return Object.freeze({
@@ -111,6 +123,8 @@ export const createEvidenceCollectRuntimeBundle = (
     collector,
     alphaSnapshotRecorder,
     bridge,
+    quarantineStore,
+    coverageGapStore,
     liveOrderExecutionAllowed: false,
   });
 };

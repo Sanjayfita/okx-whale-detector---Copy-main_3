@@ -21,6 +21,8 @@ import {
   type EvaluationSessionManifest,
 } from '../src/research/evaluationSessionManifest';
 import { inspectEvidenceProgress } from '../src/research/evidenceProgressInspector';
+import { EvidenceQuarantineStore } from '../src/research/evidenceQuarantine';
+import { EvidenceCoverageGapStore } from '../src/research/evidenceCoverageGap';
 import {
   createQualifiedAlertEvidenceRecord,
   type QualifiedAlertEvidenceRecord,
@@ -58,6 +60,8 @@ const createEvaluation = async (
   await writeFile(join(directory, 'qualified-alerts.ndjson'), '', 'utf8');
   await writeFile(join(directory, 'alpha-snapshots.ndjson'), '', 'utf8');
   await writeFile(join(directory, 'outcomes.ndjson'), '', 'utf8');
+  await writeFile(join(directory, 'quarantined-episodes.ndjson'), '', 'utf8');
+  await writeFile(join(directory, 'coverage-gaps.ndjson'), '', 'utf8');
   await writeFile(
     join(directory, 'pending-observations.json'),
     JSON.stringify({
@@ -198,6 +202,60 @@ describe('inspectEvidenceProgress', () => {
     expect(report.evaluationLeaseActive).toBe(false);
     expect(report.readyForFinalEvaluation).toBe(true);
     expect(report.evidenceSource.fingerprint).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+
+  it('keeps quarantined episodes out of accepted evidence while reporting their gaps', async () => {
+    const { directory, manifest } = await createEvaluation();
+    const valid = createAlert(manifest, { id: 'valid-alert' });
+    const quarantined = createAlert(manifest, { id: 'quarantined-alert' });
+    await writeCompleteEvidence(directory, valid);
+    await writeFile(
+      join(directory, 'qualified-alerts.ndjson'),
+      `${JSON.stringify(valid)}\n${JSON.stringify(quarantined)}\n`,
+      'utf8',
+    );
+
+    const quarantineStore = new EvidenceQuarantineStore(directory);
+    await quarantineStore.initialize();
+    await quarantineStore.quarantine({
+      evaluationId: manifest.evaluationId,
+      alertId: quarantined.alertId,
+      instrumentId: quarantined.instrumentId,
+      detectedAt: quarantined.detectedAt,
+      quarantinedAt: quarantined.detectedAt + 20_000,
+      reason: 'OBSERVATION_WINDOW_MISSED',
+      failedHorizonMinutes: 0.25,
+      dueAt: quarantined.detectedAt + 15_000,
+      gapStartAt: quarantined.detectedAt + 15_000,
+      gapEndAt: quarantined.detectedAt + 20_000,
+      details: 'simulated outage',
+    });
+    const gapStore = new EvidenceCoverageGapStore(directory);
+    await gapStore.initialize();
+    await gapStore.record({
+      gapId: 'gap-1',
+      evaluationId: manifest.evaluationId,
+      kind: 'OBSERVATION_UNAVAILABLE',
+      startedAt: quarantined.detectedAt + 15_000,
+      endedAt: quarantined.detectedAt + 20_000,
+      instrumentIds: [quarantined.instrumentId],
+      alertIds: [quarantined.alertId],
+      reason: 'SIMULATED_OUTAGE',
+      source: 'LIVE',
+      recordedAt: quarantined.detectedAt + 20_000,
+    });
+
+    const report = await inspectEvidenceProgress(directory, START + 86_400_000);
+    expect(report.totalQualifiedAlertCount).toBe(2);
+    expect(report.validEvidenceAlertCount).toBe(1);
+    expect(report.qualifiedAlertCount).toBe(1);
+    expect(report.quarantinedEpisodeCount).toBe(1);
+    expect(report.coverageGapCount).toBe(1);
+    expect(report.missingnessRate).toBe(0.5);
+    expect(report.missingSnapshotCount).toBe(0);
+    expect(report.missingObservationCount).toBe(0);
+    expect(report.health).toBe('HEALTHY');
   });
 
   it('counts malformed source lines and blocks readiness', async () => {

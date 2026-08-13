@@ -246,3 +246,11 @@ Problem indicators are any `UNHEALTHY` state, malformed/unmatched/duplicate reco
 missing snapshot, missed or overdue window, scheduler gap, fingerprint mismatch,
 or unexpectedly absent instrument/side/event-type coverage. Stop and investigate;
 do not edit evidence files to make the counters pass.
+
+## Research fast-track additions
+
+The live collector now uses quarantine-and-continue semantics for unavailable market evidence. An episode that misses a required observation is appended to `quarantined-episodes.ndjson`, its interruption is recorded in `coverage-gaps.ndjson`, and the episode is excluded from accepted research rows. Unrelated complete episodes continue collecting. Structural integrity failures remain fail-closed.
+
+The resumable 30-day Windows forward-validation launcher is `scripts/windows/START-30-DAY-EVIDENCE.cmd`. Its persistent checkpoint preserves the original target end across process restarts and records downtime explicitly. See `docs/research-fast-track.md` for launch/recovery details.
+
+Historical L2 replay is isolated under `data/historical-research` and is started with `scripts/windows/RUN-HISTORICAL-L2-REPLAY.cmd` or `npm run historical:l2:replay`. Historical evidence never counts as live forward-validation evidence.

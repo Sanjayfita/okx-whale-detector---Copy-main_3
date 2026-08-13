@@ -21,7 +21,8 @@ export type OutcomePathSampling =
 export type OutcomeMarketDataSource =
   | 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT'
   | 'OKX_REST_TICKER_MIDPOINT'
-  | 'OKX_REST_TICKER_LAST';
+  | 'OKX_REST_TICKER_LAST'
+  | 'OKX_HISTORICAL_L2_MIDPOINT';
 
 export const outcomeHorizonMilliseconds = (
   horizonMinutes: AlertOutcomeHorizonMinutes,
@@ -198,7 +199,8 @@ export const createAlertOutcomeObservation = (
     input.sourceMarketDataSource !== undefined &&
     input.sourceMarketDataSource !== 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT' &&
     input.sourceMarketDataSource !== 'OKX_REST_TICKER_MIDPOINT' &&
-    input.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST'
+    input.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST' &&
+    input.sourceMarketDataSource !== 'OKX_HISTORICAL_L2_MIDPOINT'
   ) {
     throw new Error('Observation market-data source is invalid');
   }
@@ -380,7 +382,8 @@ export const parseAlertOutcomeObservation = (
     (value.sourceMarketDataSource !== undefined &&
       value.sourceMarketDataSource !== 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT' &&
       value.sourceMarketDataSource !== 'OKX_REST_TICKER_MIDPOINT' &&
-      value.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST') ||
+      value.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST' &&
+      value.sourceMarketDataSource !== 'OKX_HISTORICAL_L2_MIDPOINT') ||
     typeof value.referencePrice !== 'number' ||
     typeof value.observedPrice !== 'number' ||
     typeof value.rawReturnPercent !== 'number' ||

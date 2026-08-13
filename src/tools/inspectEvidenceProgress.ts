@@ -23,7 +23,15 @@ void inspectEvidenceProgress(evaluationDirectory)
     console.log(
       `Observed evidence span: ${report.evidenceSpanDays} UTC day(s)`,
     );
-    console.log(`Qualified alerts: ${report.qualifiedAlertCount}`);
+    console.log(`Qualified alerts (valid): ${report.qualifiedAlertCount}`);
+    console.log(`Qualified alerts (total): ${report.totalQualifiedAlertCount}`);
+    console.log(`Valid evidence episodes: ${report.validEvidenceAlertCount}`);
+    console.log(`Quarantined episodes: ${report.quarantinedEpisodeCount}`);
+    console.log(`Coverage gaps: ${report.coverageGapCount}`);
+    console.log(`Coverage-gap duration ms: ${report.coverageGapDurationMs}`);
+    console.log(
+      `Episode missingness rate: ${report.missingnessRate === null ? 'N/A' : `${(report.missingnessRate * 100).toFixed(2)}%`}`,
+    );
     console.log(`Readiness status: ${report.readinessStatus}`);
     console.log(`Evidence files: ${report.datasetSizeBytes} byte(s)`);
     console.log(`Independent alert episodes: ${report.independentAlertCount}`);
@@ -94,6 +102,27 @@ void inspectEvidenceProgress(evaluationDirectory)
       `Side distribution: BULLISH=${report.sideDistribution.bullish}, BEARISH=${report.sideDistribution.bearish}`,
     );
     console.log(`Collection health: ${report.health}`);
+    if (report.collectorTargetEndAt !== null) {
+      console.log(
+        `30-day target end: ${new Date(report.collectorTargetEndAt).toISOString()}`,
+      );
+      console.log(
+        `30-day elapsed: ${report.collectorElapsedMs ?? 0} ms | remaining: ${report.collectorRemainingMs ?? 0} ms`,
+      );
+    }
+    if (report.affectedTimeRanges.length > 0) {
+      console.log('Affected time ranges:');
+      for (const range of report.affectedTimeRanges.slice(-20)) {
+        console.log(
+          `  ${new Date(range.startedAt).toISOString()} -> ${new Date(range.endedAt).toISOString()} | ${range.reason}`,
+        );
+      }
+      if (report.affectedTimeRanges.length > 20) {
+        console.log(
+          `  ... ${report.affectedTimeRanges.length - 20} earlier range(s) omitted from console; use --json for all`,
+        );
+      }
+    }
     for (const reason of report.healthReasons) {
       console.log(`Health reason: ${reason}`);
     }

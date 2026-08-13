@@ -25,6 +25,9 @@ import {
   type PendingOutcomeJob,
 } from './persistentOutcomeScheduler';
 import { parseQualifiedAlertEvidenceRecord } from './qualifiedAlertEvidence';
+import { parseQuarantinedEvidenceEpisode } from './evidenceQuarantine';
+import { parseEvidenceCoverageGap } from './evidenceCoverageGap';
+import { parseEvidenceCollectorCheckpoint } from './evidenceCollectorCheckpoint';
 
 export interface EvidenceProgressReport extends EvidenceDatasetQualityMetrics {
   readonly readinessStatus:
@@ -49,6 +52,16 @@ export interface EvidenceProgressReport extends EvidenceDatasetQualityMetrics {
   readonly evidenceSource: EvidenceSourceFingerprint;
   /** Active-only overlap while an outcome append is durably committed before its pending job is pruned. */
   readonly transientCompletedPendingOverlapCount: number;
+  readonly totalQualifiedAlertCount: number;
+  readonly validEvidenceAlertCount: number;
+  readonly quarantinedEpisodeCount: number;
+  readonly coverageGapCount: number;
+  readonly coverageGapDurationMs: number;
+  readonly missingnessRate: number | null;
+  readonly affectedTimeRanges: readonly Readonly<{ startedAt: number; endedAt: number; reason: string }>[];
+  readonly collectorTargetEndAt: number | null;
+  readonly collectorElapsedMs: number | null;
+  readonly collectorRemainingMs: number | null;
   readonly liveOrderExecutionAllowed: false;
 }
 
@@ -303,6 +316,17 @@ const readPendingJobs = async (
   }
 };
 
+const readCollectorCheckpoint = async (evaluationDirectory: string) => {
+  try {
+    return parseEvidenceCollectorCheckpoint(
+      JSON.parse(await readFile(join(evaluationDirectory, 'collector-checkpoint.json'), 'utf8')) as unknown,
+    );
+  } catch (error: unknown) {
+    if (isErrorWithCode(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+};
+
 const inspectEvidenceProgressOnce = async (
   evaluationDirectory: string,
   evidenceSource: EvidenceSourceFingerprint,
@@ -333,6 +357,9 @@ const inspectEvidenceProgressOnce = async (
     finalizedReleaseExists,
     sourceFileSizes,
     operationalIntegrity,
+    quarantines,
+    coverageGaps,
+    collectorCheckpoint,
   ] = await Promise.all([
     readOptionalNdjson(
       join(evaluationDirectory, 'qualified-alerts.ndjson'),
@@ -354,16 +381,33 @@ const inspectEvidenceProgressOnce = async (
       fileSize(join(evaluationDirectory, 'qualified-alerts.ndjson')),
       fileSize(join(evaluationDirectory, 'alpha-snapshots.ndjson')),
       fileSize(join(evaluationDirectory, 'outcomes.ndjson')),
+      fileSize(join(evaluationDirectory, 'quarantined-episodes.ndjson')),
+      fileSize(join(evaluationDirectory, 'coverage-gaps.ndjson')),
       fileSize(join(evaluationDirectory, 'pending-observations.json')),
       fileSize(join(evaluationDirectory, 'event-initializations.json')),
       fileSize(join(evaluationDirectory, 'collection-health.json')),
       fileSize(join(evaluationDirectory, 'evidence-failures.ndjson')),
     ]),
     readOperationalIntegrityState(evaluationDirectory),
+    readOptionalNdjson(
+      join(evaluationDirectory, 'quarantined-episodes.ndjson'),
+      parseQuarantinedEvidenceEpisode,
+    ),
+    readOptionalNdjson(
+      join(evaluationDirectory, 'coverage-gaps.ndjson'),
+      parseEvidenceCoverageGap,
+    ),
+    readCollectorCheckpoint(evaluationDirectory),
   ]);
 
+  const quarantinedAlertIds = new Set(quarantines.records.map((record) => record.alertId));
+  const validAlerts = alerts.records.filter((alert) => !quarantinedAlertIds.has(alert.alertId));
+  const validSnapshots = snapshots.records.filter((snapshot) => !quarantinedAlertIds.has(snapshot.evidence.alertId));
+  const validOutcomes = outcomes.records.filter((outcome) => !quarantinedAlertIds.has(outcome.alertId));
+  const validPendingJobs = pending.jobs.filter((job) => !quarantinedAlertIds.has(job.alertId));
+
   const completedOutcomeKeys = new Set(
-    outcomes.records.map(
+    validOutcomes.map(
       (outcome) => `${outcome.alertId}:${outcome.horizonMinutes}`,
     ),
   );
@@ -374,8 +418,8 @@ const inspectEvidenceProgressOnce = async (
     : 0;
   const qualityPendingJobs =
     transientCompletedPendingOverlapCount === 0
-      ? pending.jobs
-      : pending.jobs.filter(
+      ? validPendingJobs
+      : validPendingJobs.filter(
           (job) =>
             !completedOutcomeKeys.has(`${job.alertId}:${job.horizonMinutes}`),
         );
@@ -394,14 +438,16 @@ const inspectEvidenceProgressOnce = async (
   ].filter(Boolean).length;
   const quality = evaluateEvidenceDatasetQuality({
     manifest,
-    alerts: alerts.records,
-    outcomes: outcomes.records,
-    snapshots: snapshots.records,
+    alerts: validAlerts,
+    outcomes: validOutcomes,
+    snapshots: validSnapshots,
     pendingJobs: qualityPendingJobs,
     parserMalformedRecords:
       alerts.malformed +
       snapshots.malformed +
       outcomes.malformed +
+      quarantines.malformed +
+      coverageGaps.malformed +
       missingSourceCount +
       (alphaFingerprintMismatch ? 1 : 0),
     pendingMalformedRecords: pending.malformed + operationalIntegrity.malformed,
@@ -409,11 +455,12 @@ const inspectEvidenceProgressOnce = async (
       alerts.invalidJson +
       snapshots.invalidJson +
       outcomes.invalidJson +
+      quarantines.invalidJson + coverageGaps.invalidJson +
       operationalIntegrity.invalidJson,
     schemaInvalidRecords:
       alerts.invalidRecord +
       snapshots.invalidRecord +
-      outcomes.invalidRecord +
+      outcomes.invalidRecord + quarantines.invalidRecord + coverageGaps.invalidRecord +
       pending.malformed +
       operationalIntegrity.schemaInvalid,
     pendingEventInitializationCount:
@@ -425,18 +472,18 @@ const inspectEvidenceProgressOnce = async (
     alphaConfig,
   });
   const independence = measureEvidenceIndependence(
-    alerts.records,
+    validAlerts,
     manifest.horizonsMinutes,
   );
   const collectionDays = Math.max(0, (now - manifest.createdAt) / 86_400_000);
-  const firstAlertDetectedAt = alerts.records.reduce<number | null>(
+  const firstAlertDetectedAt = validAlerts.reduce<number | null>(
     (earliest, alert) =>
       earliest === null
         ? alert.detectedAt
         : Math.min(earliest, alert.detectedAt),
     null,
   );
-  const lastAlertDetectedAt = alerts.records.reduce<number | null>(
+  const lastAlertDetectedAt = validAlerts.reduce<number | null>(
     (latest, alert) =>
       latest === null ? alert.detectedAt : Math.max(latest, alert.detectedAt),
     null,
@@ -469,6 +516,17 @@ const inspectEvidenceProgressOnce = async (
           ? 'COLLECTING'
           : 'INSUFFICIENT_DATA';
 
+  const coverageGapDurationMs = coverageGaps.records.reduce((sum, gap) => sum + gap.durationMs, 0);
+  const totalQualifiedAlertCount = alerts.records.length;
+  const quarantinedEpisodeCount = quarantines.records.length;
+  const missingnessRate = totalQualifiedAlertCount === 0 ? null : quarantinedEpisodeCount / totalQualifiedAlertCount;
+  const collectorElapsedMs = collectorCheckpoint === undefined
+    ? null
+    : Math.max(0, Math.min(now, collectorCheckpoint.targetEndAt) - collectorCheckpoint.firstStartedAt);
+  const collectorRemainingMs = collectorCheckpoint === undefined
+    ? null
+    : Math.max(0, collectorCheckpoint.targetEndAt - now);
+
   return Object.freeze({
     ...quality,
     readinessStatus,
@@ -497,6 +555,18 @@ const inspectEvidenceProgressOnce = async (
     readyForFinalEvaluation,
     evidenceSource,
     transientCompletedPendingOverlapCount,
+    totalQualifiedAlertCount,
+    validEvidenceAlertCount: validAlerts.length,
+    quarantinedEpisodeCount,
+    coverageGapCount: coverageGaps.records.length,
+    coverageGapDurationMs,
+    missingnessRate,
+    affectedTimeRanges: Object.freeze(coverageGaps.records.map((gap) => Object.freeze({
+      startedAt: gap.startedAt, endedAt: gap.endedAt, reason: gap.reason,
+    }))),
+    collectorTargetEndAt: collectorCheckpoint?.targetEndAt ?? null,
+    collectorElapsedMs,
+    collectorRemainingMs,
     liveOrderExecutionAllowed: false,
   });
 };

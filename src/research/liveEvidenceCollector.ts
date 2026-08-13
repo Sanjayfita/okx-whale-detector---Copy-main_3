@@ -10,6 +10,8 @@ import {
 } from './persistentOutcomeScheduler';
 import { QualifiedAlertRecorder } from './qualifiedAlertRecorder';
 import type { QualifiedAlertEvidenceRecord } from './qualifiedAlertEvidence';
+import type { EvidenceQuarantineStore, EvidenceQuarantineReason } from './evidenceQuarantine';
+import type { EvidenceCoverageGapStore } from './evidenceCoverageGap';
 
 export interface LivePriceSnapshot {
   instrumentId: string;
@@ -44,6 +46,9 @@ export interface LiveEvidenceCollectorDependencies {
     job: PendingOutcomeJob,
     missedAt: number,
   ) => Promise<void> | void;
+  quarantineStore?: EvidenceQuarantineStore;
+  coverageGapStore?: EvidenceCoverageGapStore;
+  evidenceSource?: 'LIVE' | 'HISTORICAL_REPLAY';
 }
 
 export class LiveEvidenceCollector {
@@ -87,6 +92,11 @@ export class LiveEvidenceCollector {
 
   public async initialize(): Promise<void> {
     await this.dependencies.recorder.initialize();
+    await this.dependencies.quarantineStore?.initialize();
+    await this.dependencies.coverageGapStore?.initialize();
+    this.dependencies.scheduler.setQuarantinedAlertIds(
+      this.dependencies.quarantineStore?.getAll().map((record) => record.alertId) ?? [],
+    );
     await this.dependencies.scheduler.initialize();
     this.initialized = true;
   }
@@ -107,6 +117,40 @@ export class LiveEvidenceCollector {
     await this.dependencies.scheduler.scheduleAlert(evidence);
   }
 
+  public async quarantineQualifiedAlert(
+    evidence: QualifiedAlertEvidenceRecord,
+    input: Readonly<{
+      reason: EvidenceQuarantineReason;
+      quarantinedAt: number;
+      failedHorizonMinutes?: number;
+      dueAt?: number;
+      gapStartAt?: number;
+      gapEndAt?: number;
+      details?: string;
+    }>,
+  ): Promise<void> {
+    this.requireInitialized();
+    const store = this.dependencies.quarantineStore;
+    if (store === undefined) {
+      throw new Error('Evidence quarantine store is unavailable');
+    }
+    await this.dependencies.recorder.recordIdempotent(evidence);
+    await store.quarantine({
+      evaluationId: evidence.evaluationId,
+      alertId: evidence.alertId,
+      instrumentId: evidence.instrumentId,
+      detectedAt: evidence.detectedAt,
+      quarantinedAt: input.quarantinedAt,
+      reason: input.reason,
+      ...(input.failedHorizonMinutes === undefined ? {} : { failedHorizonMinutes: input.failedHorizonMinutes }),
+      ...(input.dueAt === undefined ? {} : { dueAt: input.dueAt }),
+      ...(input.gapStartAt === undefined ? {} : { gapStartAt: input.gapStartAt }),
+      ...(input.gapEndAt === undefined ? {} : { gapEndAt: input.gapEndAt }),
+      ...(input.details === undefined ? {} : { details: input.details }),
+    });
+    await this.dependencies.scheduler.quarantineAlert(evidence.alertId);
+  }
+
   public assertCompleteOutcomeBundle(alertId: string): void {
     this.requireInitialized();
     this.dependencies.scheduler.assertCompleteOutcomeBundle(alertId);
@@ -121,6 +165,39 @@ export class LiveEvidenceCollector {
     const jobsByInstrument = new Map<string, PendingOutcomeJob[]>();
     for (const job of this.dependencies.scheduler.getDueJobs(now)) {
       if (now - job.dueAt > this.maximumObservationDelayMs) {
+        if (this.dependencies.quarantineStore !== undefined) {
+          await this.dependencies.quarantineStore.quarantine({
+            evaluationId: job.evaluationId,
+            alertId: job.alertId,
+            instrumentId: job.instrumentId,
+            detectedAt: job.detectedAt,
+            quarantinedAt: now,
+            reason: 'OBSERVATION_WINDOW_MISSED',
+            failedHorizonMinutes: job.horizonMinutes,
+            dueAt: job.dueAt,
+            gapStartAt: job.dueAt,
+            gapEndAt: now,
+            details: 'Required outcome could not be captured inside the frozen observation window',
+          });
+          await this.dependencies.coverageGapStore?.record({
+            gapId: `observation:${job.alertId}:${job.horizonMinutes}:${job.dueAt}`,
+            evaluationId: job.evaluationId,
+            kind: 'OBSERVATION_UNAVAILABLE',
+            startedAt: job.dueAt,
+            endedAt: now,
+            instrumentIds: [job.instrumentId],
+            alertIds: [job.alertId],
+            reason: 'OBSERVATION_WINDOW_EXPIRED',
+            source: this.dependencies.evidenceSource ?? 'LIVE',
+            recordedAt: now,
+          });
+          await this.dependencies.scheduler.quarantineAlert(job.alertId);
+          this.reportObservationErrorOnce(
+            new Error('Outcome observation window expired; episode was quarantined and collection will continue'),
+            job,
+          );
+          continue;
+        }
         await this.dependencies.scheduler.markObservationMissed(
           job,
           now,
@@ -163,6 +240,39 @@ export class LiveEvidenceCollector {
       this.reportedJobErrors.delete(this.getJobKey(job));
     }
     return captured.length;
+  }
+
+  public async quarantineRemainingPending(
+    now: number,
+    reason: 'HISTORICAL_RANGE_ENDED' | 'COLLECTION_PERIOD_ENDED' | 'DATA_SOURCE_UNAVAILABLE' = 'HISTORICAL_RANGE_ENDED',
+  ): Promise<number> {
+    this.requireInitialized();
+    const store = this.dependencies.quarantineStore;
+    if (store === undefined) throw new Error('Evidence quarantine store is unavailable');
+    const alertIds = new Set<string>();
+    for (const job of this.dependencies.scheduler.getPendingJobs()) {
+      if (job.status !== 'PENDING' || alertIds.has(job.alertId)) continue;
+      alertIds.add(job.alertId);
+      await store.quarantine({
+        evaluationId: job.evaluationId,
+        alertId: job.alertId,
+        instrumentId: job.instrumentId,
+        detectedAt: job.detectedAt,
+        quarantinedAt: now,
+        reason,
+        failedHorizonMinutes: job.horizonMinutes,
+        dueAt: job.dueAt,
+        gapStartAt: now,
+        gapEndAt: Math.max(now, job.dueAt),
+        details: reason === 'HISTORICAL_RANGE_ENDED'
+          ? 'Historical input ended before all required future horizons were observable'
+          : reason === 'COLLECTION_PERIOD_ENDED'
+            ? 'The fixed forward-validation admission period ended before all required future horizons were observable'
+            : 'Market data source remained unavailable for the required horizon',
+      });
+      await this.dependencies.scheduler.quarantineAlert(job.alertId);
+    }
+    return alertIds.size;
   }
 
   public getMissedObservationCount(): number {

@@ -24,6 +24,7 @@ export interface EvidenceCollectionRuntimeOptions {
   eventInitializationStore?: EvidenceEventInitializationStore;
   healthStore?: EvidenceCollectionHealthStore;
   onCriticalFailure?: (error: Error) => void;
+  pollingEnabled?: boolean;
 }
 
 interface PendingAlphaEvidence {
@@ -52,6 +53,7 @@ export class EvidenceCollectionRuntime {
   private readonly maximumPendingAlphaEvidenceAgeMs: number;
   private readonly allowedInstrumentIds?: ReadonlySet<string>;
   private readonly onCriticalFailure: (error: Error) => void;
+  private readonly pollingEnabled: boolean;
 
   private initialized = false;
   private failedClosed = false;
@@ -84,6 +86,7 @@ export class EvidenceCollectionRuntime {
         ? undefined
         : new Set(options.allowedInstrumentIds);
     this.onCriticalFailure = options.onCriticalFailure ?? (() => undefined);
+    this.pollingEnabled = options.pollingEnabled ?? true;
 
     if (!Number.isSafeInteger(this.intervalMs) || this.intervalMs <= 0) {
       throw new Error('intervalMs must be a positive safe integer');
@@ -173,10 +176,12 @@ export class EvidenceCollectionRuntime {
       throw normalized;
     }
 
-    this.timer = this.setIntervalFn(() => {
-      this.prunePendingAlphaEvidence(this.clock());
-      this.requestOutcomePoll();
-    }, this.intervalMs);
+    if (this.pollingEnabled) {
+      this.timer = this.setIntervalFn(() => {
+        this.prunePendingAlphaEvidence(this.clock());
+        this.requestOutcomePoll();
+      }, this.intervalMs);
+    }
   }
 
   public onPersistedLiveAlert = (
@@ -260,14 +265,40 @@ export class EvidenceCollectionRuntime {
       return;
     }
     if (input.marketContext === null) {
-      void this.failClosed(
-        new Error(
-          `Point-in-time snapshot unavailable: ${input.failureReason ?? 'UNKNOWN'}`,
-        ),
-        'SNAPSHOT_UNAVAILABLE',
-        input.alert.id,
-        input.alert.symbol,
-      );
+      const quarantinedAt = this.clock();
+      try {
+        const evidence = this.options.bridge.createEvidence({
+          alert: input.alert,
+          evaluationContext: input.evaluationContext,
+          recordedAt: quarantinedAt,
+        });
+        void this.enqueue(async () => {
+          try {
+            await this.options.collector.quarantineQualifiedAlert(evidence, {
+              reason: 'POINT_IN_TIME_CONTEXT_UNAVAILABLE',
+              quarantinedAt,
+              gapStartAt: input.evaluationContext.sourceMarketTimestamp,
+              gapEndAt: quarantinedAt,
+              details: input.failureReason ?? 'POINT_IN_TIME_CONTEXT_UNAVAILABLE',
+            });
+          } catch (error: unknown) {
+            await this.failClosed(
+              error instanceof Error ? error : new Error(String(error)),
+              'QUARANTINE_PERSISTENCE_FAILED',
+              input.alert.id,
+              input.alert.symbol,
+            );
+            throw error;
+          }
+        });
+      } catch (error: unknown) {
+        void this.failClosed(
+          error instanceof Error ? error : new Error(String(error)),
+          'CANDIDATE_VALIDATION_FAILED',
+          input.alert.id,
+          input.alert.symbol,
+        );
+      }
       return;
     }
     const marketContext = input.marketContext;
@@ -373,6 +404,17 @@ export class EvidenceCollectionRuntime {
       );
     });
   };
+
+  public async stopAdmissions(): Promise<void> {
+    this.requireStarted();
+    this.acceptingAdmissions = false;
+    await this.workChain;
+  }
+
+  public async flushAdmissions(): Promise<void> {
+    this.requireStarted();
+    await this.workChain;
+  }
 
   public async processNow(): Promise<number> {
     this.requireStarted();

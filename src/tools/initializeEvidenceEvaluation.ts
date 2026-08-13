@@ -112,6 +112,14 @@ export const initializeEvidenceEvaluation = (
     flag: 'wx',
     flush: true,
   });
+  writeFileSync(resolve(evaluationDirectory, 'quarantined-episodes.ndjson'), '', {
+    flag: 'wx',
+    flush: true,
+  });
+  writeFileSync(resolve(evaluationDirectory, 'coverage-gaps.ndjson'), '', {
+    flag: 'wx',
+    flush: true,
+  });
   writeFileSync(
     resolve(evaluationDirectory, 'pending-observations.json'),
     `${JSON.stringify(

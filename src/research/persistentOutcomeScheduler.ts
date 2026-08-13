@@ -145,6 +145,7 @@ export class PersistentOutcomeScheduler {
     string,
     AlertOutcomeObservation[]
   >();
+  private quarantinedAlertIds = new Set<string>();
 
   private readonly horizonsMinutes: readonly AlertOutcomeHorizonMinutes[];
 
@@ -162,6 +163,29 @@ export class PersistentOutcomeScheduler {
     this.horizonsMinutes = Object.freeze(
       horizonsMinutes.filter(isAlertOutcomeHorizonMinutes),
     );
+  }
+
+  public setQuarantinedAlertIds(alertIds: Iterable<string>): void {
+    this.quarantinedAlertIds = new Set(alertIds);
+  }
+
+  public async quarantineAlert(alertId: string): Promise<number> {
+    const normalized = alertId.trim();
+    if (normalized.length === 0) throw new Error('alertId must not be empty');
+    let removed = 0;
+    await this.enqueue(async () => {
+      this.quarantinedAlertIds.add(normalized);
+      const next = this.state.pending.filter((job) => job.alertId !== normalized);
+      removed = this.state.pending.length - next.length;
+      if (removed > 0) {
+        await this.persist({
+          schemaVersion: 1,
+          pending: next,
+          liveOrderExecutionAllowed: false,
+        });
+      }
+    });
+    return removed;
   }
 
   private get pendingPath(): string {
@@ -216,6 +240,10 @@ export class PersistentOutcomeScheduler {
     evidence: QualifiedAlertEvidenceRecord,
   ): Promise<readonly PendingOutcomeJob[]> {
     const validatedEvidence = parseQualifiedAlertEvidenceRecord(evidence);
+
+    if (validatedEvidence && this.quarantinedAlertIds.has(validatedEvidence.alertId)) {
+      return Object.freeze([]);
+    }
 
     if (!validatedEvidence) {
       throw new Error(
@@ -558,6 +586,7 @@ export class PersistentOutcomeScheduler {
     );
     const expectedByKey = new Map<string, PendingOutcomeJob>();
     for (const alert of integrity.alerts) {
+      if (this.quarantinedAlertIds.has(alert.alertId)) continue;
       for (const job of this.createJobsForEvidence(alert)) {
         if (!completedKeys.has(jobKey(job))) {
           expectedByKey.set(jobKey(job), job);
@@ -573,7 +602,7 @@ export class PersistentOutcomeScheduler {
     for (const [key, stored] of storedByKey) {
       const expected = expectedByKey.get(key);
       if (expected === undefined) {
-        if (completedKeys.has(key)) {
+        if (completedKeys.has(key) || this.quarantinedAlertIds.has(stored.alertId)) {
           removedCompletedJobs += 1;
           continue;
         }
