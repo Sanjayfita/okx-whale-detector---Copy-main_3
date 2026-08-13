@@ -195,15 +195,11 @@ describe('EvidenceCollectionRuntime', () => {
     intervalCallback?.();
     expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
 
-    releaseSecondPoll();
-    await vi.waitFor(() => {
-      expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-
+    // The blocked interval ticks are represented by one trailing poll rather
+    // than being discarded. It must sample a fresh clock when it actually
+    // starts, so advance the clock before releasing the blocked poll.
     now = 9_000;
-    intervalCallback?.();
+    releaseSecondPoll();
     await vi.waitFor(() => {
       expect(collector.processDueObservations).toHaveBeenCalledTimes(3);
     });
