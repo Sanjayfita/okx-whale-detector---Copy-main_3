@@ -279,7 +279,7 @@ describe('runEvidenceCollectCommand', () => {
     expect(lease.release).toHaveBeenCalledOnce();
   });
 
-  it('uses the in-memory OKX order-book stream as the default outcome price source', async () => {
+  it('uses the resilient OKX source with the in-memory order-book stream as primary', async () => {
     const lease = createLeaseHarness();
     let readPrice:
       | ((instrumentId: string, dueAt: number) => Promise<unknown>)
@@ -322,7 +322,7 @@ describe('runEvidenceCollectCommand', () => {
 
     const observedAt = Date.now();
     if (livePriceObserver === undefined || readPrice === undefined) {
-      throw new Error('Streaming price reader was not wired into the runtime');
+      throw new Error('Resilient price reader was not wired into the runtime');
     }
     livePriceObserver({
       instrumentId: 'BTC-USDT',

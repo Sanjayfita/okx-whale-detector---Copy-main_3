@@ -1,6 +1,7 @@
 import {
   createAlertOutcomeObservation,
   type ExcursionMeasurement,
+  type OutcomeMarketDataSource,
 } from './alertOutcomeObservation';
 import {
   PersistentOutcomeScheduler,
@@ -15,6 +16,7 @@ export interface LivePriceSnapshot {
   price: number;
   sourceMarketTimestamp?: number;
   sourceMarketAgeMs?: number;
+  sourceMarketDataSource?: OutcomeMarketDataSource;
   /** Optional only for injected/replay readers. Live OKX paths are derived. */
   maximumFavorableExcursionPercent?: number;
   maximumAdverseExcursionPercent?: number;
@@ -318,6 +320,7 @@ export class LiveEvidenceCollector {
       allowedObservationDelayMs: this.maximumObservationDelayMs,
       sourceMarketTimestamp: snapshot.sourceMarketTimestamp,
       sourceMarketAgeMs: snapshot.sourceMarketAgeMs,
+      sourceMarketDataSource: snapshot.sourceMarketDataSource,
       referencePrice: job.referencePrice,
       observedPrice: snapshot.price,
       rawReturnPercent,

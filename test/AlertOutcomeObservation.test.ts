@@ -35,6 +35,21 @@ describe('createAlertOutcomeObservation', () => {
     },
   );
 
+  it('round-trips auditable live market-data source provenance', () => {
+    const observation = createAlertOutcomeObservation({
+      ...input(1),
+      sourceMarketTimestamp: 1_060_000,
+      sourceMarketAgeMs: 0,
+      sourceMarketDataSource: 'OKX_REST_TICKER_MIDPOINT',
+    });
+
+    expect(parseAlertOutcomeObservation(observation)).toMatchObject({
+      sourceMarketTimestamp: 1_060_000,
+      sourceMarketAgeMs: 0,
+      sourceMarketDataSource: 'OKX_REST_TICKER_MIDPOINT',
+    });
+  });
+
   it('persists raw sampled path extrema and their timing', () => {
     const observation = createAlertOutcomeObservation({
       ...input(0.25),

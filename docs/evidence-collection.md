@@ -206,7 +206,7 @@ The immutable release is the authoritative artifact for final empirical review.
 
 ## Remaining limitations
 
-- The authoritative live collector now samples midpoint labels from the already-validated public OKX order-book WebSocket state rather than issuing a new REST ticker request at every horizon. This removes a deadline-critical network round trip while retaining local receipt time and OKX source-market timestamp provenance. These midpoint labels are still not executable fills.
+- The authoritative live collector uses a resilient OKX-only outcome-price source. Its primary label is the midpoint from the already-validated public OKX order-book WebSocket state. If that stream has not produced a post-due quote within a short grace period, a bounded, batched public OKX REST ticker request may supply the midpoint without extending the frozen observation window. Every observation persists its market-data source provenance so fallback-derived labels remain auditable and can be excluded in sensitivity analysis. If neither transport provides a fresh post-due quote in time, the job is still marked `MISSED` and collection fails closed. These midpoint labels are not executable fills.
   The 0.20% round-trip cost remains a fixed research assumption and does not model
   observation-specific spread, depth slippage, latency, partial fills, funding,
   minimum size, leverage, or liquidation.

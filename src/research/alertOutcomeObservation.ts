@@ -18,6 +18,11 @@ export type ExcursionMeasurement =
 export type OutcomePathSampling =
   'STANDARDIZED_HORIZON_SAMPLES' | 'LEGACY_UNSPECIFIED';
 
+export type OutcomeMarketDataSource =
+  | 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT'
+  | 'OKX_REST_TICKER_MIDPOINT'
+  | 'OKX_REST_TICKER_LAST';
+
 export const outcomeHorizonMilliseconds = (
   horizonMinutes: AlertOutcomeHorizonMinutes,
 ): number => Math.round(horizonMinutes * 60_000);
@@ -51,6 +56,8 @@ export interface AlertOutcomeObservation {
   allowedObservationDelayMs?: number;
   sourceMarketTimestamp?: number;
   sourceMarketAgeMs?: number;
+  /** Auditable transport/source used for the observed price when known. */
+  sourceMarketDataSource?: OutcomeMarketDataSource;
   referencePrice: number;
   observedPrice: number;
   rawReturnPercent: number;
@@ -187,6 +194,15 @@ export const createAlertOutcomeObservation = (
     );
   }
 
+  if (
+    input.sourceMarketDataSource !== undefined &&
+    input.sourceMarketDataSource !== 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT' &&
+    input.sourceMarketDataSource !== 'OKX_REST_TICKER_MIDPOINT' &&
+    input.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST'
+  ) {
+    throw new Error('Observation market-data source is invalid');
+  }
+
   const referencePrice = requireFinitePositive(
     input.referencePrice,
     'referencePrice',
@@ -302,6 +318,9 @@ export const createAlertOutcomeObservation = (
           sourceMarketAgeMs: input.sourceMarketAgeMs,
         }
       : {}),
+    ...(input.sourceMarketDataSource === undefined
+      ? {}
+      : { sourceMarketDataSource: input.sourceMarketDataSource }),
     referencePrice,
     observedPrice,
     rawReturnPercent,
@@ -358,6 +377,10 @@ export const parseAlertOutcomeObservation = (
       typeof value.sourceMarketTimestamp !== 'number') ||
     (value.sourceMarketAgeMs !== undefined &&
       typeof value.sourceMarketAgeMs !== 'number') ||
+    (value.sourceMarketDataSource !== undefined &&
+      value.sourceMarketDataSource !== 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT' &&
+      value.sourceMarketDataSource !== 'OKX_REST_TICKER_MIDPOINT' &&
+      value.sourceMarketDataSource !== 'OKX_REST_TICKER_LAST') ||
     typeof value.referencePrice !== 'number' ||
     typeof value.observedPrice !== 'number' ||
     typeof value.rawReturnPercent !== 'number' ||
@@ -409,6 +432,7 @@ export const parseAlertOutcomeObservation = (
       allowedObservationDelayMs: value.allowedObservationDelayMs,
       sourceMarketTimestamp: value.sourceMarketTimestamp,
       sourceMarketAgeMs: value.sourceMarketAgeMs,
+      sourceMarketDataSource: value.sourceMarketDataSource,
       referencePrice: value.referencePrice,
       observedPrice: value.observedPrice,
       rawReturnPercent: value.rawReturnPercent,

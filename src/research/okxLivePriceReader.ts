@@ -103,8 +103,8 @@ export class OKXLivePriceReader {
     if (bid !== undefined && ask !== undefined && ask < bid) {
       throw new Error('OKX ticker contains a crossed bid/ask quote');
     }
-    const price =
-      bid !== undefined && ask !== undefined ? bid + (ask - bid) / 2 : last;
+    const usesBidAskMidpoint = bid !== undefined && ask !== undefined;
+    const price = usesBidAskMidpoint ? bid + (ask - bid) / 2 : last;
     if (price === undefined || !Number.isFinite(price)) {
       throw new Error('OKX ticker does not contain a usable positive price');
     }
@@ -134,6 +134,9 @@ export class OKXLivePriceReader {
       observedAt: now,
       sourceMarketTimestamp: serverTimestamp,
       sourceMarketAgeMs: now - serverTimestamp,
+      sourceMarketDataSource: usesBidAskMidpoint
+        ? 'OKX_REST_TICKER_MIDPOINT'
+        : 'OKX_REST_TICKER_LAST',
       price,
     });
   };

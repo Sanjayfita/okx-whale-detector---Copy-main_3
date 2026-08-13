@@ -78,6 +78,7 @@ export class OKXStreamingPriceReader {
         observedAt: observation.observedAt,
         sourceMarketTimestamp: observation.sourceMarketTimestamp,
         sourceMarketAgeMs,
+        sourceMarketDataSource: 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT',
         price: observation.price,
       }),
     );

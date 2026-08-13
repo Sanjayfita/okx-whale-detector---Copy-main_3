@@ -19,6 +19,7 @@ describe('OKXStreamingPriceReader', () => {
       observedAt: 9_900,
       sourceMarketTimestamp: 9_880,
       sourceMarketAgeMs: 20,
+      sourceMarketDataSource: 'OKX_ORDER_BOOK_WEBSOCKET_MIDPOINT',
       price: 100.5,
     });
   });

@@ -17,7 +17,7 @@ import {
   type EvidenceEvaluationLeaseLike,
 } from '../research/evidenceEvaluationLease';
 import type { LivePriceSnapshot } from '../research/liveEvidenceCollector';
-import { OKXStreamingPriceReader } from '../research/okxStreamingPriceReader';
+import { OKXResilientPriceReader } from '../research/okxResilientPriceReader';
 import type { AppShutdownReason } from '../runtime/AppShutdownCoordinator';
 import { createRuntimeSessionId } from '../runtime/runtimeSession';
 
@@ -122,7 +122,7 @@ export const runEvidenceCollectCommand = async (
   const loadBootstrap =
     dependencies.loadBootstrap ?? loadEvidenceCollectBootstrap;
   const createPriceReader =
-    dependencies.createPriceReader ?? (() => new OKXStreamingPriceReader());
+    dependencies.createPriceReader ?? (() => new OKXResilientPriceReader());
   const createRuntimeBundle =
     dependencies.createRuntimeBundle ?? createEvidenceCollectRuntimeBundle;
   const createEvaluationLease =

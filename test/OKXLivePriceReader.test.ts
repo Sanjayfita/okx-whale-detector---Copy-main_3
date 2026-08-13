@@ -39,6 +39,7 @@ describe('OKXLivePriceReader', () => {
       observedAt: 2_001,
       sourceMarketTimestamp: 2_000,
       sourceMarketAgeMs: 1,
+      sourceMarketDataSource: 'OKX_REST_TICKER_MIDPOINT',
       price: 60_000,
     });
     expect(fetchFn).toHaveBeenCalledOnce();
@@ -64,7 +65,10 @@ describe('OKXLivePriceReader', () => {
     });
 
     const snapshot = await reader.readPrice('ETH-USDT', 5_000);
-    expect(snapshot.price).toBe(3_000.5);
+    expect(snapshot).toMatchObject({
+      sourceMarketDataSource: 'OKX_REST_TICKER_LAST',
+      price: 3_000.5,
+    });
   });
 
   it('rejects a crossed ticker quote instead of hiding it with the last price', async () => {
