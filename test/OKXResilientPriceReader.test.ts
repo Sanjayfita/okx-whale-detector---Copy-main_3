@@ -141,11 +141,12 @@ describe('OKXResilientPriceReader', () => {
       });
 
       const pending = reader.readPrice('BTC-USDT-SWAP', 10_000);
-      await vi.advanceTimersByTimeAsync(1_500);
-
-      await expect(pending).rejects.toThrow(
+      const rejection = expect(pending).rejects.toThrow(
         'No fresh OKX price is available from the WebSocket or REST fallback',
       );
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await rejection;
       expect(fetchFn).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
