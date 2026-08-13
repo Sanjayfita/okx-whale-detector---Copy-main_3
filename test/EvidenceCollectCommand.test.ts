@@ -374,7 +374,18 @@ describe('runEvidenceCollectCommand', () => {
       error: vi.fn(),
     });
 
-    expect(forwardedObserver).toBe(observe);
+    expect(typeof forwardedObserver).toBe('function');
+    if (typeof forwardedObserver !== 'function') {
+      throw new Error('Streaming market-price observer was not forwarded');
+    }
+    const observation = {
+      instrumentId: 'BTC-USDT',
+      observedAt: 1_000,
+      sourceMarketTimestamp: 1_000,
+      price: 100,
+    };
+    forwardedObserver(observation);
+    expect(observe).toHaveBeenCalledWith(observation);
     await handle.stop();
   });
 });
