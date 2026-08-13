@@ -353,59 +353,101 @@ export class PersistentOutcomeScheduler {
   public async completeObservation(
     observation: AlertOutcomeObservation,
   ): Promise<void> {
-    const validatedObservation = parseAlertOutcomeObservation(observation);
+    await this.completeObservations([observation]);
+  }
 
-    if (!validatedObservation) {
-      throw new Error(
-        'Only complete, execution-disabled observations may be saved',
-      );
+  /**
+   * Persists a group of already-captured observations as one durability batch.
+   *
+   * The outcomes append is flushed before pending-observations.json is replaced.
+   * If the process stops between those two durable steps, startup reconciliation
+   * treats outcomes.ndjson as authoritative and removes the already-completed
+   * jobs from pending state.
+   *
+   * Batching prevents one scheduler poll from performing one full pending-state
+   * rewrite per horizon, which can otherwise delay later deadline-sensitive
+   * samples as the evaluation grows.
+   */
+  public async completeObservations(
+    observations: readonly AlertOutcomeObservation[],
+  ): Promise<void> {
+    if (observations.length === 0) return;
+
+    const validatedObservations = observations.map((observation) => {
+      const validated = parseAlertOutcomeObservation(observation);
+      if (!validated) {
+        throw new Error(
+          'Only complete, execution-disabled observations may be saved',
+        );
+      }
+      return validated;
+    });
+
+    const observationKeys = validatedObservations.map(jobKey);
+    if (new Set(observationKeys).size !== observationKeys.length) {
+      throw new Error('Observation batch contains duplicate jobs');
     }
 
     await this.enqueue(async () => {
-      const key = jobKey(validatedObservation);
-      const scheduled = this.state.pending.find((job) => jobKey(job) === key);
-      if (scheduled === undefined) {
-        throw new Error('No matching pending observation job exists');
-      }
-      if (
-        scheduled.evaluationId !== validatedObservation.evaluationId ||
-        scheduled.instrumentId !== validatedObservation.instrumentId ||
-        scheduled.detectedAt !== validatedObservation.detectedAt ||
-        scheduled.referencePrice !== validatedObservation.referencePrice
-      ) {
-        throw new Error(
-          'Observation does not match its scheduled alert evidence',
-        );
-      }
+      const scheduledByKey = new Map(
+        this.state.pending.map((job) => [jobKey(job), job] as const),
+      );
 
-      const expectedDirectionalReturn =
-        scheduled.direction === 'BEARISH'
-          ? -validatedObservation.rawReturnPercent
-          : validatedObservation.rawReturnPercent;
-      if (
-        Math.abs(
-          validatedObservation.directionAdjustedReturnPercent -
-            expectedDirectionalReturn,
-        ) > Math.max(1e-9, Math.abs(expectedDirectionalReturn) * 1e-9)
-      ) {
-        throw new Error(
-          'Observation direction does not match its scheduled alert',
-        );
+      for (const validatedObservation of validatedObservations) {
+        const key = jobKey(validatedObservation);
+        const scheduled = scheduledByKey.get(key);
+        if (scheduled === undefined) {
+          throw new Error('No matching pending observation job exists');
+        }
+        if (
+          scheduled.evaluationId !== validatedObservation.evaluationId ||
+          scheduled.instrumentId !== validatedObservation.instrumentId ||
+          scheduled.detectedAt !== validatedObservation.detectedAt ||
+          scheduled.referencePrice !== validatedObservation.referencePrice
+        ) {
+          throw new Error(
+            'Observation does not match its scheduled alert evidence',
+          );
+        }
+
+        const expectedDirectionalReturn =
+          scheduled.direction === 'BEARISH'
+            ? -validatedObservation.rawReturnPercent
+            : validatedObservation.rawReturnPercent;
+        if (
+          Math.abs(
+            validatedObservation.directionAdjustedReturnPercent -
+              expectedDirectionalReturn,
+          ) > Math.max(1e-9, Math.abs(expectedDirectionalReturn) * 1e-9)
+        ) {
+          throw new Error(
+            'Observation direction does not match its scheduled alert',
+          );
+        }
       }
 
       await appendFile(
         this.outcomesPath,
-        `${JSON.stringify(validatedObservation)}\n`,
+        `${validatedObservations
+          .map((observation) => JSON.stringify(observation))
+          .join('\n')}\n`,
         { encoding: 'utf8', flush: true },
       );
-      const completed =
-        this.completedByAlertId.get(validatedObservation.alertId) ?? [];
-      completed.push(validatedObservation);
-      completed.sort((left, right) => left.observedAt - right.observedAt);
-      this.completedByAlertId.set(validatedObservation.alertId, completed);
+
+      for (const validatedObservation of validatedObservations) {
+        const completed =
+          this.completedByAlertId.get(validatedObservation.alertId) ?? [];
+        completed.push(validatedObservation);
+        completed.sort((left, right) => left.observedAt - right.observedAt);
+        this.completedByAlertId.set(validatedObservation.alertId, completed);
+      }
+
+      const completedKeys = new Set(observationKeys);
       await this.persist({
         schemaVersion: 1,
-        pending: this.state.pending.filter((job) => jobKey(job) !== key),
+        pending: this.state.pending.filter(
+          (job) => !completedKeys.has(jobKey(job)),
+        ),
         liveOrderExecutionAllowed: false,
       });
     });

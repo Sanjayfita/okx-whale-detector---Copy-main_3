@@ -242,6 +242,7 @@ describe('LiveEvidenceCollector', () => {
       maximumAdverseExcursionPercent: 0,
       excursionMeasurement: 'UNAVAILABLE' as const,
     }));
+    const completeObservations = vi.spyOn(scheduler, 'completeObservations');
     const collector = new LiveEvidenceCollector({
       recorder: new QualifiedAlertRecorder({ evaluationDirectory: directory }),
       scheduler,
@@ -257,6 +258,8 @@ describe('LiveEvidenceCollector', () => {
     expect(await collector.processDueObservations(61_000)).toBe(2);
     expect(readPrice).toHaveBeenCalledOnce();
     expect(readPrice).toHaveBeenCalledWith('BTC-USDT', 61_000);
+    expect(completeObservations).toHaveBeenCalledOnce();
+    expect(completeObservations.mock.calls[0]?.[0]).toHaveLength(2);
     expect(scheduler.getPendingJobs()).toHaveLength(8);
   });
 

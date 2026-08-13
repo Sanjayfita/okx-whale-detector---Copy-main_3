@@ -147,7 +147,7 @@ describe('EvidenceCollectionRuntime', () => {
     await runtime.stop();
   });
 
-  it('samples the clock when queued outcome work actually begins', async () => {
+  it('coalesces timer ticks while a prior outcome poll is still running', async () => {
     let now = 1_000;
     let intervalCallback: (() => void) | undefined;
     let releaseSecondPoll!: () => void;
@@ -187,11 +187,23 @@ describe('EvidenceCollectionRuntime', () => {
       expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
     });
 
+    // Timer ticks that arrive while the second poll is blocked must not queue
+    // stale duplicate polls behind it.
     now = 7_000;
     intervalCallback?.();
-    now = 9_000;
-    releaseSecondPoll();
+    intervalCallback?.();
+    intervalCallback?.();
+    expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
 
+    releaseSecondPoll();
+    await vi.waitFor(() => {
+      expect(collector.processDueObservations).toHaveBeenCalledTimes(2);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    now = 9_000;
+    intervalCallback?.();
     await vi.waitFor(() => {
       expect(collector.processDueObservations).toHaveBeenCalledTimes(3);
     });

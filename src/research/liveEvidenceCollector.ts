@@ -1,5 +1,6 @@
 import {
   createAlertOutcomeObservation,
+  type AlertOutcomeObservation,
   type ExcursionMeasurement,
   type OutcomeMarketDataSource,
 } from './alertOutcomeObservation';
@@ -21,6 +22,11 @@ export interface LivePriceSnapshot {
   maximumFavorableExcursionPercent?: number;
   maximumAdverseExcursionPercent?: number;
   excursionMeasurement?: ExcursionMeasurement;
+}
+
+interface CapturedOutcomeObservation {
+  readonly job: PendingOutcomeJob;
+  readonly observation: AlertOutcomeObservation;
 }
 
 export interface LiveEvidenceCollectorDependencies {
@@ -134,12 +140,29 @@ export class LiveEvidenceCollector {
       jobsByInstrument.set(job.instrumentId, jobs);
     }
 
-    const completedByInstrument = await Promise.all(
+    const capturedByInstrument = await Promise.all(
       [...jobsByInstrument.entries()].map(([instrumentId, jobs]) =>
-        this.processInstrumentJobs(instrumentId, jobs),
+        this.captureInstrumentJobs(instrumentId, jobs),
       ),
     );
-    return completedByInstrument.reduce((sum, count) => sum + count, 0);
+    const captured = capturedByInstrument.flat();
+    if (captured.length === 0) return 0;
+
+    try {
+      await this.dependencies.scheduler.completeObservations(
+        captured.map(({ observation }) => observation),
+      );
+    } catch (error: unknown) {
+      for (const { job } of captured) {
+        this.reportObservationErrorOnce(error, job);
+      }
+      return 0;
+    }
+
+    for (const { job } of captured) {
+      this.reportedJobErrors.delete(this.getJobKey(job));
+    }
+    return captured.length;
   }
 
   public getMissedObservationCount(): number {
@@ -162,44 +185,62 @@ export class LiveEvidenceCollector {
     return nextDueAt;
   }
 
-  private async processInstrumentJobs(
+  private async captureInstrumentJobs(
     instrumentId: string,
     jobs: readonly PendingOutcomeJob[],
-  ): Promise<number> {
-    const latestDueAt = jobs.reduce(
+  ): Promise<readonly CapturedOutcomeObservation[]> {
+    const orderedJobs = [...jobs].sort(
+      (left, right) =>
+        left.dueAt - right.dueAt ||
+        left.alertId.localeCompare(right.alertId) ||
+        left.horizonMinutes - right.horizonMinutes,
+    );
+    const latestDueAt = orderedJobs.reduce(
       (latest, job) => Math.max(latest, job.dueAt),
       0,
     );
+
     let snapshot: LivePriceSnapshot;
     try {
       snapshot = await this.dependencies.readPrice(instrumentId, latestDueAt);
     } catch (error: unknown) {
-      for (const job of jobs) {
+      for (const job of orderedJobs) {
         this.reportObservationErrorOnce(error, job);
       }
-      return 0;
+      return Object.freeze([]);
     }
 
-    let completed = 0;
-    for (const job of jobs) {
-      const jobKey = this.getJobKey(job);
+    const captured: CapturedOutcomeObservation[] = [];
+    for (const job of orderedJobs) {
       try {
-        await this.processObservation(job, snapshot);
-        this.reportedJobErrors.delete(jobKey);
-        completed += 1;
+        const priorCapturedForAlert = captured
+          .filter(({ job: capturedJob }) => capturedJob.alertId === job.alertId)
+          .map(({ observation }) => observation);
+        captured.push(
+          Object.freeze({
+            job,
+            observation: this.createObservation(
+              job,
+              snapshot,
+              priorCapturedForAlert,
+            ),
+          }),
+        );
       } catch (error: unknown) {
-        // A failed observation remains pending and may be retried while its
+        // A failed capture remains pending and may be retried while its
         // timestamp window is still valid. One bad job cannot block others.
         this.reportObservationErrorOnce(error, job);
       }
     }
-    return completed;
+
+    return Object.freeze(captured);
   }
 
-  private async processObservation(
+  private createObservation(
     job: PendingOutcomeJob,
     snapshot: LivePriceSnapshot,
-  ): Promise<void> {
+    additionalPathObservations: readonly AlertOutcomeObservation[] = [],
+  ): AlertOutcomeObservation {
     if (snapshot.instrumentId !== job.instrumentId) {
       throw new Error(
         'Price snapshot instrument does not match the pending job',
@@ -261,6 +302,10 @@ export class LiveEvidenceCollector {
           observedAt: observation.observedAt,
           rawReturnPercent: observation.rawReturnPercent,
         })),
+      ...additionalPathObservations.map((observation) => ({
+        observedAt: observation.observedAt,
+        rawReturnPercent: observation.rawReturnPercent,
+      })),
       { observedAt: snapshot.observedAt, rawReturnPercent },
     ];
     const maximumUpwardExcursionPercent = Math.max(
@@ -308,7 +353,7 @@ export class LiveEvidenceCollector {
         ? timeToMaximumDownwardExcursionMs
         : timeToMaximumUpwardExcursionMs;
 
-    const observation = createAlertOutcomeObservation({
+    return createAlertOutcomeObservation({
       evaluationId: job.evaluationId,
       alertId: job.alertId,
       instrumentId: job.instrumentId,
@@ -337,8 +382,6 @@ export class LiveEvidenceCollector {
       pathSampling: 'STANDARDIZED_HORIZON_SAMPLES',
       excursionMeasurement: 'OBSERVED_PATH',
     });
-
-    await this.dependencies.scheduler.completeObservation(observation);
   }
 
   private reportObservationErrorOnce(

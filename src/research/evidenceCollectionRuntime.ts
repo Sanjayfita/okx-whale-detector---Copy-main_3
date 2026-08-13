@@ -59,6 +59,7 @@ export class EvidenceCollectionRuntime {
   private timer?: NodeJS.Timeout;
   private workChain: Promise<void> = Promise.resolve();
   private outcomeWorkChain: Promise<void> = Promise.resolve();
+  private outcomePollPending = false;
   private readonly pendingAlphaEvidence = new Map<
     string,
     PendingAlphaEvidence
@@ -173,20 +174,31 @@ export class EvidenceCollectionRuntime {
 
     this.timer = this.setIntervalFn(() => {
       this.prunePendingAlphaEvidence(this.clock());
+
+      // Coalesce recurring timer ticks while one outcome poll is already
+      // running or queued. A slow durability flush must not create an
+      // ever-growing chain of stale polls behind the deadline-sensitive work.
+      if (this.outcomePollPending) return;
+      this.outcomePollPending = true;
+
       const result = this.enqueueOutcome(async () => {
         const now = this.clock();
         await this.options.collector.processDueObservations(now);
       });
-      void result.then((workResult) => {
-        if (!workResult.succeeded) {
-          void this.failClosed(
-            workResult.error instanceof Error
-              ? workResult.error
-              : new Error(String(workResult.error)),
-            'OUTCOME_PROCESSING_FAILED',
-          );
-        }
-      });
+      void result
+        .then((workResult) => {
+          if (!workResult.succeeded) {
+            void this.failClosed(
+              workResult.error instanceof Error
+                ? workResult.error
+                : new Error(String(workResult.error)),
+              'OUTCOME_PROCESSING_FAILED',
+            );
+          }
+        })
+        .finally(() => {
+          this.outcomePollPending = false;
+        });
     }, this.intervalMs);
   }
 
@@ -407,6 +419,7 @@ export class EvidenceCollectionRuntime {
     }
 
     await Promise.all([this.workChain, this.outcomeWorkChain]);
+    this.outcomePollPending = false;
     if (this.pendingAlphaEvidence.size > 0) {
       this.onError(
         new Error(
