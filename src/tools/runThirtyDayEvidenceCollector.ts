@@ -111,9 +111,11 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  let heartbeatTimer: NodeJS.Timeout | undefined;
-  let statusTimer: NodeJS.Timeout | undefined;
-  let completionTimer: NodeJS.Timeout | undefined;
+  const timers: {
+    heartbeat?: NodeJS.Timeout;
+    status?: NodeJS.Timeout;
+    completion?: NodeJS.Timeout;
+  } = {};
   const handle = await runEvidenceCollectCommand(evaluationId, {
     createAppRuntime,
     registerSignal: () => undefined,
@@ -123,9 +125,9 @@ const main = async (): Promise<void> => {
   const stop = async (reason: 'SIGINT' | 'SIGTERM' | 'APPLICATION_CLOSE'): Promise<void> => {
     if (stopping) return;
     stopping = true;
-    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
-    if (statusTimer !== undefined) clearInterval(statusTimer);
-    if (completionTimer !== undefined) clearTimeout(completionTimer);
+    if (timers.heartbeat !== undefined) clearInterval(timers.heartbeat);
+    if (timers.status !== undefined) clearInterval(timers.status);
+    if (timers.completion !== undefined) clearTimeout(timers.completion);
     try {
       await handle.stop(reason);
     } finally {
@@ -142,14 +144,14 @@ const main = async (): Promise<void> => {
   process.once('SIGINT', signalHandler);
   process.once('SIGTERM', signalHandler);
 
-  heartbeatTimer = setInterval(() => {
+  timers.heartbeat = setInterval(() => {
     void checkpointStore.heartbeat(Date.now()).catch((error: unknown) => {
       console.error('Collector checkpoint heartbeat failed:', error);
       process.exitCode = 1;
     });
   }, 60_000);
 
-  statusTimer = setInterval(() => {
+  timers.status = setInterval(() => {
     const current = checkpointStore.get();
     const now = Date.now();
     console.log(
@@ -161,13 +163,13 @@ const main = async (): Promise<void> => {
   }, 5 * 60_000);
 
   const completionDelay = Math.max(1, checkpoint.targetEndAt - Date.now());
-  completionTimer = setTimeout(() => {
+  timers.completion = setTimeout(() => {
     console.log('30-day target reached; closing admissions and quarantining only incomplete end-of-period episodes...');
     void (async () => {
       if (stopping) return;
       stopping = true;
-      if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
-      if (statusTimer !== undefined) clearInterval(statusTimer);
+      if (timers.heartbeat !== undefined) clearInterval(timers.heartbeat);
+      if (timers.status !== undefined) clearInterval(timers.status);
       await handle.finishPeriod();
       await checkpointStore.markCompleted(Date.now());
       console.log('30-day forward-validation admission period completed cleanly.');
