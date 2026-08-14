@@ -19,8 +19,16 @@ function Invoke-Native {
   )
 
   Write-Section $Name
-  & $File @Arguments
-  $exitCode = $LASTEXITCODE
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & $File @Arguments
+    $exitCode = $LASTEXITCODE
+  }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
   if ($exitCode -ne 0) {
     throw "$Name failed with exit code $exitCode"
   }
@@ -39,8 +47,11 @@ function Remove-KnownTemporaryLauncher {
   $temporaryPath = Join-Path $Repo 'FIX-30DAY-AND-START.ps1'
   if (-not (Test-Path -LiteralPath $temporaryPath)) { return }
 
-  & git.exe ls-files --error-unmatch -- 'FIX-30DAY-AND-START.ps1' *> $null
-  if ($LASTEXITCODE -eq 0) {
+  $tracked = @(& git.exe ls-files -- 'FIX-30DAY-AND-START.ps1')
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Could not determine whether FIX-30DAY-AND-START.ps1 is tracked.'
+  }
+  if ($tracked.Count -gt 0) {
     throw 'FIX-30DAY-AND-START.ps1 is tracked unexpectedly; refusing to delete it.'
   }
 
