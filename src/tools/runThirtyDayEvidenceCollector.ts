@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { createAppRuntime } from '../index';
 import { loadEvidenceCollectBootstrap } from '../research/evidenceCollectBootstrap';
 import { EvidenceCollectorCheckpointStore } from '../research/evidenceCollectorCheckpoint';
+import { planEvidenceCollectorDeadline } from '../research/evidenceCollectorDeadline';
 import { EvidenceCoverageGapStore } from '../research/evidenceCoverageGap';
 import { EvidenceQuarantineStore } from '../research/evidenceQuarantine';
 import { PersistentOutcomeScheduler } from '../research/persistentOutcomeScheduler';
@@ -106,7 +107,9 @@ const main = async (): Promise<void> => {
       gapStore,
     });
     await checkpointStore.markCompleted(now);
-    console.log(`30-day target already elapsed; quarantined ${quarantined} incomplete episode(s) and finalized the collection period.`);
+    console.log(
+      `30-day target already elapsed; quarantined ${quarantined} incomplete episode(s) and finalized the collection period.`,
+    );
     console.log('Live order execution remains disabled.');
     return;
   }
@@ -122,7 +125,9 @@ const main = async (): Promise<void> => {
   });
 
   let stopping = false;
-  const stop = async (reason: 'SIGINT' | 'SIGTERM' | 'APPLICATION_CLOSE'): Promise<void> => {
+  const stop = async (
+    reason: 'SIGINT' | 'SIGTERM' | 'APPLICATION_CLOSE',
+  ): Promise<void> => {
     if (stopping) return;
     stopping = true;
     if (timers.heartbeat !== undefined) clearInterval(timers.heartbeat);
@@ -162,22 +167,33 @@ const main = async (): Promise<void> => {
     );
   }, 5 * 60_000);
 
-  const completionDelay = Math.max(1, checkpoint.targetEndAt - Date.now());
-  timers.completion = setTimeout(() => {
-    console.log('30-day target reached; closing admissions and quarantining only incomplete end-of-period episodes...');
-    void (async () => {
-      if (stopping) return;
-      stopping = true;
-      if (timers.heartbeat !== undefined) clearInterval(timers.heartbeat);
-      if (timers.status !== undefined) clearInterval(timers.status);
-      await handle.finishPeriod();
-      await checkpointStore.markCompleted(Date.now());
-      console.log('30-day forward-validation admission period completed cleanly.');
-    })().catch((error: unknown) => {
-      console.error('Final 30-day collector shutdown failed:', error);
-      process.exitCode = 1;
-    });
-  }, completionDelay);
+  const finalizePeriod = async (): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    if (timers.heartbeat !== undefined) clearInterval(timers.heartbeat);
+    if (timers.status !== undefined) clearInterval(timers.status);
+    if (timers.completion !== undefined) clearTimeout(timers.completion);
+    console.log(
+      '30-day target reached; closing admissions and quarantining only incomplete end-of-period episodes...',
+    );
+    await handle.finishPeriod();
+    await checkpointStore.markCompleted(Date.now());
+    console.log('30-day forward-validation admission period completed cleanly.');
+  };
+
+  const scheduleCompletionCheck = (): void => {
+    if (stopping) return;
+    const plan = planEvidenceCollectorDeadline(Date.now(), checkpoint.targetEndAt);
+    if (plan.reached) {
+      void finalizePeriod().catch((error: unknown) => {
+        console.error('Final 30-day collector shutdown failed:', error);
+        process.exitCode = 1;
+      });
+      return;
+    }
+    timers.completion = setTimeout(scheduleCompletionCheck, plan.delayMs);
+  };
+  scheduleCompletionCheck();
 
   console.log('30-DAY FORWARD VALIDATION COLLECTOR STARTED');
   console.log(`Evaluation ID: ${evaluationId}`);
@@ -192,7 +208,9 @@ const main = async (): Promise<void> => {
 
 if (require.main === module) {
   void main().catch((error: unknown) => {
-    console.error(`30-day evidence collector failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `30-day evidence collector failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exitCode = 1;
   });
 }
