@@ -1,4 +1,12 @@
 @echo off
-schtasks /Delete /F /TN "OKX 30-Day Evidence Collector"
-echo Reboot/logon resume task removed.
+setlocal EnableExtensions
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-30-DAY-EVIDENCE.ps1" -RemoveResumeTask
+if errorlevel 1 (
+  echo.
+  echo Could not remove the task automatically.
+  pause
+  exit /b 1
+)
+echo.
+echo Automatic logon/reboot resume is disabled.
 pause
